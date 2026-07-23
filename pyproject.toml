@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "standkit"
-version = "0.2.0"
+version = "0.1.0"
 description = "Свободное ядро (MIT) для управления жизненным циклом локальных и удалённых стендов BPMSoft: headless start/stop/restart, health-пробы, логи, реестр стендов. Часть экосистемы BPMkit."
 readme = "README.md"
 license = { text = "MIT" }
@@ -22,7 +22,7 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/thinkquattro/BPMkitStand"
+Homepage = "https://github.com/thinkquattro/standkit"
 "Экосистема BPMkit" = "https://github.com/thinkquattro/BPMkit-dev"
 
 [project.optional-dependencies]
@@ -35,8 +35,14 @@ dev = ["pytest>=7.0"]
 standkit-agent = "standkit_agent.__main__:main"
 standkit-gui = "standkit_gui.__main__:main"
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 include = ["standkit*", "standkit_agent*", "standkit_gui*"]
+
+[tool.setuptools.package-data]
+standkit_gui = ["assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

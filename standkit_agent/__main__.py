@@ -33,7 +33,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from standkit.registry import Registry
+from standkit.registry import Registry, default_registry_path
 from standkit.secrets import SecretError, get_secret
 from standkit_agent.security import (
     Authenticator,
@@ -71,8 +71,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8765, help="порт (по умолчанию 8765)")
     parser.add_argument(
         "--registry",
-        default="projects.json",
-        help="путь к реестру стендов, которыми управляет этот агент (по умолчанию ./projects.json)",
+        default=None,
+        help=(
+            "путь к реестру стендов, которыми управляет этот агент (по умолчанию — "
+            "тот же реестр, что резолвит BPMkit MCP: env BPMSOFT_PROJECTS_FILE, "
+            "иначе %%APPDATA%%\\BPMkit\\projects.json / ~/.config/BPMkit/projects.json, "
+            "иначе ./projects.json; см. standkit.registry.default_registry_path)"
+        ),
     )
     parser.add_argument(
         "--token-ref",
@@ -129,7 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    registry = Registry.load(args.registry)
+    registry_path = Path(args.registry) if args.registry else default_registry_path()
+    registry = Registry.load(registry_path)
 
     control_token = _resolve_token(args.token_ref, label="control-токена агента")
     readonly_token = (
@@ -158,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         f"[standkit-agent] слушаю {args.host}:{args.port} "
         f"(tls={'on' if tls_enabled else 'off'}"
         f"{'+mtls' if tls_enabled and args.tls_client_ca else ''}), "
-        f"реестр={args.registry}, стендов={len(registry)}, readonly-токен={'да' if readonly_token else 'нет'}"
+        f"реестр={registry_path}, стендов={len(registry)}, readonly-токен={'да' if readonly_token else 'нет'}"
     )
 
     try:

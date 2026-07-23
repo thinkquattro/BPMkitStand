@@ -10,8 +10,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="standkit-gui", description="Диспетчер стендов standkit (PySide6)")
     parser.add_argument(
         "--registry",
-        default="projects.json",
-        help="путь к реестру стендов (по умолчанию ./projects.json)",
+        default=None,
+        help=(
+            "путь к реестру стендов (по умолчанию — тот же реестр, что резолвит "
+            "BPMkit MCP: env BPMSOFT_PROJECTS_FILE, иначе "
+            "%%APPDATA%%\\BPMkit\\projects.json / ~/.config/BPMkit/projects.json, "
+            "иначе ./projects.json)"
+        ),
     )
     args = parser.parse_args(argv)
 

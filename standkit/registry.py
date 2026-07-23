@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -22,9 +24,72 @@ from standkit.models import Stand
 
 _DEFAULT_SCHEMA_VERSION = 1
 
+# Имя папки с общими файлами экосистемы BPMkit (реестр стендов, конфиг GUI и
+# т.п.) — единая точка правды между standkit и BPMkit MCP.
+_BPMKIT_DIR_NAME = "BPMkit"
+_REGISTRY_FILE_NAME = "projects.json"
+_ENV_REGISTRY_VAR = "BPMSOFT_PROJECTS_FILE"
+
 
 class RegistryError(Exception):
     """Ошибки чтения/записи/валидации реестра стендов."""
+
+
+def bpmkit_config_dir() -> Path:
+    """
+    Каталог общих файлов экосистемы BPMkit (реестр стендов, конфиг GUI и т.п.)
+    — та же папка, которую резолвит клиентский MCP BPMkit:
+
+    - Windows: ``%APPDATA%\\BPMkit``;
+    - POSIX: ``$XDG_CONFIG_HOME/BPMkit`` либо, если переменная не задана,
+      ``~/.config/BPMkit``.
+
+    Функция ничего не создаёт на диске — только считает путь.
+    """
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return base / _BPMKIT_DIR_NAME
+
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / _BPMKIT_DIR_NAME
+
+
+def default_registry_path() -> Path:
+    """
+    Резолвит путь к реестру стендов ТОЙ ЖЕ цепочкой, что использует BPMkit MCP,
+    чтобы standkit и кит смотрели в один и тот же ``projects.json`` без
+    дополнительной настройки:
+
+    1. env ``BPMSOFT_PROJECTS_FILE`` — если задана и путь существует, он в
+       приоритете;
+    2. канонический путь кита: ``%APPDATA%\\BPMkit\\projects.json`` (Windows)
+       или ``$XDG_CONFIG_HOME/BPMkit/projects.json`` / ``~/.config/BPMkit/
+       projects.json`` (POSIX);
+    3. фолбэк ``./projects.json`` в текущей рабочей директории — для
+       standalone-запуска standkit без установленного кита.
+
+    Возвращает первый СУЩЕСТВУЮЩИЙ файл из цепочки; если ни один не
+    существует — возвращает канонический путь п.2 (куда реестр следовало бы
+    положить), чтобы вызывающий код мог использовать его как путь для
+    первого создания реестра.
+    """
+    env_value = os.environ.get(_ENV_REGISTRY_VAR)
+    if env_value:
+        env_path = Path(env_value)
+        if env_path.exists():
+            return env_path
+
+    canonical = bpmkit_config_dir() / _REGISTRY_FILE_NAME
+    if canonical.exists():
+        return canonical
+
+    fallback = Path.cwd() / _REGISTRY_FILE_NAME
+    if fallback.exists():
+        return fallback
+
+    return canonical
 
 
 class Registry:
