@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "standkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Свободное ядро (MIT) для управления жизненным циклом локальных и удалённых стендов BPMSoft: headless start/stop/restart, health-пробы, логи, реестр стендов. Часть экосистемы BPMkit."
 readme = "README.md"
 license = { text = "MIT" }
@@ -22,7 +22,7 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/thinkquattro/standkit"
+Homepage = "https://github.com/thinkquattro/BPMkitStand"
 "Экосистема BPMkit" = "https://github.com/thinkquattro/BPMkit-dev"
 
 [project.optional-dependencies]
