@@ -22,10 +22,18 @@
   // запроса (если он есть — значит, страница только что открыта по ссылке
   // из standkit_hub.__main__ и сервер поставил cookie в этом же обмене).
   const urlParams = new URLSearchParams(window.location.search);
-  let sessionToken = urlParams.get("t") || sessionStorage.getItem("standkit_token") || "";
-  if (urlParams.get("t")) {
+  // Токен сервер инжектит в <meta name="standkit-token"> для аутентифицированного
+  // запроса (валидный ?t= ИЛИ session-cookie) — работает и после refresh/чистого "/".
+  const metaEl = document.querySelector('meta[name="standkit-token"]');
+  const metaToken =
+    metaEl && metaEl.content && metaEl.content !== "__STANDKIT_TOKEN__" ? metaEl.content : "";
+  let sessionToken =
+    metaToken || urlParams.get("t") || sessionStorage.getItem("standkit_token") || "";
+  if (sessionToken) {
     sessionStorage.setItem("standkit_token", sessionToken);
-    // Токен в адресной строке не нужен — cookie уже выставлена сервером.
+  }
+  if (urlParams.get("t")) {
+    // Токен в адресной строке больше не нужен — уберём из URL.
     window.history.replaceState({}, "", window.location.pathname);
   }
 

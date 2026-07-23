@@ -150,27 +150,38 @@ def test_get_api_with_cookie_token_is_ok(tmp_path):
 # --- root: установка cookie по токену в query ---
 
 
-def test_root_with_valid_query_token_sets_cookie_and_redirects(tmp_path):
+def test_root_with_valid_query_token_sets_cookie_and_injects_token(tmp_path):
+    # По ссылке /?t=<token> хаб отдаёт index НАПРЯМУЮ (без редиректа — иначе токен
+    # теряется до загрузки JS), ставит session-cookie и инжектит токен в <meta>,
+    # чтобы фронтенд мог класть X-Standkit-Token в мутации.
     base_url, token, *_ = _start_hub(tmp_path)
-
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *args, **kwargs):
-            return None
-
-    opener = urllib.request.build_opener(_NoRedirect)
     try:
-        resp = opener.open(f"{base_url}/?t={token}", timeout=3.0)
+        resp = urllib.request.urlopen(f"{base_url}/?t={token}", timeout=3.0)
         status = resp.status
         headers = dict(resp.headers)
+        body = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         status = exc.code
         headers = dict(exc.headers)
+        body = exc.read().decode("utf-8")
 
-    assert status == 302
+    assert status == 200
     assert "standkit_session=" + token in headers.get("Set-Cookie", "")
     assert "HttpOnly" in headers.get("Set-Cookie", "")
     assert "SameSite=Strict" in headers.get("Set-Cookie", "")
-    assert headers.get("Location") == "/"
+    assert headers.get("Location") is None
+    # токен инжектнут в страницу, плейсхолдер заменён
+    assert token in body
+    assert "__STANDKIT_TOKEN__" not in body
+
+
+def test_root_without_token_does_not_leak_token(tmp_path):
+    # Неаутентифицированный GET "/" отдаёт index, но БЕЗ токена (плейсхолдер пуст).
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(base_url, "/")
+    assert status == 200
+    assert token not in (body or "")
+    assert "__STANDKIT_TOKEN__" not in (body or "")
 
 
 def test_root_without_token_serves_index_without_auth(tmp_path):

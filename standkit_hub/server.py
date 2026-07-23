@@ -156,14 +156,24 @@ def make_handler(
 
         # --- статика ---
 
-        def _serve_index(self) -> None:
+        def _serve_index(self, inject_token: Optional[str] = None, set_cookie: bool = False) -> None:
             index_path = web_dir / "index.html"
             if not index_path.is_file():
                 self._send_json(500, {"error": "index.html не найден в пакете хаба"})
                 return
-            body = index_path.read_bytes()
+            # Токен инжектим в <meta> ТОЛЬКО аутентифицированному запросу (см.
+            # _handle_root). Неаутентифицированному — плейсхолдер очищается в пустоту,
+            # токен не утекает.
+            text = index_path.read_text(encoding="utf-8")
+            text = text.replace("__STANDKIT_TOKEN__", inject_token or "")
+            body = text.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            if set_cookie:
+                self.send_header(
+                    "Set-Cookie",
+                    f"{_security.SESSION_COOKIE_NAME}={session_token}; HttpOnly; SameSite=Strict; Path=/",
+                )
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             try:
@@ -190,16 +200,17 @@ def make_handler(
         def _handle_root(self, parsed) -> None:
             qs = parse_qs(parsed.query)
             token = (qs.get(_security.TOKEN_QUERY_PARAM) or [None])[0]
-            if token and _security.tokens_match(token, session_token):
-                self.send_response(302)
-                self.send_header(
-                    "Set-Cookie",
-                    f"{_security.SESSION_COOKIE_NAME}={session_token}; HttpOnly; SameSite=Strict; Path=/",
-                )
-                self.send_header("Location", "/")
-                self.end_headers()
-                return
-            self._serve_index()
+            authed_query = bool(token and _security.tokens_match(token, session_token))
+            cookie_tok = _security.extract_cookie_token(self.headers.get("Cookie", ""))
+            authed_cookie = _security.tokens_match(cookie_tok, session_token)
+            if authed_query or authed_cookie:
+                # Аутентифицированный запрос: отдаём index с токеном в <meta>, чтобы
+                # JS мог класть X-Standkit-Token в мутации (cookie HttpOnly, JS её не
+                # читает). Cookie ставим, если пришли по ссылке ?t=. Без редиректа —
+                # иначе токен теряется до загрузки JS (был баг 403 на мутациях).
+                self._serve_index(inject_token=session_token, set_cookie=authed_query)
+            else:
+                self._serve_index()
 
         # --- API: стенды ---
 
