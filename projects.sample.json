@@ -1,8 +1,7 @@
 {
-  "_comment": "Образец схемы реестра стендов standkit. Реальный реестр (projects.json) в git не коммитится — см. .gitignore. Скопируйте этот файл в projects.json и заполните под свои стенды.",
-  "_schema_version": 1,
+  "_comment": "Образец схемы реестра стендов standkit (формат BPMkit: стенды под ключом 'projects'). Реальный реестр (projects.json) в git не коммитится — см. .gitignore. Скопируйте этот файл в projects.json и заполните под свои стенды.",
   "default": "",
-  "stands": {
+  "projects": {
     "example-local": {
       "_comment": "Пример стенда, поднимаемого локальным ядром standkit (transport=local)",
       "transport": "local",
