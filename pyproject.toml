@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "standkit"
+version = "0.1.0"
+description = "Свободное ядро (MIT) для управления жизненным циклом локальных и удалённых стендов BPMSoft: headless start/stop/restart, health-пробы, логи, реестр стендов. Часть экосистемы BPMkit."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "standkit contributors" }]
+requires-python = ">=3.10"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Operating System :: OS Independent",
+    "Intended Audience :: System Administrators",
+    "Topic :: System :: Systems Administration",
+]
+# Ядро и агент — БЕЗ обязательных сторонних зависимостей (stdlib-only).
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/thinkquattro/standkit"
+"Экосистема BPMkit" = "https://github.com/thinkquattro/BPMkit-dev"
+
+[project.optional-dependencies]
+# GUI-оболочка (standkit_gui) — единственное место, где нужен Qt.
+gui = ["PySide6>=6.5"]
+# Инструменты разработки/тестирования ядра и агента.
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+standkit-agent = "standkit_agent.__main__:main"
+standkit-gui = "standkit_gui.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["standkit*", "standkit_agent*", "standkit_gui*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

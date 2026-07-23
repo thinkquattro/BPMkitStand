@@ -1,0 +1,32 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.pytest_cache
+.mypy_cache/
+.ruff_cache/
+
+# --- standkit: реальный реестр стендов и рабочие данные — НЕ коммитить ---
+projects.json
+*.pid
+*.log
+logs/
+
+# --- секреты ---
+secrets.enc
+secrets.manifest.json
+*.pem
+*.key
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,111 @@
+# Шаблон systemd-unit для standkit_agent на Linux-хосте стенда.
+#
+# БЕЗОПАСНОСТЬ: агент управляет процессами на хосте стенда (start/stop/restart)
+# — RCE-поверхность по дизайну. Этот unit-файл настроен по принципу наименьших
+# привилегий (least privilege) для DevSecOps-развёртывания. НЕ запускать как
+# root/LocalSystem — только выделенный сервисный аккаунт без прав sudo.
+#
+# Установка:
+#   1) создать выделенного пользователя без shell/логина:
+#        sudo useradd --system --no-create-home --shell /usr/sbin/nologin standkit
+#   2) выдать этому пользователю доступ ТОЛЬКО к тому, что реально нужно:
+#        - каталог(и) стенда(ов), которыми управляет агент (stand_dir из реестра);
+#        - каталог run/ (pid-файлы) и log/ (лог-файлы стенда);
+#        - каталог с TLS-сертификатом/ключом агента (ключ — chmod 600, владелец standkit);
+#        - НЕ давать доступ к остальной файловой системе.
+#   3) подставить реальные пути ниже (ExecStart, ReadWritePaths, TLS-флаги)
+#      вместо плейсхолдеров /opt/standkit/... и CHANGE_ME.
+#   4) sudo cp standkit-agent.service /etc/systemd/system/standkit-agent.service
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now standkit-agent
+#
+# TODO(следующая итерация): вынести host/port/registry/token-ref в отдельный
+# env-файл (EnvironmentFile=) вместо хардкода в ExecStart, чтобы шаблон был
+# полностью параметризуемым без правки самого unit-файла.
+
+[Unit]
+Description=standkit agent — headless-демон управления стендом BPMSoft
+After=network.target
+
+[Service]
+Type=simple
+
+# --- Least privilege: выделенный не-root сервисный аккаунт ---
+# ПОДСТАВИТЬ: реальный сервисный аккаунт/группу (создать заранее, см. выше).
+User=standkit
+Group=standkit
+WorkingDirectory=/opt/standkit
+
+ExecStart=/opt/standkit/venv/bin/python -m standkit_agent \
+    --host 127.0.0.1 \
+    --port 8765 \
+    --registry /opt/standkit/projects.json \
+    --token-ref standkit:CHANGE_ME:agent-token \
+    --readonly-token-ref standkit:CHANGE_ME:agent-readonly-token \
+    --tls-cert /opt/standkit/tls/agent.crt \
+    --tls-key /opt/standkit/tls/agent.key \
+    --tls-client-ca /opt/standkit/tls/clients-ca.crt \
+    --audit-log /opt/standkit/logs/audit.log
+# ПРИМЕЧАНИЕ: --host 127.0.0.1 — secure default. Для удалённого доступа с
+# другого хоста управляющего контура — TLS/mTLS обязателен (см. флаги выше);
+# если вместо этого используется reverse-proxy/VPN-туннель на loopback,
+# --host можно оставить 127.0.0.1 и TLS/mTLS не требуется на этом уровне.
+
+Restart=on-failure
+RestartSec=5
+
+# --- Least privilege / sandboxing (systemd security hardening) ---
+# Запрет получения новых привилегий (никаких setuid/setgid-эскалаций).
+NoNewPrivileges=yes
+
+# Файловая система — read-only корень, /usr /boot /efi защищены,
+# /home недоступен. Явно открываем ТОЛЬКО каталоги, реально нужные агенту.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# ПОДСТАВИТЬ: реальные пути — рабочий каталог агента, run/log каталоги,
+# каталог(и) стенда(ов) из реестра (для start/stop через subprocess/pidfile),
+# каталог TLS-сертификатов (если ключ читается, не обязательно писать).
+ReadWritePaths=/opt/standkit/run /opt/standkit/logs /opt/standkit/projects.json
+
+# Ни один процесс агента не должен трогать физические/виртуальные устройства.
+PrivateDevices=yes
+
+# Сеть — только TCP/UDP через AF_INET/AF_INET6 и локальные unix-сокеты
+# (нужны для http.server/ssl); никакого AF_NETLINK/AF_PACKET и т.п.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Запрет одновременно исполняемых и записываемых страниц памяти (защита от
+# части классов эксплойтов, W^X).
+MemoryDenyWriteExecute=yes
+
+# Запрет смены personality исполнения (ASLR-обход через personality(2)).
+LockPersonality=yes
+
+# Урезанный набор системных вызовов — только то, что нужно обычному
+# демону-сервису (см. systemd.exec(5) @system-service).
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Запрет создания новых пространств имён (контейнеризация/unshare изнутри
+# процесса не нужна агенту).
+RestrictNamespaces=yes
+
+# Минимальный (пустой) набор Linux capabilities — агент управляет процессами
+# СВОЕГО пользователя через subprocess (не kill чужих pid, не bind :80/:443
+# и т.п.), root-capabilities не нужны.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Дополнительные точечные ограничения (безопасны для типичного stdlib-демона).
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+
+[Install]
+WantedBy=multi-user.target
