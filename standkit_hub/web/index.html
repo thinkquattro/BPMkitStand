@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BPMkit Дашборд</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <img class="brand-logo" src="/static/favicon.svg" alt="BPMkit" />
+    <h1>BPMkit Дашборд</h1>
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="stands">Стенды</button>
+      <button class="tab-btn" data-tab="agent">Локальный агент</button>
+      <button class="tab-btn" data-tab="settings">Настройки</button>
+    </nav>
+    <span id="conn-status" class="conn-status">…</span>
+  </header>
+
+  <main>
+    <section id="tab-stands" class="tab-panel active">
+      <div class="panel-toolbar">
+        <button id="refresh-stands-btn">Обновить</button>
+        <span id="stands-error" class="error-text"></span>
+      </div>
+      <table class="stands-table">
+        <thead>
+          <tr>
+            <th>Стенд</th>
+            <th>Транспорт</th>
+            <th>Процесс</th>
+            <th>HTTP</th>
+            <th>БД</th>
+            <th>Redis</th>
+            <th>Действия</th>
+          </tr>
+        </thead>
+        <tbody id="stands-tbody"></tbody>
+      </table>
+
+      <div class="log-panel">
+        <h2>Логи <span id="log-stand-name"></span></h2>
+        <pre id="log-output">Выберите стенд и нажмите «Логи», чтобы увидеть последние строки.</pre>
+      </div>
+    </section>
+
+    <section id="tab-agent" class="tab-panel">
+      <p>Локальный ``standkit_agent`` — headless-агент, управляющий стендами этой машины по HTTP (используется, когда хаб федерирует несколько машин).</p>
+      <p>Статус: <span id="agent-status">…</span></p>
+      <div class="panel-toolbar">
+        <button id="agent-start-btn">Запустить агент</button>
+        <button id="agent-stop-btn">Остановить агент</button>
+      </div>
+      <span id="agent-error" class="error-text"></span>
+    </section>
+
+    <section id="tab-settings" class="tab-panel">
+      <form id="settings-form" class="settings-form">
+        <fieldset>
+          <legend>Хаб</legend>
+          <label>Путь к реестру стендов (registry_path)
+            <input type="text" name="registry_path" />
+          </label>
+          <label>Каталог pid-файлов (run_dir)
+            <input type="text" name="run_dir" />
+          </label>
+          <label>Каталог логов (log_dir)
+            <input type="text" name="log_dir" />
+          </label>
+          <label>Интервал автообновления, сек (refresh_interval_sec)
+            <input type="number" name="refresh_interval_sec" min="1" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Дефолты локального агента</legend>
+          <label>Host (agent_host)
+            <input type="text" name="agent_host" />
+          </label>
+          <label>Port (agent_port)
+            <input type="number" name="agent_port" min="1" max="65535" />
+          </label>
+          <label>Control-токен (token_ref)
+            <span class="secret-row">
+              <input type="text" name="token_ref" />
+              <button type="button" class="set-secret-btn" data-ref-field="token_ref">Задать секрет…</button>
+              <span class="secret-status" data-ref-status="token_ref"></span>
+            </span>
+          </label>
+          <label>Readonly-токен (readonly_token_ref)
+            <span class="secret-row">
+              <input type="text" name="readonly_token_ref" />
+              <button type="button" class="set-secret-btn" data-ref-field="readonly_token_ref">Задать секрет…</button>
+              <span class="secret-status" data-ref-status="readonly_token_ref"></span>
+            </span>
+          </label>
+          <label>TLS-сертификат (tls_cert)
+            <input type="text" name="tls_cert" />
+          </label>
+          <label>TLS-ключ (tls_key)
+            <input type="text" name="tls_key" />
+          </label>
+          <label>TLS client CA (tls_client_ca)
+            <input type="text" name="tls_client_ca" />
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" name="insecure" />
+            insecure (небезопасный bind без TLS на non-loopback)
+          </label>
+          <label>Аудит-лог (audit_log)
+            <input type="text" name="audit_log" />
+          </label>
+          <label>Порог блокировки (lockout_max_failures)
+            <input type="number" name="lockout_max_failures" min="1" />
+          </label>
+          <label>Окно блокировки, сек (lockout_window_sec)
+            <input type="number" name="lockout_window_sec" min="1" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Удалённые агенты (федерация)</legend>
+          <div id="agents-list"></div>
+          <button type="button" id="add-agent-btn">+ Добавить агента</button>
+        </fieldset>
+
+        <div class="panel-toolbar">
+          <button type="submit">Сохранить настройки</button>
+          <button type="button" id="install-shortcut-btn">Создать ярлык на рабочем столе</button>
+          <span id="settings-status" class="status-text"></span>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

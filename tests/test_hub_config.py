@@ -1,6 +1,6 @@
 """
-Тесты standkit_gui.config.GuiConfig — БЕЗ Qt (модуль config.py намеренно не
-импортирует PySide6, чтобы быть тестируемым без дисплея).
+Тесты standkit_hub.config.HubConfig — БЕЗ веб-слоя (модуль config.py
+намеренно не импортирует http.server, чтобы быть тестируемым в изоляции).
 """
 
 from __future__ import annotations
@@ -9,11 +9,11 @@ import json
 from pathlib import Path
 
 from standkit.registry import default_registry_path
-from standkit_gui.config import GuiConfig, RemoteAgent
+from standkit_hub.config import HubConfig, RemoteAgent
 
 
 def test_load_missing_file_returns_defaults(tmp_path):
-    cfg = GuiConfig.load(tmp_path / "does_not_exist.json")
+    cfg = HubConfig.load(tmp_path / "does_not_exist.json")
 
     assert cfg.registry_path == str(default_registry_path())
     assert cfg.run_dir == ""
@@ -34,8 +34,8 @@ def test_load_missing_file_returns_defaults(tmp_path):
 
 
 def test_save_load_roundtrip_preserves_all_fields(tmp_path):
-    path = tmp_path / "standkit-gui.json"
-    cfg = GuiConfig(
+    path = tmp_path / "standkit-hub.json"
+    cfg = HubConfig(
         registry_path=str(tmp_path / "projects.json"),
         run_dir=str(tmp_path / "run"),
         log_dir=str(tmp_path / "logs"),
@@ -58,14 +58,14 @@ def test_save_load_roundtrip_preserves_all_fields(tmp_path):
     )
     cfg.save(path)
 
-    reloaded = GuiConfig.load(path)
+    reloaded = HubConfig.load(path)
 
     assert reloaded == cfg
 
 
 def test_save_writes_only_token_refs_not_secret_values(tmp_path):
-    path = tmp_path / "standkit-gui.json"
-    cfg = GuiConfig(
+    path = tmp_path / "standkit-hub.json"
+    cfg = HubConfig(
         token_ref="standkit:local:agent-token",
         readonly_token_ref="standkit:local:agent-readonly-token",
         agents=[RemoteAgent(name="remote", url="https://remote:8765", token_ref="standkit:remote:agent-token")],
@@ -83,32 +83,32 @@ def test_save_writes_only_token_refs_not_secret_values(tmp_path):
 
 
 def test_load_tolerates_bom(tmp_path):
-    path = tmp_path / "standkit-gui.json"
+    path = tmp_path / "standkit-hub.json"
     payload = {"refresh_interval_sec": 42, "agent_host": "127.0.0.1"}
     path.write_text(json.dumps(payload), encoding="utf-8-sig")
 
-    cfg = GuiConfig.load(path)
+    cfg = HubConfig.load(path)
 
     assert cfg.refresh_interval_sec == 42
     assert cfg.agent_host == "127.0.0.1"
 
 
 def test_load_ignores_unknown_fields(tmp_path):
-    path = tmp_path / "standkit-gui.json"
-    payload = {"refresh_interval_sec": 5, "future_field_from_newer_gui": "whatever"}
+    path = tmp_path / "standkit-hub.json"
+    payload = {"refresh_interval_sec": 5, "future_field_from_newer_hub": "whatever"}
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    cfg = GuiConfig.load(path)
+    cfg = HubConfig.load(path)
 
     assert cfg.refresh_interval_sec == 5
-    assert not hasattr(cfg, "future_field_from_newer_gui")
+    assert not hasattr(cfg, "future_field_from_newer_hub")
 
 
 def test_load_corrupt_json_falls_back_to_defaults(tmp_path):
-    path = tmp_path / "standkit-gui.json"
+    path = tmp_path / "standkit-hub.json"
     path.write_text("{not valid json", encoding="utf-8")
 
-    cfg = GuiConfig.load(path)
+    cfg = HubConfig.load(path)
 
     assert cfg.registry_path == str(default_registry_path())
 
@@ -118,15 +118,23 @@ def test_config_path_lives_under_bpmkit_dir(monkeypatch, tmp_path):
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-    result = GuiConfig.config_path()
+    result = HubConfig.config_path()
 
-    assert result == tmp_path / ".config" / "BPMkit" / "standkit-gui.json"
+    assert result == tmp_path / ".config" / "BPMkit" / "standkit-hub.json"
 
 
 def test_save_creates_parent_directory(tmp_path):
-    nested = tmp_path / "a" / "b" / "standkit-gui.json"
-    cfg = GuiConfig()
+    nested = tmp_path / "a" / "b" / "standkit-hub.json"
+    cfg = HubConfig()
 
     cfg.save(nested)
 
     assert nested.exists()
+
+
+def test_to_dict_from_dict_roundtrip():
+    cfg = HubConfig(refresh_interval_sec=99, agents=[RemoteAgent(name="x", url="http://x", token_ref="r")])
+
+    rebuilt = HubConfig.from_dict(cfg.to_dict())
+
+    assert rebuilt == cfg
