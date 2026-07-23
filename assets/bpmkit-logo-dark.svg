@@ -1,0 +1,6 @@
+<svg width="320" height="96" viewBox="0 0 320 96" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="320" height="96" rx="14" fill="#1a1a1a"/>
+  <rect x="16.75" y="20.75" width="55" height="55" rx="13" fill="none" stroke="#3d3d3d" stroke-width="1.5"/>
+  <text x="44" y="67" font-family="Inter, Arial, sans-serif" font-size="42" font-weight="600" fill="#f9763d" text-anchor="middle">k</text>
+  <text x="90" y="63" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="600" fill="#ffffff" letter-spacing="-0.8">BPM<tspan fill="#f9763d">k</tspan>it</text>
+</svg>
