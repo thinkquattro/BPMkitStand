@@ -9,22 +9,32 @@
 ## Модель: ядро + две оболочки
 
 ```
-standkit        — MIT, движок жизненного цикла, без Qt, без сети "наружу",
+standkit        — MIT, движок жизненного цикла, stdlib-only, без сети "наружу",
                    без лицензионно-чувствительного контента BPMSoft.
 standkit_agent   — MIT, stdlib-only HTTP-обёртка вокруг ядра, кроссплатформенная
                    (Windows/Linux), разворачивается на КАЖДОМ хосте стенда.
-standkit_gui     — PySide6/Qt, федеративный клиент N агентов + локального ядра,
-                   ставится ТОЛЬКО на машину оператора.
+standkit_hub     — MIT, stdlib-only локальный веб-дашборд (http.server) +
+                   vanilla JS/CSS фронтенд, федеративный клиент N агентов +
+                   локального ядра, ставится ТОЛЬКО на машину оператора.
+                   Опциональная нативная оболочка — pywebview (extra [desktop]).
 ```
 
+Веб-дашборд (вариант A) заменил прежнюю PySide6/Qt-оболочку `standkit_gui`
+(удалена целиком): та же роль ("диспетчер на машине оператора"), но без
+тяжёлой GUI-зависимости — браузер универсален, фронтенд отдаёт сам хаб.
+
 Границы зависимостей — принципиальны и проверяются на уровне импортов:
-- `standkit/*` и `standkit_agent/*` НИКОГДА не импортируют `PySide6`.
-- `standkit_gui/*` — единственное место, где Qt используется; импорт обёрнут
-  в try/except, чтобы `import standkit_gui.app` не падал при отсутствии
-  extra `[gui]` (падает только попытка реально запустить окно).
+- `standkit/*`, `standkit_agent/*` и `standkit_hub/*` (серверная часть) —
+  STDLIB-ONLY, никаких сторонних веб-фреймворков/GUI-тулкитов.
+- `standkit_hub/__main__.py` — единственное место, где опционально
+  импортируется `pywebview` (только под `--desktop`, в try/except; при
+  отсутствии extra `[desktop]` хаб печатает понятное сообщение и падает
+  обратно в системный браузер, а не роняется исключением импорта).
 - `standkit` не тянет сторонних пакетов вообще (`dependencies = []` в
   `pyproject.toml`) — секреты (`standkit/secrets.py`) используют `keyring`
   только опционально, через `try/except ImportError`.
+- Фронтенд `standkit_hub/web/*` — vanilla JS/CSS, без CDN и без шага сборки
+  (работает офлайн, отдаётся тем же `http.server`, что и API).
 
 ## Транспорт: `local` | `agent` (задел `ssh` / `winrm`)
 
@@ -86,9 +96,9 @@ standkit_gui     — PySide6/Qt, федеративный клиент N аге�
 `standkit/lifecycle.py` (нет graceful stop с эскалацией SIGKILL/таймаутом),
 `standkit/platform.py` (нет Job Object на Windows, нет double-fork на Linux),
 `standkit/health.py::db_deep_check/redis_deep_check` (заглушки — требуют
-опциональных зависимостей `psycopg2`/`pyodbc`/`redis-py`), `standkit_gui`
-(нет реального трея, нет фонового опроса по таймеру, нет live follow лога в
-UI).
+опциональных зависимостей `psycopg2`/`pyodbc`/`redis-py`), `standkit_hub`
+(опрос стендов — по кнопке "Обновить"/интервалу polling из фронтенда, а не
+push/SSE; live follow лога — TODO, сейчас только периодический tail).
 
 `standkit_agent` прошёл прод-харденинг (см. `standkit_agent/security.py`,
 `standkit_agent/audit.py`, README.md → раздел «Безопасность»): TLS/mTLS,

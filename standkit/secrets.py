@@ -59,6 +59,52 @@ def has_secret(ref: str) -> bool:
     return False
 
 
+def set_secret(ref: str, value: str) -> None:
+    """
+    Сохраняет значение секрета под ссылкой ``ref`` в системном keyring.
+
+    Симметрично ``get_secret``/``has_secret`` — тот же backend (keyring,
+    сервис ``standkit``). Требует опциональную зависимость ``keyring``
+    (extra ``standkit[secrets]``/``standkit[gui]``); при её отсутствии или
+    сбое backend'а бросает понятную ``SecretError`` (без падения импорта
+    модуля — см. try/except вокруг ``import keyring`` выше).
+
+    Значение секрета никогда не логируется и не попадает в текст ошибки.
+    """
+    if not _HAS_KEYRING:
+        raise SecretError(
+            f"Невозможно задать секрет '{ref}': пакет keyring не установлен. "
+            "Установите опциональную зависимость: pip install standkit[secrets]"
+        )
+    try:
+        keyring.set_password(_KEYRING_SERVICE, ref, value)
+    except Exception as exc:
+        # Значение секрета намеренно не попадает в текст исключения — только ref.
+        raise SecretError(f"Не удалось сохранить секрет '{ref}' в keyring: {exc}") from exc
+
+
+def delete_secret(ref: str) -> None:
+    """
+    Удаляет секрет по ссылке ``ref`` из системного keyring.
+
+    Идемпотентно по духу с остальным контрактом: отсутствие backend'а —
+    SecretError; отсутствие самого секрета в keyring backend обычно тоже
+    трактует как ошибку (PasswordDeleteError) — она также оборачивается в
+    SecretError, вызывающая сторона может считать "секрета и так не было"
+    нормальным исходом при необходимости (проверить через has_secret до
+    удаления).
+    """
+    if not _HAS_KEYRING:
+        raise SecretError(
+            f"Невозможно удалить секрет '{ref}': пакет keyring не установлен. "
+            "Установите опциональную зависимость: pip install standkit[secrets]"
+        )
+    try:
+        keyring.delete_password(_KEYRING_SERVICE, ref)
+    except Exception as exc:
+        raise SecretError(f"Не удалось удалить секрет '{ref}' из keyring: {exc}") from exc
+
+
 def get_secret(ref: str, *, fallback: Optional[str] = None) -> str:
     """
     Возвращает значение секрета по ссылке ``ref`` согласно Secret-first контракту.
@@ -90,7 +136,8 @@ def get_secret(ref: str, *, fallback: Optional[str] = None) -> str:
 
 # --- TODO(следующая итерация) ---
 # - CLI-обёртка (set/get/status/rotate/delete/list) по аналогии с
-#   BPMkit/server/secretstore.py, но для сервиса "standkit";
+#   BPMkit/server/secretstore.py, но для сервиса "standkit" (set_secret/
+#   delete_secret уже есть как программное API — CLI поверх них тривиален);
 # - файловый фолбэк secrets.enc с мастер-ключом из переменной окружения — для
 #   машин без доступного системного keyring (headless Linux без dbus/libsecret);
 # - явный `status()` с диагностикой источника (env/keyring/fallback/not found)

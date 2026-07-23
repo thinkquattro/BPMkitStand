@@ -1,0 +1,272 @@
+/* Vanilla CSS дашборда standkit — без внешних ресурсов, без сборки. */
+
+:root {
+  --bpmkit-primary: #2f6fed;
+  --bpmkit-bg: #f4f6fb;
+  --bpmkit-panel-bg: #ffffff;
+  --bpmkit-border: #dde3ee;
+  --bpmkit-text: #1c2333;
+  --bpmkit-muted: #6b7488;
+  --bpmkit-ok: #1f9d55;
+  --bpmkit-down: #d84040;
+  --bpmkit-unknown: #b98900;
+  --bpmkit-skipped: #9aa3b5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Roboto, Arial, sans-serif;
+  background: var(--bpmkit-bg);
+  color: var(--bpmkit-text);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  background: var(--bpmkit-panel-bg);
+  border-bottom: 1px solid var(--bpmkit-border);
+}
+
+.brand-logo {
+  width: 28px;
+  height: 28px;
+}
+
+.topbar h1 {
+  font-size: 18px;
+  margin: 0;
+  margin-right: auto;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab-btn {
+  border: none;
+  background: transparent;
+  padding: 8px 14px;
+  cursor: pointer;
+  border-radius: 6px;
+  color: var(--bpmkit-muted);
+  font-size: 14px;
+}
+
+.tab-btn.active {
+  background: var(--bpmkit-primary);
+  color: white;
+}
+
+.conn-status {
+  font-size: 12px;
+  color: var(--bpmkit-muted);
+}
+
+main {
+  padding: 20px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
+.panel-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+button {
+  background: var(--bpmkit-primary);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 7px 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+button:hover {
+  filter: brightness(1.08);
+}
+
+button.secondary {
+  background: var(--bpmkit-muted);
+}
+
+.error-text {
+  color: var(--bpmkit-down);
+  font-size: 13px;
+}
+
+.status-text {
+  color: var(--bpmkit-muted);
+  font-size: 13px;
+}
+
+.stands-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--bpmkit-panel-bg);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.stands-table th,
+.stands-table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--bpmkit-border);
+  font-size: 13px;
+}
+
+.stands-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: white;
+}
+
+.badge-ok {
+  background: var(--bpmkit-ok);
+}
+
+.badge-down {
+  background: var(--bpmkit-down);
+}
+
+.badge-unknown {
+  background: var(--bpmkit-unknown);
+}
+
+.badge-skipped {
+  background: var(--bpmkit-skipped);
+}
+
+.row-actions button {
+  margin-right: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.log-panel {
+  margin-top: 20px;
+  background: var(--bpmkit-panel-bg);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.log-panel h2 {
+  font-size: 14px;
+  margin: 0 0 8px;
+}
+
+#log-output {
+  max-height: 320px;
+  overflow: auto;
+  background: #10141f;
+  color: #d7dee8;
+  padding: 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.settings-form fieldset {
+  background: var(--bpmkit-panel-bg);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+}
+
+.settings-form legend {
+  font-weight: 600;
+  padding: 0 6px;
+}
+
+.settings-form label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--bpmkit-muted);
+}
+
+.settings-form input[type="text"],
+.settings-form input[type="number"] {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--bpmkit-text);
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-label input {
+  width: auto;
+}
+
+.secret-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.secret-row input {
+  flex: 1;
+}
+
+.secret-status {
+  font-size: 12px;
+  color: var(--bpmkit-muted);
+  white-space: nowrap;
+}
+
+.agent-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+
+.agent-row input {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+}
+
+.agent-row button {
+  background: var(--bpmkit-down);
+}

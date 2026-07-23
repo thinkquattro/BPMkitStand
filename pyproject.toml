@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "standkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Свободное ядро (MIT) для управления жизненным циклом локальных и удалённых стендов BPMSoft: headless start/stop/restart, health-пробы, логи, реестр стендов. Часть экосистемы BPMkit."
 readme = "README.md"
 license = { text = "MIT" }
@@ -22,27 +22,34 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/thinkquattro/standkit"
+Homepage = "https://github.com/thinkquattro/BPMkitStand"
 "Экосистема BPMkit" = "https://github.com/thinkquattro/BPMkit-dev"
 
 [project.optional-dependencies]
-# GUI-оболочка (standkit_gui) — единственное место, где нужен Qt.
-gui = ["PySide6>=6.5"]
-# Инструменты разработки/тестирования ядра и агента.
+# Опциональный backend хранения секретов (standkit.secrets: set_secret/
+# get_secret/has_secret/delete_secret) — ядро остаётся stdlib-only без него,
+# просто SecretError на set_secret/delete_secret ("нет keyring").
+secrets = ["keyring>=24"]
+# Нативное окно вместо системного браузера для веб-дашборда (standkit_hub
+# --desktop). Требует нативный вебдвижок ОС: WebView2 на Windows,
+# WebKitGTK на Linux — сам pywebview его не тянет как pip-зависимость.
+desktop = ["pywebview>=5"]
+# Инструменты разработки/тестирования ядра, агента и хаба.
 dev = ["pytest>=7.0"]
 
 [project.scripts]
 standkit-agent = "standkit_agent.__main__:main"
-standkit-gui = "standkit_gui.__main__:main"
+standkit-gui = "standkit_hub.__main__:main"
+standkit-hub = "standkit_hub.__main__:main"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["standkit*", "standkit_agent*", "standkit_gui*"]
+include = ["standkit*", "standkit_agent*", "standkit_hub*"]
 
 [tool.setuptools.package-data]
-standkit_gui = ["assets/*"]
+standkit_hub = ["assets/*", "web/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
