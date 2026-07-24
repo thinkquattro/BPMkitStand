@@ -423,6 +423,17 @@
     return `<a class="value-cell value-link ${cls}" href="${escapeAttr(url)}" target="_blank" rel="noopener">${escapeHtml(url)}</a>`;
   }
 
+  // Ячейка Redis: показывает НОМЕР базы Redis стенда (тот же, что фигурирует
+  // при очистке Redis), цвет — по состоянию пробы. Прочерк, если у стенда
+  // Redis не настроен.
+  function redisCell(redis) {
+    const num = redis && redis.number;
+    if (num === null || num === undefined) {
+      return `<span class="value-cell value-muted" title="Redis не настроен у стенда">—</span>`;
+    }
+    return `<span class="value-cell ${valueClass(redis.state)}" title="Номер базы Redis">${escapeHtml(String(num))}</span>`;
+  }
+
   // --- иконки действий (инлайн-SVG, без внешних шрифтов/CDN) ---
 
   const ICON_PLAY =
@@ -548,6 +559,7 @@
     stands.forEach((s) => {
       const http = s.http || {};
       const db = s.db || {};
+      const redis = s.redis || {};
       const tr = document.createElement("tr");
       tr.dataset.name = s.name;
       if (s.name === selectedStand) tr.classList.add("selected");
@@ -557,6 +569,7 @@
         <td>${processCell(s)}</td>
         <td>${httpCell(http)}</td>
         <td>${valueSpan(db.name || "—", db.state)}</td>
+        <td>${redisCell(redis)}</td>
         <td class="row-actions">${actionButtons(s)}</td>
       `;
       tr.addEventListener("click", (evt) => {
