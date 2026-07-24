@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-from standkit.models import ProbeState, Stand, StandStatus
+from standkit.models import HostKind, ProbeState, Stand, StandStatus
 
 
 def process_alive(pidfile: Path) -> bool:
@@ -128,7 +128,23 @@ def check_stand(
     """
     status = StandStatus(name=stand.name)
 
-    if pidfile is not None or (stand.stand_host and stand.stand_port):
+    if stand.host_kind in (HostKind.IIS, HostKind.DOCKER, HostKind.K8S):
+        # Проба «процесс» для iis/docker/k8s консультируется с бэкендом хостинга
+        # (состояние App Pool / контейнера / деплоймента), а не с pidfile
+        # standkit — у этих видов хостинга своего pidfile нет (см. ADR-0001).
+        # Сохраняем fallback на TCP-порт: backend.is_running() уже пробует его
+        # сам, но если он бросит исключение (появится в будущем реализация без
+        # внутреннего фолбэка) — подстраховываемся ещё раз здесь.
+        from standkit import hosting as _hosting  # локальный импорт — избегаем цикла
+
+        try:
+            is_up = _hosting.get_backend(stand).is_running(stand)
+        except Exception:
+            is_up = False
+        if not is_up and stand.stand_host and stand.stand_port:
+            is_up = tcp_open(stand.stand_host, stand.stand_port)
+        status.process = ProbeState.OK if is_up else ProbeState.DOWN
+    elif pidfile is not None or (stand.stand_host and stand.stand_port):
         is_up = process_running(pidfile, stand.stand_host, stand.stand_port)
         status.process = ProbeState.OK if is_up else ProbeState.DOWN
     else:

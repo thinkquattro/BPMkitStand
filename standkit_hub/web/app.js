@@ -151,6 +151,123 @@
     });
   }
 
+  // --- модалка "Зарегистрировать стенд" ---
+  //
+  // Регистрирует УЖЕ существующий стенд в общем реестре (POST
+  // /api/stand/register, см. standkit_hub/server.py::_api_stand_register) —
+  // НЕ провижининг. Та же разметка/классы, что у модалки "О программе" (см.
+  // style.css .modal-overlay/.modal-box), плюс собственные условные блоки
+  // полей (agent_*/iis_*/docker_*/k8s_*), которые показываются по значению
+  // select'ов transport/host_kind без сторонних либ.
+
+  function updateRegisterConditionalFields() {
+    const form = document.getElementById("register-form");
+    const transport = form.elements.namedItem("transport").value;
+    const hostKind = form.elements.namedItem("host_kind").value;
+    form.querySelectorAll(".register-conditional[data-when-transport]").forEach((el) => {
+      el.hidden = el.dataset.whenTransport !== transport;
+    });
+    form.querySelectorAll(".register-conditional[data-when-host-kind]").forEach((el) => {
+      el.hidden = el.dataset.whenHostKind !== hostKind;
+    });
+  }
+
+  function showRegisterFormError(message) {
+    const el = document.getElementById("register-form-error");
+    el.textContent = message;
+    el.classList.toggle("visible", !!message);
+  }
+
+  function openRegisterModal() {
+    const overlay = document.getElementById("register-modal-overlay");
+    const form = document.getElementById("register-form");
+    form.reset();
+    showRegisterFormError("");
+    updateRegisterConditionalFields();
+    overlay.hidden = false;
+    form.elements.namedItem("name").focus();
+  }
+
+  function closeRegisterModal() {
+    document.getElementById("register-modal-overlay").hidden = true;
+  }
+
+  // Поля формы, которые вообще уходят в JSON-тело запроса — только НЕПУСТЫЕ
+  // (сервер и так игнорирует пустые строки, но так тело запроса компактнее
+  // и понятнее в логах/отладке). Пароли в форме сознательно отсутствуют —
+  // только secret_ref_* (agent_secret_ref).
+  const _REGISTER_FIELD_NAMES = [
+    "name",
+    "transport",
+    "host_kind",
+    "stand_dir",
+    "stand_host",
+    "stand_port",
+    "db_type",
+    "db_host",
+    "db_port",
+    "db_name",
+    "agent_url",
+    "agent_secret_ref",
+    "iis_site",
+    "iis_app_pool",
+    "docker_container",
+    "docker_compose_file",
+    "docker_compose_service",
+    "k8s_namespace",
+    "k8s_deployment",
+  ];
+
+  function collectRegisterPayload(form) {
+    const payload = {};
+    _REGISTER_FIELD_NAMES.forEach((field) => {
+      const input = form.elements.namedItem(field);
+      if (!input) return;
+      const value = input.value.trim();
+      if (!value) return;
+      payload[field] = value;
+    });
+    return payload;
+  }
+
+  function setupRegisterModal() {
+    const overlay = document.getElementById("register-modal-overlay");
+    const form = document.getElementById("register-form");
+
+    document.getElementById("register-stand-btn").addEventListener("click", openRegisterModal);
+    document.getElementById("register-modal-close-btn").addEventListener("click", closeRegisterModal);
+    document.getElementById("register-modal-cancel-btn").addEventListener("click", closeRegisterModal);
+    overlay.addEventListener("click", (evt) => {
+      if (evt.target.id === "register-modal-overlay") closeRegisterModal();
+    });
+    document.addEventListener("keydown", (evt) => {
+      if (evt.key === "Escape" && !overlay.hidden) closeRegisterModal();
+    });
+
+    form.elements.namedItem("transport").addEventListener("change", updateRegisterConditionalFields);
+    form.elements.namedItem("host_kind").addEventListener("change", updateRegisterConditionalFields);
+
+    form.addEventListener("submit", async (evt) => {
+      evt.preventDefault();
+      showRegisterFormError("");
+      const submitBtn = document.getElementById("register-modal-submit-btn");
+      const payload = collectRegisterPayload(form);
+      submitBtn.disabled = true;
+      try {
+        const data = await apiSend("POST", "/api/stand/register", payload);
+        closeRegisterModal();
+        showActionStatus(`Стенд ${data.name || payload.name} зарегистрирован`, false);
+        await refreshStands();
+      } catch (e) {
+        // 400/409 остаются внутри модалки (не тост-прыжок) — пользователь
+        // правит форму, не теряя введённые данные.
+        showRegisterFormError(e.message);
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  }
+
   // --- стилизованное подтверждение (замена window.confirm), Promise-обёртка ---
   //
   // Переиспользует разметку/классы модалки "О программе" (единый стиль сайта).
@@ -780,6 +897,7 @@
     setupTheme();
     setupTabs();
     setupAboutModal();
+    setupRegisterModal();
     setupAgentTab();
     setupSettingsForm();
     setupStatePanel();

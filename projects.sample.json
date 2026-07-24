@@ -78,6 +78,90 @@
       "distrib_dir": "",
       "description": "TODO: транспорт ssh пока не реализован",
       "customer": ""
+    },
+    "example-iis": {
+      "_comment": "Пример стенда, опубликованного как IIS-приложение (host_kind=iis) — жизненным циклом владеет IIS (w3wp.exe), не dotnet-спавн standkit. См. docs/HOSTING.md / docs/adr/0001-hosting-backends.md",
+      "transport": "local",
+      "host_kind": "iis",
+
+      "iis_site": "BPMSoft-example-iis",
+      "iis_app_pool": "BPMSoft-example-iis-pool",
+      "iis_stdout_log_dir": "C:\\inetpub\\wwwroot\\example-iis\\logs",
+
+      "stand_dir": "C:\\inetpub\\wwwroot\\example-iis",
+      "stand_host": "127.0.0.1",
+      "stand_port": 5000,
+
+      "db_type": "mssql",
+      "db_host": "127.0.0.1",
+      "db_port": 1433,
+      "db_name": "example_iis",
+      "db_user": "sa",
+      "db_password": "",
+      "secret_ref_db": "standkit:example-iis:db",
+
+      "admin_user": "Supervisor",
+      "secret_ref_admin": "standkit:example-iis:admin",
+
+      "distrib_dir": "",
+      "description": "Пример стенда за IIS (для образца схемы реестра)",
+      "customer": ""
+    },
+    "example-docker": {
+      "_comment": "Пример стенда в Docker-контейнере (host_kind=docker, одиночный режим) — жизненным циклом управляет docker start/stop/restart, не dotnet-спавн standkit. Для compose-режима вместо docker_container задайте docker_compose_file+docker_compose_service. См. docs/HOSTING.md / docs/adr/0001-hosting-backends.md",
+      "transport": "local",
+      "host_kind": "docker",
+
+      "docker_container": "bpmsoft-example-docker",
+
+      "stand_dir": "/opt/bpmsoft/example-docker",
+      "stand_host": "127.0.0.1",
+      "stand_port": 5000,
+
+      "db_type": "postgres",
+      "db_host": "127.0.0.1",
+      "db_port": 5432,
+      "db_name": "example_docker",
+      "db_user": "postgres",
+      "db_password": "",
+      "secret_ref_db": "standkit:example-docker:db",
+
+      "admin_user": "Supervisor",
+      "secret_ref_admin": "standkit:example-docker:admin",
+
+      "distrib_dir": "",
+      "description": "Пример стенда в Docker-контейнере (для образца схемы реестра)",
+      "customer": ""
+    },
+    "example-k8s": {
+      "_comment": "Пример стенда в Kubernetes (host_kind=k8s) — жизненным циклом управляет kubectl scale/rollout над деплойментом, не dotnet-спавн standkit. 'Стоп' = scale --replicas=0. См. docs/HOSTING.md / docs/adr/0001-hosting-backends.md",
+      "transport": "local",
+      "host_kind": "k8s",
+
+      "k8s_namespace": "bpmsoft",
+      "k8s_deployment": "bpmsoft-example-k8s",
+      "k8s_context": "example-cluster",
+      "k8s_container": "webhost",
+      "k8s_replicas": 1,
+
+      "stand_dir": "/opt/bpmsoft/example-k8s",
+      "stand_host": "127.0.0.1",
+      "stand_port": 5000,
+
+      "db_type": "postgres",
+      "db_host": "127.0.0.1",
+      "db_port": 5432,
+      "db_name": "example_k8s",
+      "db_user": "postgres",
+      "db_password": "",
+      "secret_ref_db": "standkit:example-k8s:db",
+
+      "admin_user": "Supervisor",
+      "secret_ref_admin": "standkit:example-k8s:admin",
+
+      "distrib_dir": "",
+      "description": "Пример стенда в Kubernetes (для образца схемы реестра)",
+      "customer": ""
     }
   }
 }

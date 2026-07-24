@@ -46,7 +46,7 @@ from urllib.parse import parse_qs, urlparse
 from standkit import __version__ as _standkit_version
 from standkit import logs as _logs
 from standkit.lifecycle import LifecycleError
-from standkit.models import Stand
+from standkit.models import HostKind, Stand, Transport
 from standkit.registry import Registry, RegistryError, default_registry_path
 from standkit.secrets import SecretError, delete_secret, has_secret, set_secret
 from standkit_hub import logs_browser
@@ -67,6 +67,44 @@ _STAND_ACTION_RE = re.compile(
 # /logs/list и /logs/file удалены вместе с фронтом, который их использовал.
 _STAND_LOGS_SUB_RE = re.compile(r"^/api/stand/(?P<name>[^/]+)/logs/(?P<sub>open-folder)$")
 _SECRET_RE = re.compile(r"^/api/secret/(?P<ref>[^/]+)$")
+
+# Регистрация УЖЕ существующего стенда в общем реестре (кнопка "Зарегистрировать
+# стенд" на дашборде) — отдельный точный путь, НЕ пересекается с _STAND_ACTION_RE
+# (тот требует .../<action> после имени стенда).
+_STAND_REGISTER_PATH = "/api/stand/register"
+
+# Поля формы регистрации, которые сервер готов принять и записать в Stand —
+# белый список (всё, чего нет в этом множестве, в реестр не попадает, даже
+# если клиент его пришлёт). Пароли/секреты сюда осознанно НЕ входят — только
+# secret_ref_* (см. _api_stand_register).
+_REGISTER_ALLOWED_FIELDS = {
+    "transport",
+    "host_kind",
+    "stand_dir",
+    "stand_host",
+    "stand_port",
+    "db_type",
+    "db_host",
+    "db_port",
+    "db_name",
+    "agent_url",
+    "agent_secret_ref",
+    "iis_site",
+    "iis_app_pool",
+    "docker_container",
+    "docker_compose_file",
+    "docker_compose_service",
+    "k8s_namespace",
+    "k8s_deployment",
+    "description",
+    "customer",
+}
+
+# Поля, которые сервер ЯВНО отклоняет с понятной ошибкой (а не молча
+# игнорирует), если клиент вдруг их пришлёт — защита от того, чтобы кто-то
+# принял отсутствие ошибки за "пароль сохранён". Секреты — только через
+# отдельный secretstore/secret_ref_*, никогда открытым текстом в реестре.
+_REGISTER_FORBIDDEN_FIELDS = {"db_password", "admin_password", "password", "secret", "secret_value"}
 
 # Человекочитаемые подписи источника логов для сообщений "лог недоступен".
 _LOG_SOURCE_LABELS = {"stand": "Стенд", "bpmkit": "BPMkit"}
@@ -579,6 +617,112 @@ def make_handler(
                 # содержательный текст, а не голое "HTTP 502".
                 self._send_json(502, {"ok": False, "error": result.message})
 
+        def _api_stand_register(self) -> None:
+            """
+            ``POST /api/stand/register`` — кнопка "Зарегистрировать стенд" на
+            дашборде. Регистрирует УЖЕ существующий стенд (каталог/БД/дистрибутив
+            предполагаются готовыми — это НЕ провижининг, см. docstring
+            ``Registry.add_existing``) в том же реестре, который резолвит
+            ``_load_registry`` (тот же ``registry_path`` конфига хаба /
+            ``default_registry_path()``).
+
+            Пароли/секреты в теле запроса не принимаются — только ``secret_ref_*``
+            (см. ``_REGISTER_FORBIDDEN_FIELDS``). Ответы:
+              - 400 ``{"error", "fields"}`` — невалидное тело/запись;
+              - 409 ``{"error"}`` — имя уже занято (не перезаписываем молча);
+              - 200 ``{"ok": true, "name"}`` — успех.
+            """
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+
+            forbidden = sorted(k for k in body if k in _REGISTER_FORBIDDEN_FIELDS)
+            if forbidden:
+                self._send_json(
+                    400,
+                    {
+                        "error": (
+                            f"поля {', '.join(forbidden)} не принимаются — пароли/секреты "
+                            "задаются только через secret_ref_* (secretstore), не в теле запроса"
+                        ),
+                        "fields": forbidden,
+                    },
+                )
+                return
+
+            raw_name = body.get("name")
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                self._send_json(400, {"error": "поле 'name' обязательно", "fields": ["name"]})
+                return
+            name = raw_name.strip()
+            if not _security.validate_stand_name(name):
+                self._send_json(
+                    400,
+                    {"error": "недопустимое имя стенда (допустимы буквы/цифры/._-)", "fields": ["name"]},
+                )
+                return
+
+            errors: list[str] = []
+            bad_fields: list[str] = []
+
+            data: dict = {}
+            for key in _REGISTER_ALLOWED_FIELDS:
+                if key not in body:
+                    continue
+                value = body[key]
+                if isinstance(value, str) and not value.strip():
+                    continue  # пустые строки не пишем поверх дефолтов Stand
+                data[key] = value
+
+            for int_field in ("stand_port", "db_port"):
+                if int_field in data:
+                    try:
+                        data[int_field] = int(data[int_field])
+                    except (TypeError, ValueError):
+                        errors.append(f"{int_field} должен быть числом")
+                        bad_fields.append(int_field)
+                        data.pop(int_field, None)
+
+            valid_transports = {t.value for t in Transport}
+            if "transport" in data and data["transport"] not in valid_transports:
+                errors.append(f"недопустимое значение transport: {data['transport']!r}")
+                bad_fields.append("transport")
+
+            valid_host_kinds = {h.value for h in HostKind}
+            if "host_kind" in data and data["host_kind"] not in valid_host_kinds:
+                errors.append(f"недопустимое значение host_kind: {data['host_kind']!r}")
+                bad_fields.append("host_kind")
+
+            if errors:
+                self._send_json(400, {"error": "; ".join(errors), "fields": bad_fields})
+                return
+
+            stand = Stand.from_dict(name, data)
+            validation_errors = stand.validate()
+            if validation_errors:
+                self._send_json(400, {"error": "; ".join(validation_errors), "fields": []})
+                return
+
+            config = _load_config(config_path)
+            try:
+                registry = _load_registry(config)
+            except RegistryError as exc:
+                self._send_json(500, {"error": str(exc)})
+                return
+
+            if name in registry:
+                self._send_json(409, {"error": f"стенд '{name}' уже есть в реестре"})
+                return
+
+            try:
+                registry.add_existing(stand)
+                registry.save()
+            except RegistryError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+
+            self._send_json(200, {"ok": True, "name": name})
+
         # --- API: версия ---
 
         def _api_version(self) -> None:
@@ -786,6 +930,12 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_agent_stop()
+                return
+
+            if path == _STAND_REGISTER_PATH:
+                if not self._authorize_mutation():
+                    return
+                self._api_stand_register()
                 return
 
             if path == "/api/shortcut/install":

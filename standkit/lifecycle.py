@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 from standkit import platform as _platform
-from standkit.models import Stand, Transport
+from standkit.models import HostKind, Stand, Transport
 
 _DEFAULT_RUN_DIR = Path.home() / ".standkit" / "run"
 _DEFAULT_LOG_DIR = Path.home() / ".standkit" / "logs"
@@ -112,6 +112,69 @@ def start(
     run_dir: Optional[Path] = None,
     log_dir: Optional[Path] = None,
     startup_check_delay: float = _DEFAULT_STARTUP_CHECK_DELAY,
+) -> Optional[int]:
+    """
+    Запускает стенд, если он ещё не запущен. Диспетчер по ``stand.host_kind``
+    (см. ADR-0001, docs/adr/0001-hosting-backends.md): kestrel — ТЕКУЩИЙ код
+    (см. ``_kestrel_start``) без изменений; iis/docker/k8s — соответствующий
+    бэкенд ``standkit.hosting``. ``startup_check_delay`` применяется только к
+    kestrel-ветке.
+
+    Возвращает pid процесса для kestrel, либо None/pid-эквивалент бэкенда для
+    iis/docker/k8s (см. ``standkit.hosting.HostingBackend.start``).
+    """
+    _require_local(stand)
+    if stand.host_kind == HostKind.KESTREL:
+        return _kestrel_start(
+            stand, run_dir=run_dir, log_dir=log_dir, startup_check_delay=startup_check_delay
+        )
+    from standkit import hosting as _hosting  # локальный импорт — избегаем цикла
+
+    backend = _hosting.get_backend(stand)
+    return backend.start(stand, run_dir=run_dir, log_dir=log_dir)
+
+
+def stop(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+    """Останавливает стенд, если он запущен. Диспетчер по ``stand.host_kind`` (см. ``start``)."""
+    _require_local(stand)
+    if stand.host_kind == HostKind.KESTREL:
+        return _kestrel_stop(stand, run_dir=run_dir)
+    from standkit import hosting as _hosting  # локальный импорт — избегаем цикла
+
+    backend = _hosting.get_backend(stand)
+    return backend.stop(stand, run_dir=run_dir)
+
+
+def restart(
+    stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None
+) -> Optional[int]:
+    """Останавливает (если жив) и заново запускает стенд. Диспетчер по ``stand.host_kind``."""
+    _require_local(stand)
+    if stand.host_kind == HostKind.KESTREL:
+        return _kestrel_restart(stand, run_dir=run_dir, log_dir=log_dir)
+    from standkit import hosting as _hosting  # локальный импорт — избегаем цикла
+
+    backend = _hosting.get_backend(stand)
+    return backend.restart(stand, run_dir=run_dir, log_dir=log_dir)
+
+
+def is_running(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+    """Быстрая проверка «жив ли стенд». Диспетчер по ``stand.host_kind`` (см. ``start``)."""
+    _require_local(stand)
+    if stand.host_kind == HostKind.KESTREL:
+        return _kestrel_is_running(stand, run_dir=run_dir)
+    from standkit import hosting as _hosting  # локальный импорт — избегаем цикла
+
+    backend = _hosting.get_backend(stand)
+    return backend.is_running(stand, run_dir=run_dir)
+
+
+def _kestrel_start(
+    stand: Stand,
+    *,
+    run_dir: Optional[Path] = None,
+    log_dir: Optional[Path] = None,
+    startup_check_delay: float = _DEFAULT_STARTUP_CHECK_DELAY,
 ) -> int:
     """
     Запускает стенд headless-процессом, если он ещё не запущен.
@@ -126,6 +189,10 @@ def start(
     командной строки: BPMSoft.WebHost их не принимает (свой CommandLineParser),
     адрес/порт берётся из конфига стенда. Доп. окружение (ASPNETCORE_ENVIRONMENT
     и т.п.) при необходимости — зона расширения следующей итерации.
+
+    Приватная функция kestrel-пути — вызывается диспетчером ``start()`` и
+    напрямую из ``standkit.hosting.KestrelBackend`` (во избежание рекурсии
+    диспетчер↔бэкенд, см. ADR-0001).
     """
     _require_local(stand)
 
@@ -160,8 +227,11 @@ def start(
     return pid
 
 
-def stop(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
-    """Останавливает стенд, если он запущен. Возвращает True при успешной остановке."""
+def _kestrel_stop(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+    """Останавливает стенд, если он запущен. Возвращает True при успешной остановке.
+
+    Приватная функция kestrel-пути — см. ``_kestrel_start``.
+    """
     _require_local(stand)
 
     pf = pidfile_path(stand, run_dir)
@@ -178,14 +248,22 @@ def stop(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
     return stopped
 
 
-def restart(stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None) -> int:
-    """Останавливает (если жив) и заново запускает стенд. Возвращает новый pid."""
-    stop(stand, run_dir=run_dir)
-    return start(stand, run_dir=run_dir, log_dir=log_dir)
+def _kestrel_restart(
+    stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None
+) -> int:
+    """Останавливает (если жив) и заново запускает стенд. Возвращает новый pid.
+
+    Приватная функция kestrel-пути — см. ``_kestrel_start``.
+    """
+    _kestrel_stop(stand, run_dir=run_dir)
+    return _kestrel_start(stand, run_dir=run_dir, log_dir=log_dir)
 
 
-def is_running(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
-    """Быстрая проверка «жив ли стенд» по pidfile (обёртка над standkit.health.process_alive)."""
+def _kestrel_is_running(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+    """Быстрая проверка «жив ли стенд» по pidfile (обёртка над standkit.health.process_alive).
+
+    Приватная функция kestrel-пути — см. ``_kestrel_start``.
+    """
     _require_local(stand)
     pid = _read_pid(pidfile_path(stand, run_dir))
     return pid is not None and _platform.is_alive(pid)

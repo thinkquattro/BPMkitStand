@@ -30,6 +30,22 @@ class Transport(str, Enum):
     WINRM = "winrm"
 
 
+class HostKind(str, Enum):
+    """
+    Как стенд ХОСТИТСЯ на своей машине — ортогонально ``Transport`` (тот
+    определяет, ГДЕ управлять стендом: локально или через агента).
+
+    См. ADR-0001 (docs/adr/0001-hosting-backends.md) и standkit.hosting.
+    """
+
+    KESTREL = "kestrel"
+    IIS = "iis"
+    DOCKER = "docker"
+    # Задел на будущее — схема допускает значение, логики пока нет
+    # (следующий этап, отдельный ADR).
+    K8S = "k8s"
+
+
 class ProbeState(str, Enum):
     """Единое множество состояний для любой health-пробы."""
 
@@ -59,6 +75,23 @@ class Stand:
     transport: Transport = Transport.LOCAL
     agent_url: Optional[str] = None
     agent_secret_ref: Optional[str] = None
+
+    # --- Хостинг стенда (см. ADR-0001, standkit.hosting) ---
+    host_kind: HostKind = HostKind.KESTREL
+    # iis (используются, только если host_kind == IIS)
+    iis_site: Optional[str] = None
+    iis_app_pool: Optional[str] = None
+    iis_stdout_log_dir: Optional[str] = None
+    # docker (используются, только если host_kind == DOCKER)
+    docker_container: Optional[str] = None
+    docker_compose_file: Optional[str] = None
+    docker_compose_service: Optional[str] = None
+    # k8s (используются, только если host_kind == K8S)
+    k8s_namespace: str = ""
+    k8s_deployment: Optional[str] = None
+    k8s_context: Optional[str] = None
+    k8s_container: Optional[str] = None
+    k8s_replicas: int = 1
 
     # --- Процесс стенда ---
     stand_dir: str = ""
@@ -104,6 +137,8 @@ class Stand:
         for key, value in data.items():
             if key == "transport":
                 kwargs["transport"] = _coerce_transport(value)
+            elif key == "host_kind":
+                kwargs["host_kind"] = _coerce_host_kind(value)
             elif key in known:
                 kwargs[key] = value
             elif key == "name":
@@ -121,6 +156,8 @@ class Stand:
             value = getattr(self, f.name)
             if f.name == "transport":
                 value = value.value if isinstance(value, Transport) else value
+            elif f.name == "host_kind":
+                value = value.value if isinstance(value, HostKind) else value
             result[f.name] = value
         result.update(self.extra)
         return result
@@ -139,6 +176,20 @@ class Stand:
         if self.transport == Transport.AGENT:
             if not self.agent_url:
                 errors.append("transport=agent требует agent_url")
+        if self.host_kind == HostKind.IIS:
+            if not (self.iis_site or self.iis_app_pool):
+                errors.append("host_kind=iis требует iis_site и/или iis_app_pool")
+        if self.host_kind == HostKind.DOCKER:
+            has_single = bool(self.docker_container)
+            has_compose = bool(self.docker_compose_file and self.docker_compose_service)
+            if not (has_single or has_compose):
+                errors.append(
+                    "host_kind=docker требует docker_container либо "
+                    "(docker_compose_file И docker_compose_service)"
+                )
+        if self.host_kind == HostKind.K8S:
+            if not self.k8s_deployment:
+                errors.append("host_kind=k8s требует k8s_deployment")
         return errors
 
 
@@ -151,6 +202,17 @@ def _coerce_transport(value: Any) -> Transport:
         # Неизвестное будущее значение транспорта — не роняем чтение реестра,
         # оставляем как UNKNOWN-эквивалент через LOCAL с пометкой в extra.
         return Transport.LOCAL
+
+
+def _coerce_host_kind(value: Any) -> HostKind:
+    if isinstance(value, HostKind):
+        return value
+    try:
+        return HostKind(str(value))
+    except ValueError:
+        # Неизвестное будущее значение хостинга — не роняем чтение реестра,
+        # откатываемся на дефолтный kestrel.
+        return HostKind.KESTREL
 
 
 @dataclass
