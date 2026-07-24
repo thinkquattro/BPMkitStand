@@ -1,16 +1,55 @@
 /* Vanilla CSS дашборда standkit — без внешних ресурсов, без сборки. */
 
+/*
+ * Тема (light/dark) — переключается атрибутом data-theme на <html>
+ * (см. app.js::setupTheme). Дефолт (без атрибута/light) — переменные ниже.
+ * Тёмная тема переопределяет их в блоке [data-theme="dark"] в конце файла.
+ * Всё остальное CSS-правило файла ссылается ТОЛЬКО на переменные — ни одного
+ * захардкоженного цвета вне двух этих блоков, иначе тема "протекает".
+ *
+ * БРЕНД BPMkit: акцентный цвет продукта — оранжевый #f9763d (тот же, что в
+ * иконке "k" на тёмном фоне) — единый для обеих тем, минималистичный стиль,
+ * без лишних рамок/теней.
+ */
+
 :root {
-  --bpmkit-primary: #2f6fed;
-  --bpmkit-bg: #f4f6fb;
+  --bpmkit-primary: #f9763d;
+  --bpmkit-primary-contrast: #ffffff;
+  --bpmkit-bg: #f7f7f8;
   --bpmkit-panel-bg: #ffffff;
-  --bpmkit-border: #dde3ee;
-  --bpmkit-text: #1c2333;
-  --bpmkit-muted: #6b7488;
+  --bpmkit-border: #e3e2e0;
+  --bpmkit-text: #201f1d;
+  --bpmkit-muted: #6b6864;
   --bpmkit-ok: #1f9d55;
   --bpmkit-down: #d84040;
   --bpmkit-unknown: #b98900;
   --bpmkit-skipped: #9aa3b5;
+  /* Панель "Текущее состояние" (<pre>) — тёмная в обеих темах (консоль),
+     но с отдельными переменными, чтобы тёмная тема могла её отличить от фона. */
+  --bpmkit-console-bg: #1e1e1e;
+  --bpmkit-console-text: #d7dee8;
+  --bpmkit-row-hover: #faf3ee;
+  --bpmkit-row-selected: #fdece1;
+  --bpmkit-code-bg: #f1efec;
+}
+
+[data-theme="dark"] {
+  --bpmkit-primary: #f9763d;
+  --bpmkit-primary-contrast: #ffffff;
+  --bpmkit-bg: #1e1e1e;
+  --bpmkit-panel-bg: #2b2b2b;
+  --bpmkit-border: #3a3a3a;
+  --bpmkit-text: #e9e7e4;
+  --bpmkit-muted: #a3a09b;
+  --bpmkit-ok: #3ecb7a;
+  --bpmkit-down: #f06868;
+  --bpmkit-unknown: #d6a63a;
+  --bpmkit-skipped: #8a877f;
+  --bpmkit-console-bg: #141414;
+  --bpmkit-console-text: #d7dee8;
+  --bpmkit-row-hover: #333029;
+  --bpmkit-row-selected: #3d2c1f;
+  --bpmkit-code-bg: #262523;
 }
 
 * {
@@ -61,12 +100,171 @@ body {
 
 .tab-btn.active {
   background: var(--bpmkit-primary);
-  color: white;
+  color: var(--bpmkit-primary-contrast);
 }
 
+.theme-toggle-btn {
+  background: transparent;
+  color: var(--bpmkit-text);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.theme-toggle-btn:hover {
+  filter: brightness(1.1);
+  background: var(--bpmkit-bg);
+}
+
+/* --- кнопка "О программе" (topbar) — БЕЗ фона, оранжевая иконка (бренд) --- */
+
+.about-btn {
+  background: transparent;
+  color: var(--bpmkit-primary);
+  border: none;
+  border-radius: 6px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.about-btn:hover {
+  background: var(--bpmkit-bg);
+}
+
+/* --- индикатор связи с хабом (точка + подпись, НЕ похож на меню) --- */
+
 .conn-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   color: var(--bpmkit-muted);
+}
+
+.conn-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bpmkit-skipped);
+}
+
+.conn-status-dot-pending {
+  background: var(--bpmkit-skipped);
+}
+
+.conn-status-dot-ok {
+  background: var(--bpmkit-ok);
+}
+
+.conn-status-dot-down {
+  background: var(--bpmkit-down);
+}
+
+/* --- модалка "О программе" --- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-overlay[hidden] {
+  display: none;
+}
+
+.modal-box {
+  width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+  background: var(--bpmkit-panel-bg);
+  color: var(--bpmkit-text);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.16);
+  padding: 0;
+}
+
+.modal-box-confirm {
+  width: min(380px, calc(100vw - 32px));
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--bpmkit-border);
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.modal-close-btn {
+  background: transparent;
+  color: var(--bpmkit-muted);
+  border: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.modal-close-btn:hover {
+  background: var(--bpmkit-bg);
+  color: var(--bpmkit-text);
+}
+
+.modal-body {
+  padding: 16px 18px;
+  font-size: 13px;
+}
+
+.modal-body p {
+  margin: 0 0 10px;
+}
+
+.modal-note {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bpmkit-code-bg);
+  border: 1px solid var(--bpmkit-border);
+}
+
+.modal-note h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.modal-note p {
+  margin: 0;
+  color: var(--bpmkit-muted);
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 18px;
+  border-top: 1px solid var(--bpmkit-border);
 }
 
 main {
@@ -92,7 +290,7 @@ main {
 
 button {
   background: var(--bpmkit-primary);
-  color: white;
+  color: var(--bpmkit-primary-contrast);
   border: none;
   border-radius: 6px;
   padding: 7px 14px;
@@ -108,6 +306,16 @@ button.secondary {
   background: var(--bpmkit-muted);
 }
 
+button.danger {
+  background: var(--bpmkit-down);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  filter: none;
+}
+
 .error-text {
   color: var(--bpmkit-down);
   font-size: 13px;
@@ -116,6 +324,54 @@ button.secondary {
 .status-text {
   color: var(--bpmkit-muted);
   font-size: 13px;
+}
+
+/* --- область статуса действий (плавающий тост, НЕ в потоке документа) ---
+ *
+ * Раньше это был блочный элемент над таблицей стендов — его появление
+ * сдвигало вёрстку вниз (page jump). Теперь — position: fixed поверх
+ * контента (низ-право), с fade+slide переходом; документ не двигается
+ * независимо от того, показан тост или нет. Цвета берутся из тех же
+ * CSS-переменных, что и остальной UI — читаемость в обеих темах гарантирована
+ * (panel-bg/text меняются по [data-theme="dark"], см. :root выше).
+ */
+
+.action-status {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1200;
+  min-width: 220px;
+  max-width: min(420px, calc(100vw - 32px));
+  margin-bottom: 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  border: 1px solid var(--bpmkit-border);
+  background: var(--bpmkit-panel-bg);
+  color: var(--bpmkit-text);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.2);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(10px);
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s;
+}
+
+.action-status.action-status-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.action-status.action-status-ok {
+  border-color: var(--bpmkit-ok);
+}
+
+.action-status.action-status-error {
+  border-color: var(--bpmkit-down);
+  color: var(--bpmkit-down);
 }
 
 .stands-table {
@@ -175,11 +431,11 @@ button.secondary {
 }
 
 .stands-table tbody tr:hover {
-  background: #f8fafd;
+  background: var(--bpmkit-row-hover);
 }
 
 .stands-table tbody tr.selected {
-  background: #e8f0fe;
+  background: var(--bpmkit-row-selected);
   box-shadow: inset 3px 0 0 var(--bpmkit-primary);
 }
 
@@ -215,7 +471,7 @@ button.secondary {
   font-weight: 400;
 }
 
-/* --- иконки действий (Старт/Стоп/Рестарт) --- */
+/* --- иконки действий (Старт/Стоп/Рестарт/Очистить Redis) --- */
 
 .icon-btn {
   display: inline-flex;
@@ -243,8 +499,46 @@ button.secondary {
   background: var(--bpmkit-primary);
 }
 
+.icon-btn-redis {
+  background: var(--bpmkit-muted);
+  margin-right: 0;
+}
+
 .icon-btn:hover {
   filter: brightness(1.1);
+}
+
+.icon-btn:disabled,
+.icon-btn:disabled:hover {
+  opacity: 0.35;
+  filter: none;
+  cursor: not-allowed;
+}
+
+/* --- индикатор "запуск…" (честный старт, см. app.js::checkStartingTransitions) --- */
+
+.process-starting {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--bpmkit-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mini-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--bpmkit-border);
+  border-top-color: var(--bpmkit-primary);
+  animation: bpmkit-spin 0.8s linear infinite;
+}
+
+@keyframes bpmkit-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* --- панель "Текущее состояние" --- */
@@ -269,6 +563,7 @@ button.secondary {
 .state-panel-header h2 {
   font-size: 14px;
   margin: 0;
+  color: var(--bpmkit-text);
 }
 
 .state-panel-controls {
@@ -277,63 +572,72 @@ button.secondary {
   gap: 8px;
 }
 
-.state-panel-controls select {
-  padding: 5px 8px;
-  border: 1px solid var(--bpmkit-border);
-  border-radius: 6px;
-  font-size: 12px;
-  max-width: 260px;
+/* --- сплит-кнопка "Открыть папку логов" (кнопка + маленькое меню-поповер) --- */
+
+.split-btn {
+  position: relative;
+  display: inline-block;
 }
 
-.log-source-label {
-  display: flex;
+.split-btn-toggle {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  white-space: nowrap;
+}
+
+.split-btn-caret {
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+.split-btn-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  background: var(--bpmkit-panel-bg);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.14);
+  padding: 4px;
+  z-index: 100;
+}
+
+.split-btn-menu-item {
+  display: block;
+  width: 100%;
+  background: transparent;
+  color: var(--bpmkit-text);
+  border: none;
+  border-radius: 6px;
+  padding: 7px 10px;
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.split-btn-menu-item:hover {
+  background: var(--bpmkit-row-hover);
+  filter: none;
+}
+
+.split-btn-menu-item:disabled,
+.split-btn-menu-item:disabled:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: transparent;
 }
 
 #state-output {
   max-height: 320px;
   overflow: auto;
-  background: #10141f;
-  color: #d7dee8;
+  background: var(--bpmkit-console-bg);
+  color: var(--bpmkit-console-text);
   padding: 10px;
   border-radius: 6px;
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-/* --- карточка MCP / Companion --- */
-
-.companion-card {
-  margin-top: 16px;
-  background: var(--bpmkit-panel-bg);
-  border: 1px solid var(--bpmkit-border);
-  border-radius: 8px;
-  padding: 14px 18px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.companion-card-title {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.companion-card-note {
-  font-size: 12px;
-  color: var(--bpmkit-muted);
-  margin-top: 2px;
-}
-
-.companion-card button:disabled {
-  background: var(--bpmkit-skipped);
-  cursor: not-allowed;
 }
 
 /* --- пояснение вкладки "Локальный агент" --- */
@@ -356,7 +660,7 @@ button.secondary {
 }
 
 .agent-explainer code {
-  background: var(--bpmkit-bg);
+  background: var(--bpmkit-code-bg);
   padding: 1px 5px;
   border-radius: 4px;
 }
@@ -372,6 +676,7 @@ button.secondary {
 .settings-form legend {
   font-weight: 600;
   padding: 0 6px;
+  color: var(--bpmkit-text);
 }
 
 .settings-form label {
@@ -390,6 +695,7 @@ button.secondary {
   border: 1px solid var(--bpmkit-border);
   border-radius: 6px;
   font-size: 13px;
+  background: var(--bpmkit-panel-bg);
   color: var(--bpmkit-text);
 }
 
@@ -431,6 +737,8 @@ button.secondary {
   padding: 6px 8px;
   border: 1px solid var(--bpmkit-border);
   border-radius: 6px;
+  background: var(--bpmkit-panel-bg);
+  color: var(--bpmkit-text);
 }
 
 .agent-row button {

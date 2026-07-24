@@ -103,29 +103,37 @@ class FederatedClient:
                 result[name] = StandStatus(name=name, details={"error": str(exc)})
         return result
 
-    def start(self, name: str) -> None:
-        self._dispatch_action(name, "start")
+    def start(self, name: str) -> Optional[int]:
+        """Запускает стенд. Возвращает pid, если транспорт его предоставляет (см. ``_dispatch_action``)."""
+        return self._dispatch_action(name, "start")
 
-    def stop(self, name: str) -> None:
-        self._dispatch_action(name, "stop")
+    def stop(self, name: str) -> Optional[bool]:
+        return self._dispatch_action(name, "stop")
 
-    def restart(self, name: str) -> None:
-        self._dispatch_action(name, "restart")
+    def restart(self, name: str) -> Optional[int]:
+        """Перезапускает стенд. Возвращает pid, если транспорт его предоставляет."""
+        return self._dispatch_action(name, "restart")
 
-    def _dispatch_action(self, name: str, action: str) -> None:
+    def _dispatch_action(self, name: str, action: str):
+        """
+        Диспетчеризует start/stop/restart по транспорту и ПРОКИДЫВАЕТ результат
+        наверх (для "local" — то, что вернул ``standkit.lifecycle`` — pid для
+        start/restart, bool для stop; для "agent" — ``pid`` из JSON-ответа
+        агента, если есть), чтобы UI хаба мог показать pid успешного старта, а
+        не только голое "ok".
+        """
         stand = self.registry.get(name)
 
         if stand.transport == Transport.LOCAL:
             fn = getattr(lifecycle, action)
-            fn(stand)
-            return
+            return fn(stand)
 
         if stand.transport == Transport.AGENT:
             if not stand.agent_url or not stand.agent_secret_ref:
                 raise RemoteCallError(stand.agent_url or "?", "не задан agent_url/agent_secret_ref")
             token = get_secret(stand.agent_secret_ref)
-            _agent_request(stand.agent_url, f"/stand/{name}/{action}", token, method="POST")
-            return
+            data = _agent_request(stand.agent_url, f"/stand/{name}/{action}", token, method="POST")
+            return data.get("pid") if isinstance(data, dict) else None
 
         raise NotImplementedError(
             f"Транспорт {stand.transport.value!r} для стенда '{name}' пока не реализован (TODO)"

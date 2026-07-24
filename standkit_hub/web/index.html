@@ -17,8 +17,51 @@
       <button class="tab-btn" data-tab="agent">Локальный агент</button>
       <button class="tab-btn" data-tab="settings">Настройки</button>
     </nav>
-    <span id="conn-status" class="conn-status">…</span>
+    <button id="about-btn" class="about-btn" type="button" title="О программе">ⓘ</button>
+    <button id="theme-toggle-btn" class="theme-toggle-btn" type="button" title="Переключить тему">🌓</button>
+    <span id="conn-status" class="conn-status" title="Связь с хабом не проверялась">
+      <span id="conn-status-dot" class="conn-status-dot conn-status-dot-pending"></span>
+      <span id="conn-status-label">подключение…</span>
+    </span>
   </header>
+
+  <div id="about-modal-overlay" class="modal-overlay" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="about-modal-title">
+      <div class="modal-header">
+        <h2 id="about-modal-title">О программе</h2>
+        <button id="about-modal-close-btn" class="modal-close-btn" type="button" title="Закрыть">✕</button>
+      </div>
+      <div class="modal-body">
+        <p>BPMkitStand — свободный диспетчер стендов BPMSoft (часть экосистемы BPMkit).</p>
+        <p>Версия: <span id="about-modal-version">…</span></p>
+        <div class="modal-note">
+          <h3>Обновления и лицензия</h3>
+          <p>Автообновление MCP и лицензия доступны в платном Companion. Бесплатная версия — управление стендами.</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="about-modal-close-footer-btn" type="button" class="secondary">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Стилизованное подтверждение (замена window.confirm) — переиспользует
+       классы модалки "О программе"; используется для Стоп/Рестарт/Очистить Redis. -->
+  <div id="confirm-modal-overlay" class="modal-overlay" hidden>
+    <div class="modal-box modal-box-confirm" role="alertdialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+      <div class="modal-header">
+        <h2 id="confirm-modal-title">Подтверждение</h2>
+        <button id="confirm-modal-close-btn" class="modal-close-btn" type="button" title="Отмена">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="confirm-modal-text"></p>
+      </div>
+      <div class="modal-footer">
+        <button id="confirm-modal-cancel-btn" type="button" class="secondary">Отмена</button>
+        <button id="confirm-modal-ok-btn" type="button" class="danger">Подтвердить</button>
+      </div>
+    </div>
+  </div>
 
   <main>
     <section id="tab-stands" class="tab-panel active">
@@ -26,6 +69,7 @@
         <button id="refresh-stands-btn">Обновить</button>
         <span id="stands-error" class="error-text"></span>
       </div>
+      <div id="action-status" class="action-status" role="status" aria-live="polite"></div>
       <table class="stands-table">
         <thead>
           <tr>
@@ -34,7 +78,6 @@
             <th>Процесс</th>
             <th>HTTP</th>
             <th>БД</th>
-            <th>Redis</th>
             <th>Действия</th>
           </tr>
         </thead>
@@ -46,29 +89,23 @@
         <div class="state-panel-header">
           <h2>Текущее состояние <span id="state-stand-name"></span></h2>
           <div class="state-panel-controls">
-            <label class="log-source-label">
-              Источник логов
-              <select id="log-source-select">
-                <option value="stand" title="Логи стенда (&lt;stand_dir&gt;/logs)" selected>Стенд</option>
-                <option value="bpmkit" title="Логи MCP (logs_path)">BPMkit</option>
-              </select>
-            </label>
-            <select id="log-file-select" title="Лог-файл из выбранного источника">
-              <option value="">(основной лог)</option>
-            </select>
-            <button id="log-file-open-btn" class="secondary" title="Показать выбранный файл">Открыть</button>
-            <button id="log-folder-open-btn" class="secondary" title="Открыть папку логов выбранного источника в проводнике ОС">Открыть папку логов</button>
+            <div class="split-btn" id="log-folder-split-btn">
+              <button
+                id="log-folder-open-btn"
+                class="secondary split-btn-toggle"
+                type="button"
+                title="Открыть папку логов"
+                aria-haspopup="true"
+                aria-expanded="false"
+              >Открыть папку логов <span class="split-btn-caret" aria-hidden="true">▾</span></button>
+              <div id="log-folder-menu" class="split-btn-menu" role="menu" hidden>
+                <button type="button" class="split-btn-menu-item" data-source="stand" role="menuitem">Папка стенда</button>
+                <button id="log-folder-item-bpmkit" type="button" class="split-btn-menu-item" data-source="bpmkit" role="menuitem">Папка BPMkit</button>
+              </div>
+            </div>
           </div>
         </div>
         <pre id="state-output">Выберите стенд в таблице, чтобы увидеть текущее состояние.</pre>
-      </div>
-
-      <div class="companion-card">
-        <div class="companion-card-body">
-          <div class="companion-card-title">MCP BPMkit: версия <span id="mcp-version">…</span></div>
-          <div class="companion-card-note">Автообновление MCP и лицензия — в платном Companion.</div>
-        </div>
-        <button id="mcp-update-btn" class="secondary" disabled title="Доступно в Companion">Обновить MCP</button>
       </div>
     </section>
 
