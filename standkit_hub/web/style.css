@@ -421,6 +421,7 @@ body {
 .modal-footer {
   display: flex;
   justify-content: flex-end;
+  gap: 8px; /* кнопки не должны слипаться */
   padding: 12px 18px;
   border-top: 1px solid var(--bpmkit-border);
 }

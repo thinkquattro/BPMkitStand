@@ -553,6 +553,26 @@
     }
   }
 
+  // Ручное обновление по кнопке — с видимой обратной связью: кнопка
+  // блокируется и меняет подпись на «Обновление…», по завершении показывается
+  // подтверждение со временем (у автообновления по таймеру этого нет, чтобы не
+  // мигать постоянно).
+  async function refreshStandsWithFeedback() {
+    const btn = document.getElementById("refresh-stands-btn");
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Обновление…";
+    try {
+      await refreshStands();
+      if (!document.getElementById("stands-error").textContent) {
+        showActionStatus(`Список обновлён • ${new Date().toLocaleTimeString()}`, false);
+      }
+    } finally {
+      btn.textContent = orig;
+      btn.disabled = false;
+    }
+  }
+
   function renderStands(stands) {
     const tbody = document.getElementById("stands-tbody");
     tbody.innerHTML = "";
@@ -952,7 +972,7 @@
     setupAgentTab();
     setupSettingsForm();
     setupStatePanel();
-    document.getElementById("refresh-stands-btn").addEventListener("click", refreshStands);
+    document.getElementById("refresh-stands-btn").addEventListener("click", refreshStandsWithFeedback);
 
     refreshStands();
     refreshAgentStatus();

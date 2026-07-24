@@ -90,12 +90,25 @@ def resolve_logs_dir(stand: Stand, source: str = DEFAULT_LOG_SOURCE) -> Optional
     return p
 
 
-def list_log_files(logs_dir: Path) -> list[dict]:
+def start_of_today_ts() -> float:
+    """Unix-timestamp локальной полуночи сегодняшнего дня (для отсечения
+    старых логов «старше сегодня» — логи IIS/.NET по дням бывают очень тяжёлыми)."""
+    import datetime as _dt
+
+    now = _dt.datetime.now()
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def list_log_files(logs_dir: Path, *, since_mtime: Optional[float] = None) -> list[dict]:
     """
     Список лог-файлов каталога, ВКЛЮЧАЯ вложенные подкаталоги: стенды BPMSoft
     (и .NET-хосты вообще) часто пишут логи не плоско, а в подпапки по датам,
     например ``logs/2026-07-24/*.log``. Без рекурсии верхний уровень содержал
     бы только папки, и хаб ошибочно сообщал «в каталоге нет файлов».
+
+    ``since_mtime`` (опц.) — не включать файлы, изменённые РАНЬШЕ этого unix-ts
+    (напр. ``start_of_today_ts()`` — «только за сегодня»): у IIS/.NET накапливаются
+    сотни тяжёлых дневных файлов, перечислять/читать всё — дорого.
 
     ``name`` — путь файла ОТНОСИТЕЛЬНО ``logs_dir`` в POSIX-форме (с прямыми
     слэшами, напр. ``2026-07-24/app.log``), совместимый с
@@ -110,15 +123,18 @@ def list_log_files(logs_dir: Path) -> list[dict]:
             st = child.stat()
         except OSError:
             continue
+        if since_mtime is not None and st.st_mtime < since_mtime:
+            continue
         rel = child.relative_to(logs_dir).as_posix()
         entries.append({"name": rel, "size": st.st_size, "mtime": st.st_mtime})
     entries.sort(key=lambda e: e["mtime"], reverse=True)
     return entries
 
 
-def pick_primary_log(logs_dir: Path) -> Optional[Path]:
-    """Выбирает "основной" лог каталога — самый свежий по mtime файл."""
-    files = list_log_files(logs_dir)
+def pick_primary_log(logs_dir: Path, *, since_mtime: Optional[float] = None) -> Optional[Path]:
+    """Выбирает "основной" лог каталога — самый свежий по mtime файл. С
+    ``since_mtime`` учитывает только файлы не старше указанного момента."""
+    files = list_log_files(logs_dir, since_mtime=since_mtime)
     if not files:
         return None
     return logs_dir / files[0]["name"]

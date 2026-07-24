@@ -266,3 +266,36 @@ def test_open_folder_uses_os_startfile_on_windows(tmp_path, monkeypatch):
     result = open_folder(tmp_path)
     assert result.ok is True
     assert calls["path"] == str(tmp_path)
+
+
+def test_list_log_files_since_mtime_filters_older(tmp_path):
+    import os
+    import time
+
+    old = tmp_path / "old.log"
+    old.write_text("o", encoding="utf-8")
+    new = tmp_path / "new.log"
+    new.write_text("n", encoding="utf-8")
+    day_ago = time.time() - 86400
+    os.utime(old, (day_ago, day_ago))
+
+    cutoff = time.time() - 3600  # час назад
+    assert [f["name"] for f in list_log_files(tmp_path, since_mtime=cutoff)] == ["new.log"]
+    # без cutoff — оба
+    assert {f["name"] for f in list_log_files(tmp_path)} == {"old.log", "new.log"}
+
+
+def test_pick_primary_log_since_mtime_ignores_old(tmp_path):
+    import os
+    import time
+
+    day = tmp_path / "2026-01-01"
+    day.mkdir()
+    old = day / "a.log"
+    old.write_text("o", encoding="utf-8")
+    day_ago = time.time() - 86400
+    os.utime(old, (day_ago, day_ago))
+
+    # только старый файл: с cutoff «за сегодня» → None; без cutoff → он.
+    assert pick_primary_log(tmp_path, since_mtime=time.time() - 3600) is None
+    assert pick_primary_log(tmp_path) == old
