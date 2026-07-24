@@ -150,6 +150,10 @@ class Registry:
         payload["default"] = self.default
         payload["projects"] = {name: stand.to_dict() for name, stand in self._stands.items()}
         text = json.dumps(payload, ensure_ascii=False, indent=2)
+        # На свежей машине папка реестра (напр. %APPDATA%\BPMkit) может ещё не
+        # существовать — создаём её, иначе write_text падает FileNotFoundError
+        # при первой регистрации стенда (как это делает и запись конфига хаба).
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(text, encoding="utf-8")
 
     # --- доступ к записям ---

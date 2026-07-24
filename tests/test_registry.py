@@ -58,6 +58,23 @@ def test_add_existing_rejects_invalid_stand(tmp_path):
         reg.add_existing(bad_stand)
 
 
+def test_save_creates_missing_parent_dir(tmp_path):
+    # Свежая машина: папки реестра (напр. %APPDATA%\BPMkit) ещё нет.
+    # save() должен создать её сам, а не падать FileNotFoundError.
+    reg_path = tmp_path / "does_not_exist_yet" / "BPMkit" / "projects.json"
+    reg = Registry.load(reg_path)
+    reg.add_existing(
+        Stand(name="s1", stand_dir=str(tmp_path / "s1"), transport=Transport.LOCAL),
+        make_default=True,
+    )
+
+    reg.save()  # не должно бросать исключение
+
+    assert reg_path.exists()
+    assert reg_path.parent.is_dir()
+    assert "s1" in Registry.load(reg_path)
+
+
 def test_load_tolerates_bom(tmp_path):
     reg_path = tmp_path / "projects.json"
     payload = {"default": "demo", "stands": {"demo": {"transport": "local", "stand_dir": "/opt/demo"}}}
