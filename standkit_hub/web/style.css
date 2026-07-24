@@ -264,7 +264,7 @@ body {
 }
 
 .about-modal-logo-img {
-  width: min(260px, 100%);
+  width: min(200px, 100%);
   height: auto;
   display: none;
 }
@@ -282,21 +282,72 @@ body {
 }
 
 .modal-note {
-  margin-top: 14px;
+  margin: 0 0 14px;
   padding: 10px 12px;
   border-radius: 8px;
   background: var(--bpmkit-code-bg);
   border: 1px solid var(--bpmkit-border);
 }
 
-.modal-note h3 {
-  margin: 0 0 6px;
-  font-size: 13px;
-}
-
 .modal-note p {
   margin: 0;
   color: var(--bpmkit-muted);
+  font-size: 12px;
+}
+
+.modal-note p + p {
+  margin-top: 4px;
+}
+
+.modal-note-link {
+  color: var(--bpmkit-primary);
+  font-weight: 400;
+  text-decoration: none;
+}
+
+.modal-note-link:hover {
+  text-decoration: underline;
+}
+
+/* --- иконочный футер модалки "О программе" (сайт/репозиторий/telegram) --- */
+
+.about-modal-icons {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--bpmkit-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.about-modal-icons-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.about-modal-author-name {
+  font-size: 12px;
+  color: var(--bpmkit-muted);
+}
+
+.about-modal-icon-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--bpmkit-muted);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.about-modal-icon-link:hover,
+.about-modal-icon-link:focus-visible {
+  color: var(--bpmkit-primary);
+  background: var(--bpmkit-code-bg);
 }
 
 .modal-footer {
