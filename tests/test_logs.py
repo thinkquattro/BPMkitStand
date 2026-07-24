@@ -14,7 +14,7 @@ from __future__ import annotations
 import threading
 import time as _time
 
-from standkit.logs import _decode_bytes, follow, tail
+from standkit.logs import _decode_bytes, extract_current_session, follow, tail
 
 
 # --- tail(): базовое поведение ---
@@ -133,3 +133,73 @@ def test_follow_yields_new_lines_with_mixed_encodings(tmp_path):
 
     thread.join(timeout=3.0)
     assert collected == ["новая строка (utf-8)", "Ошибка в cp1251"]
+
+
+# --- extract_current_session(): обрезка лога до последней сессии стенда ---
+
+
+def test_extract_current_session_multisession_returns_only_last_section():
+    # Несколько блоков "=== START pid=…" — должна остаться ТОЛЬКО последняя
+    # секция (от последнего маркера до конца), прошлые запуски отрезаются.
+    text = (
+        "=== START pid=100 ts=2026-01-01T00:00:00 ===\n"
+        "Application starting\n"
+        "старый запуск 1, строка A\n"
+        "старый запуск 1, строка B\n"
+        "=== START pid=200 ts=2026-01-01T01:00:00 ===\n"
+        "Application starting\n"
+        "старый запуск 2, строка A\n"
+        "=== START pid=300 ts=2026-01-01T02:00:00 ===\n"
+        "Application starting\n"
+        "Application started\n"
+        "текущая сессия, строка A\n"
+        "текущая сессия, строка B"
+    )
+    result = extract_current_session(text)
+    assert result.startswith("=== START pid=300")
+    assert "старый запуск 1" not in result
+    assert "старый запуск 2" not in result
+    assert "текущая сессия, строка A" in result
+    assert "текущая сессия, строка B" in result
+
+
+def test_extract_current_session_no_start_marker_falls_back_to_last_application_starting():
+    # Нет "=== START pid=" вообще (лог ведёт не сам standkit) — но есть
+    # несколько "Application starting": берём от ПОСЛЕДНЕГО вхождения.
+    text = (
+        "Application starting\n"
+        "старый запуск, строка A\n"
+        "Application starting\n"
+        "Application started\n"
+        "текущая сессия, строка A\n"
+        "текущая сессия, строка B"
+    )
+    result = extract_current_session(text)
+    assert result.count("Application starting") == 1
+    assert "старый запуск" not in result
+    assert "текущая сессия, строка A" in result
+    assert "текущая сессия, строка B" in result
+
+
+def test_extract_current_session_no_boundaries_returns_text_as_is():
+    text = "просто строка без маркеров\nещё одна строка"
+    assert extract_current_session(text) == text
+
+
+def test_extract_current_session_empty_text_returns_as_is():
+    assert extract_current_session("") == ""
+
+
+def test_extract_current_session_start_marker_wins_over_application_starting():
+    # Если есть ОБА типа маркеров — приоритет за "=== START pid=" (последнее
+    # вхождение), даже если "Application starting" встречается позже него.
+    text = (
+        "Application starting\n"
+        "старый запуск без маркера START, строка A\n"
+        "=== START pid=555 ts=2026-01-01T03:00:00 ===\n"
+        "Application starting\n"
+        "текущая сессия, строка A"
+    )
+    result = extract_current_session(text)
+    assert result.startswith("=== START pid=555")
+    assert "старый запуск без маркера START" not in result

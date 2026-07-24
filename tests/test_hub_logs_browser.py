@@ -1,9 +1,9 @@
 """
 Тесты standkit_hub.logs_browser: резолв каталога логов стенда из ДВУХ
 источников (``source="stand"`` — ``<stand_dir>/logs``, ``source="bpmkit"`` —
-``extra["logs_path"]``), листинг файлов, выбор "основного" (самого свежего)
-лога, санитайзинг имени файла (защита от traversal), open_folder (не должен
-падать при отсутствии утилиты/каталога).
+``<extra["docs_folder"]>/logs``, НЕ ``extra["logs_path"]``), листинг файлов,
+выбор "основного" (самого свежего) лога, санитайзинг имени файла (защита от
+traversal), open_folder (не должен падать при отсутствии утилиты/каталога).
 """
 
 from __future__ import annotations
@@ -28,9 +28,12 @@ def _stand_with_stand_dir_logs(stand_dir) -> Stand:
     return Stand(name="s", stand_dir=str(stand_dir))
 
 
-def _stand_with_bpmkit_logs_path(path) -> Stand:
-    """Стенд с ``extra["logs_path"]`` (источник "bpmkit"), stand_dir — фиктивный."""
-    return Stand(name="s", stand_dir="/opt/s-not-a-real-dir", extra={"logs_path": str(path)})
+def _stand_with_docs_folder(path) -> Stand:
+    """
+    Стенд с ``extra["docs_folder"]`` (источник "bpmkit" резолвится в
+    ``<docs_folder>/logs``), stand_dir — фиктивный.
+    """
+    return Stand(name="s", stand_dir="/opt/s-not-a-real-dir", extra={"docs_folder": str(path)})
 
 
 # --- источник "stand" (<stand_dir>/logs) ---
@@ -66,33 +69,40 @@ def test_resolve_logs_dir_stand_none_when_logs_is_a_file(tmp_path):
     assert resolve_logs_dir(stand, source="stand") is None
 
 
-# --- источник "bpmkit" (extra["logs_path"]) ---
+# --- источник "bpmkit" (<extra["docs_folder"]>/logs, НЕ extra["logs_path"]) ---
 
 
-def test_resolve_logs_dir_bpmkit_none_when_not_set():
+def test_resolve_logs_dir_bpmkit_none_when_docs_folder_not_set():
     stand = Stand(name="s", stand_dir="/opt/s")
     assert resolve_logs_dir(stand, source="bpmkit") is None
 
 
-def test_resolve_logs_dir_bpmkit_none_when_path_missing(tmp_path):
-    stand = _stand_with_bpmkit_logs_path(tmp_path / "does-not-exist")
+def test_resolve_logs_dir_bpmkit_none_when_logs_subdir_missing(tmp_path):
+    # docs_folder существует, но <docs_folder>/logs не создан.
+    stand = _stand_with_docs_folder(tmp_path)
     assert resolve_logs_dir(stand, source="bpmkit") is None
 
 
-def test_resolve_logs_dir_bpmkit_none_when_path_is_a_file(tmp_path):
-    f = tmp_path / "not-a-dir.txt"
-    f.write_text("x", encoding="utf-8")
-    stand = _stand_with_bpmkit_logs_path(f)
+def test_resolve_logs_dir_bpmkit_none_when_docs_folder_missing(tmp_path):
+    stand = _stand_with_docs_folder(tmp_path / "does-not-exist")
+    assert resolve_logs_dir(stand, source="bpmkit") is None
+
+
+def test_resolve_logs_dir_bpmkit_none_when_logs_is_a_file(tmp_path):
+    (tmp_path / "logs").write_text("x", encoding="utf-8")
+    stand = _stand_with_docs_folder(tmp_path)
     assert resolve_logs_dir(stand, source="bpmkit") is None
 
 
 def test_resolve_logs_dir_bpmkit_ok(tmp_path):
-    stand = _stand_with_bpmkit_logs_path(tmp_path)
-    assert resolve_logs_dir(stand, source="bpmkit") == tmp_path
+    (tmp_path / "logs").mkdir()
+    stand = _stand_with_docs_folder(tmp_path)
+    assert resolve_logs_dir(stand, source="bpmkit") == tmp_path / "logs"
 
 
 def test_resolve_logs_dir_unknown_source_raises(tmp_path):
-    stand = _stand_with_bpmkit_logs_path(tmp_path)
+    (tmp_path / "logs").mkdir()
+    stand = _stand_with_docs_folder(tmp_path)
     with pytest.raises(ValueError):
         resolve_logs_dir(stand, source="something-else")
 
@@ -110,12 +120,12 @@ def test_raw_logs_path_stand_none_when_stand_dir_empty():
     assert raw_logs_path(stand, source="stand") is None
 
 
-def test_raw_logs_path_bpmkit_reflects_extra(tmp_path):
-    stand = _stand_with_bpmkit_logs_path(tmp_path / "somewhere")
-    assert raw_logs_path(stand, source="bpmkit") == str(tmp_path / "somewhere")
+def test_raw_logs_path_bpmkit_reflects_docs_folder_logs_subdir(tmp_path):
+    stand = _stand_with_docs_folder(tmp_path / "somewhere")
+    assert raw_logs_path(stand, source="bpmkit") == str(tmp_path / "somewhere" / "logs")
 
 
-def test_raw_logs_path_bpmkit_none_when_not_set():
+def test_raw_logs_path_bpmkit_none_when_docs_folder_not_set():
     stand = Stand(name="s", stand_dir="/opt/s")
     assert raw_logs_path(stand, source="bpmkit") is None
 
@@ -187,6 +197,8 @@ def test_open_folder_false_when_path_missing(tmp_path):
 
 def test_open_folder_does_not_raise_on_existing_dir(tmp_path, monkeypatch):
     # Подменяем subprocess.Popen, чтобы тест не открывал реальный проводник ОС.
+    # Ветка Windows (os.startfile) не выполняется на этой платформе — покрыта
+    # отдельным тестом ниже (test_open_folder_uses_os_startfile_on_windows).
     import standkit_hub.logs_browser as logs_browser_module
 
     calls = {}
@@ -199,3 +211,28 @@ def test_open_folder_does_not_raise_on_existing_dir(tmp_path, monkeypatch):
     result = open_folder(tmp_path)
     assert result.ok is True
     assert calls["args"]
+
+
+def test_open_folder_uses_os_startfile_on_windows(tmp_path, monkeypatch):
+    # На Windows open_folder должен звать os.startfile (надёжнее выводит
+    # окно проводника на передний план, чем subprocess-спавн explorer), а НЕ
+    # subprocess.Popen. os.startfile существует только на реальной Windows —
+    # на прочих платформах подставляем фейк через raising=False.
+    import standkit_hub.logs_browser as logs_browser_module
+
+    calls = {}
+
+    def _fake_startfile(path):
+        calls["path"] = path
+
+    monkeypatch.setattr(logs_browser_module.sys, "platform", "win32")
+    monkeypatch.setattr(logs_browser_module.os, "startfile", _fake_startfile, raising=False)
+
+    def _popen_should_not_be_called(*args, **kwargs):
+        raise AssertionError("subprocess.Popen не должен вызываться на Windows-ветке")
+
+    monkeypatch.setattr(logs_browser_module.subprocess, "Popen", _popen_should_not_be_called)
+
+    result = open_folder(tmp_path)
+    assert result.ok is True
+    assert calls["path"] == str(tmp_path)

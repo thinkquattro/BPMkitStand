@@ -132,6 +132,56 @@ def tail(log_path: Path, n: int = 100) -> list[str]:
     return lines[-n:] if n > 0 else []
 
 
+_SESSION_START_MARKER = "=== START pid="
+_APP_STARTING_MARKER = "Application starting"
+
+
+def extract_current_session(text: str) -> str:
+    """
+    Обрезает текст лога до ТЕКУЩЕЙ (последней) сессии стенда — панель
+    "Текущее состояние" в хабе не должна показывать хвост со ВСЕМИ прошлыми
+    запусками (десятки блоков "=== START pid=…"/"Application starting…"), а
+    только вывод с начала последнего запуска.
+
+    Границы сессии ищутся с КОНЦА текста (побеждает последнее вхождение), в
+    порядке приоритета:
+      1. строка, содержащая ``"=== START pid="`` — маркер, который standkit
+         пишет в лог при старте процесса стенда (формат
+         ``=== START pid=NNNN ts=<ISO> ===``);
+      2. если такой строки нет — строка, содержащая ``"Application starting"``
+         (типичная первая строка вывода .NET-хоста стенда при холодном
+         старте — используется как fallback для логов, которые ведёт не сам
+         standkit, а сам стенд/сторонний раннер, без маркера ``START pid=``).
+
+    Если ни одна граница не найдена — возвращает текст без изменений (лог
+    короткий/не содержит распознаваемых маркеров, обрезать нечего).
+
+    Найденная граничная строка ВКЛЮЧАЕТСЯ в результат (сессия показывается
+    с "=== START pid=…" или "Application starting…" включительно).
+    """
+    if not text:
+        return text
+
+    lines = text.split("\n")
+
+    start_idx: Optional[int] = None
+    for i in range(len(lines) - 1, -1, -1):
+        if _SESSION_START_MARKER in lines[i]:
+            start_idx = i
+            break
+
+    if start_idx is None:
+        for i in range(len(lines) - 1, -1, -1):
+            if _APP_STARTING_MARKER in lines[i]:
+                start_idx = i
+                break
+
+    if start_idx is None:
+        return text
+
+    return "\n".join(lines[start_idx:])
+
+
 def follow(log_path: Path, *, poll_interval: float = 0.5) -> Iterator[str]:
     """
     Генератор, отдающий новые строки лога по мере их появления (аналог ``tail -f``).
