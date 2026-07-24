@@ -359,15 +359,18 @@ def make_handler(
                 db_state = status.db.value if status else "unknown"
                 redis_state = status.redis.value if status else "unknown"
                 process_state = status.process.value if status else "unknown"
-                # Таблица стендов исторически показывает именно BPMkit-каталог
-                # логов (extra["logs_path"]) — источник "stand" здесь не
-                # запрашивается ни query-параметром, ни выбором пользователя
-                # (тот выбор — только у панели "Текущее состояние" ниже).
+                # Таблица стендов показывает каталог логов BPMkit-ПРОЕКТА
+                # (<extra["docs_folder"]>/logs, scaffold, НЕ extra["logs_path"]
+                # — тот указывает на каталог логов самого стенда) — источник
+                # "stand" здесь не запрашивается ни query-параметром, ни
+                # выбором пользователя (тот выбор — только у панели "Текущее
+                # состояние"/сплит-меню ниже).
                 logs_dir = logs_browser.resolve_logs_dir(stand, source="bpmkit")
-                logs_path = str(logs_dir) if logs_dir else (stand.extra.get("logs_path") or None)
-                # Флаг для UI: доступен ли источник логов "Папка BPMkit" у ЭТОГО
-                # стенда — задан extra["logs_path"] И каталог реально существует
-                # (см. logs_browser.resolve_logs_dir). Используется, чтобы
+                logs_path = str(logs_dir) if logs_dir else (logs_browser.raw_logs_path(stand, "bpmkit") or None)
+                # Флаг для UI: доступен ли источник логов "Логи BPMkit-проекта"
+                # у ЭТОГО стенда — задан extra["docs_folder"] И каталог
+                # <docs_folder>/logs реально существует (см.
+                # logs_browser.resolve_logs_dir). Используется, чтобы
                 # дизейблить соответствующий пункт сплит-меню "Открыть папку
                 # логов" вместо того, чтобы позволять открывать несуществующий
                 # источник (см. CLAUDE.md фидбэк по кнопкам логов).
@@ -481,12 +484,24 @@ def make_handler(
                     },
                 )
                 return
-            lines = _logs.tail(primary, 200)
+            # Хвост берём щедрым (4000 строк), чтобы гарантированно захватить
+            # ВСЮ последнюю сессию (от "=== START pid="/"Application starting"
+            # до конца файла), даже если она сама по себе длинная — затем
+            # extract_current_session() отрезает всё, что относится к прошлым
+            # запускам, и уже результат капается до разумного размера для UI.
+            raw_lines = _logs.tail(primary, 4000)
+            raw_text = "\n".join(raw_lines)
+            session_text = _logs.extract_current_session(raw_text) if raw_text else ""
+            if session_text:
+                session_lines = session_text.split("\n")
+                if len(session_lines) > 1000:
+                    session_lines = session_lines[-1000:]
+                session_text = "\n".join(session_lines)
             self._send_json(
                 200,
                 {
                     "available": True,
-                    "text": "\n".join(lines) if lines else "(лог пуст)",
+                    "text": session_text if session_text else "(лог пуст)",
                     "file": primary.name,
                     "source": source,
                 },

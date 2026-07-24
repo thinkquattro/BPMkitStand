@@ -32,8 +32,15 @@
         <button id="about-modal-close-btn" class="modal-close-btn" type="button" title="Закрыть">✕</button>
       </div>
       <div class="modal-body">
+        <div class="about-modal-logo">
+          <img class="about-modal-logo-img about-modal-logo-light" src="/static/bpmkit-logo.svg" alt="BPMkit" />
+          <img class="about-modal-logo-img about-modal-logo-dark" src="/static/bpmkit-logo-dark.svg" alt="BPMkit" />
+        </div>
         <p>BPMkitStand — свободный диспетчер стендов BPMSoft (часть экосистемы BPMkit).</p>
         <p>Версия: <span id="about-modal-version">…</span></p>
+        <p>Сайт: <a href="https://bpmkit.pro" target="_blank" rel="noopener">bpmkit.pro</a></p>
+        <p>Репозиторий: <a href="https://github.com/thinkquattro/BPMkitStand" target="_blank" rel="noopener">github.com/thinkquattro/BPMkitStand</a></p>
+        <p>Разработчик: Vladimir Ternovsky · GBC-Team</p>
         <div class="modal-note">
           <h3>Обновления и лицензия</h3>
           <p>Автообновление MCP и лицензия доступны в платном Companion. Бесплатная версия — управление стендами.</p>
@@ -89,18 +96,43 @@
         <div class="state-panel-header">
           <h2>Текущее состояние <span id="state-stand-name"></span></h2>
           <div class="state-panel-controls">
+            <!-- Сплит-кнопка: у стенда ДВА разных места логов (см.
+                 standkit_hub/logs_browser.py) — логи самого стенда
+                 (<stand_dir>/logs) и логи BPMkit-проекта (scaffold,
+                 <docs_folder>/logs). Основная кнопка открывает последний
+                 выбранный источник (по умолчанию — "Логи стенда"), стрелка
+                 раскрывает меню с явным выбором. Пункт "Логи BPMkit-проекта"
+                 дизейблится на клиенте по флагу stand.logs.bpmkit_available
+                 (см. /api/stands, app.js::updateLogsMenuState). -->
             <div class="split-btn" id="log-folder-split-btn">
               <button
                 id="log-folder-open-btn"
-                class="secondary split-btn-toggle"
+                class="secondary split-btn-main"
                 type="button"
                 title="Открыть папку логов"
+              >Открыть папку логов</button>
+              <button
+                id="log-folder-menu-toggle-btn"
+                class="secondary split-btn-toggle"
+                type="button"
                 aria-haspopup="true"
                 aria-expanded="false"
-              >Открыть папку логов <span class="split-btn-caret" aria-hidden="true">▾</span></button>
-              <div id="log-folder-menu" class="split-btn-menu" role="menu" hidden>
-                <button type="button" class="split-btn-menu-item" data-source="stand" role="menuitem">Папка стенда</button>
-                <button id="log-folder-item-bpmkit" type="button" class="split-btn-menu-item" data-source="bpmkit" role="menuitem">Папка BPMkit</button>
+                title="Выбрать источник логов"
+              >&#9662;</button>
+              <div class="split-btn-menu" id="log-folder-menu" role="menu" hidden>
+                <button
+                  type="button"
+                  class="split-btn-menu-item"
+                  data-source="stand"
+                  role="menuitem"
+                >Логи стенда</button>
+                <button
+                  type="button"
+                  class="split-btn-menu-item"
+                  data-source="bpmkit"
+                  id="log-folder-menu-bpmkit"
+                  role="menuitem"
+                >Логи BPMkit-проекта</button>
               </div>
             </div>
           </div>

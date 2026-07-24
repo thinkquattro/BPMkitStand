@@ -242,6 +242,45 @@ body {
   margin: 0 0 10px;
 }
 
+.modal-body a {
+  color: var(--bpmkit-primary);
+  text-decoration: none;
+}
+
+.modal-body a:hover {
+  text-decoration: underline;
+}
+
+/* --- лого BPMkit в модалке "О программе" (иконка + надпись, как на сайте) ---
+ *
+ * Два SVG (светлая/тёмная тема) наложены друг на друга через display:none —
+ * переключение зависит ТОЛЬКО от [data-theme] на <html> (см. app.js::applyTheme),
+ * ни одного JS-условия здесь не требуется. */
+
+.about-modal-logo {
+  display: flex;
+  justify-content: center;
+  margin: 4px 0 16px;
+}
+
+.about-modal-logo-img {
+  width: min(260px, 100%);
+  height: auto;
+  display: none;
+}
+
+.about-modal-logo-light {
+  display: block;
+}
+
+[data-theme="dark"] .about-modal-logo-light {
+  display: none;
+}
+
+[data-theme="dark"] .about-modal-logo-dark {
+  display: block;
+}
+
 .modal-note {
   margin-top: 14px;
   padding: 10px 12px;
@@ -330,16 +369,17 @@ button:disabled {
  *
  * Раньше это был блочный элемент над таблицей стендов — его появление
  * сдвигало вёрстку вниз (page jump). Теперь — position: fixed поверх
- * контента (низ-право), с fade+slide переходом; документ не двигается
- * независимо от того, показан тост или нет. Цвета берутся из тех же
- * CSS-переменных, что и остальной UI — читаемость в обеих темах гарантирована
- * (panel-bg/text меняются по [data-theme="dark"], см. :root выше).
+ * контента (верх экрана, по центру — рядом с кнопкой "Обновить" панели
+ * инструментов), с fade+slide переходом; документ не двигается независимо
+ * от того, показан тост или нет. Цвета берутся из тех же CSS-переменных,
+ * что и остальной UI — читаемость в обеих темах гарантирована (panel-bg/text
+ * меняются по [data-theme="dark"], см. :root выше).
  */
 
 .action-status {
   position: fixed;
-  right: 20px;
-  bottom: 20px;
+  top: 70px;
+  left: 50%;
   z-index: 1200;
   min-width: 220px;
   max-width: min(420px, calc(100vw - 32px));
@@ -353,7 +393,7 @@ button:disabled {
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.2);
   opacity: 0;
   visibility: hidden;
-  transform: translateY(10px);
+  transform: translateX(-50%) translateY(-10px);
   pointer-events: none;
   transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s;
 }
@@ -361,7 +401,7 @@ button:disabled {
 .action-status.action-status-visible {
   opacity: 1;
   visibility: visible;
-  transform: translateY(0);
+  transform: translateX(-50%) translateY(0);
   pointer-events: auto;
 }
 
@@ -572,60 +612,66 @@ button:disabled {
   gap: 8px;
 }
 
-/* --- сплит-кнопка "Открыть папку логов" (кнопка + маленькое меню-поповер) --- */
+/* --- сплит-кнопка "Открыть папку логов" (основное действие + выпадающее
+ * меню выбора источника: "Логи стенда" / "Логи BPMkit-проекта") --- */
 
 .split-btn {
   position: relative;
-  display: inline-block;
+  display: inline-flex;
+}
+
+.split-btn-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
 .split-btn-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.split-btn-caret {
-  font-size: 10px;
-  opacity: 0.85;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid rgba(0, 0, 0, 0.15);
+  padding: 7px 9px;
+  font-size: 11px;
+  line-height: 1;
 }
 
 .split-btn-menu {
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
-  min-width: 180px;
+  z-index: 1100;
+  min-width: 200px;
   background: var(--bpmkit-panel-bg);
   border: 1px solid var(--bpmkit-border);
   border-radius: 8px;
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.14);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.16);
   padding: 4px;
-  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.split-btn-menu[hidden] {
+  display: none;
 }
 
 .split-btn-menu-item {
-  display: block;
-  width: 100%;
   background: transparent;
   color: var(--bpmkit-text);
   border: none;
   border-radius: 6px;
-  padding: 7px 10px;
-  text-align: left;
+  padding: 8px 10px;
   font-size: 13px;
+  text-align: left;
   cursor: pointer;
 }
 
-.split-btn-menu-item:hover {
-  background: var(--bpmkit-row-hover);
-  filter: none;
+.split-btn-menu-item:hover:not(:disabled) {
+  background: var(--bpmkit-code-bg);
 }
 
-.split-btn-menu-item:disabled,
-.split-btn-menu-item:disabled:hover {
-  opacity: 0.45;
+.split-btn-menu-item:disabled {
+  opacity: 0.4;
   cursor: not-allowed;
-  background: transparent;
 }
 
 #state-output {

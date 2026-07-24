@@ -471,11 +471,12 @@ def _write_registry_with_extra(tmp_path, *, stand_name="demo", extra=None, db_na
 
 
 def test_api_stands_enriched_payload_shape(tmp_path):
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
+    docs_dir = tmp_path / "project_docs"
+    logs_dir = docs_dir / "logs"
+    logs_dir.mkdir(parents=True)
     registry_path = _write_registry_with_extra(
         tmp_path,
-        extra={"logs_path": str(logs_dir), "redis_db": 3},
+        extra={"docs_folder": str(docs_dir), "redis_db": 3},
         db_name="mydb",
     )
     config_path = _write_config(tmp_path, registry_path=registry_path)
@@ -551,7 +552,7 @@ def test_api_stand_state_stand_source_returns_tail_of_primary_log(tmp_path):
     assert body["file"] == "stand.log"
 
 
-def test_api_stand_state_bpmkit_source_unavailable_when_logs_path_not_set(tmp_path):
+def test_api_stand_state_bpmkit_source_unavailable_when_docs_folder_not_set(tmp_path):
     base_url, token, *_ = _start_hub(tmp_path)
     status, body, _ = _request(base_url, "/api/stand/demo/state?source=bpmkit", token=token)
     assert status == 200
@@ -561,10 +562,11 @@ def test_api_stand_state_bpmkit_source_unavailable_when_logs_path_not_set(tmp_pa
 
 
 def test_api_stand_state_bpmkit_source_returns_tail_of_primary_log(tmp_path):
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
+    docs_dir = tmp_path / "project_docs"
+    logs_dir = docs_dir / "logs"
+    logs_dir.mkdir(parents=True)
     (logs_dir / "stand.log").write_text("line1\nline2\nline3\n", encoding="utf-8")
-    registry_path = _write_registry_with_extra(tmp_path, extra={"logs_path": str(logs_dir)})
+    registry_path = _write_registry_with_extra(tmp_path, extra={"docs_folder": str(docs_dir)})
     config_path = _write_config(tmp_path, registry_path=registry_path)
     session_token = generate_session_token()
     httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
@@ -586,6 +588,44 @@ def test_api_stand_state_invalid_source_returns_400(tmp_path):
     base_url, token, *_ = _start_hub(tmp_path)
     status, _, _ = _request(base_url, "/api/stand/demo/state?source=nope", token=token)
     assert status == 400
+
+
+def test_api_stand_state_returns_only_current_session(tmp_path):
+    # Лог содержит НЕСКОЛЬКО прошлых запусков (каждый со своим "=== START
+    # pid=…") плюс текущий — панель "Текущее состояние" должна вернуть
+    # ТОЛЬКО последнюю сессию (см. standkit.logs.extract_current_session),
+    # а не весь хвост со всей историей запусков.
+    stand_dir = tmp_path / "demo"
+    logs_dir = stand_dir / "logs"
+    logs_dir.mkdir(parents=True)
+    log_text = (
+        "=== START pid=100 ts=2026-01-01T00:00:00 ===\n"
+        "Application starting\n"
+        "старый запуск, строка A\n"
+        "=== START pid=200 ts=2026-01-01T01:00:00 ===\n"
+        "Application starting\n"
+        "Application started\n"
+        "текущая сессия, строка A\n"
+        "текущая сессия, строка B\n"
+    )
+    (logs_dir / "stand.log").write_text(log_text, encoding="utf-8")
+    registry_path = _write_registry_with_extra(tmp_path)
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    status, body, _ = _request(base_url, "/api/stand/demo/state?source=stand", token=session_token)
+    assert status == 200
+    assert body["available"] is True
+    assert body["text"].startswith("=== START pid=200")
+    assert "старый запуск" not in body["text"]
+    assert "текущая сессия, строка A" in body["text"]
+    assert "текущая сессия, строка B" in body["text"]
 
 
 # --- API: /api/stand/{name}/logs/open-folder (единственный оставшийся суб-путь логов) ---
@@ -610,9 +650,10 @@ def test_api_stand_logs_open_folder_requires_mutation_auth(tmp_path):
 
 
 def test_api_stand_logs_open_folder_calls_subprocess(tmp_path, monkeypatch):
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
-    registry_path = _write_registry_with_extra(tmp_path, extra={"logs_path": str(logs_dir)})
+    docs_dir = tmp_path / "project_docs"
+    logs_dir = docs_dir / "logs"
+    logs_dir.mkdir(parents=True)
+    registry_path = _write_registry_with_extra(tmp_path, extra={"docs_folder": str(docs_dir)})
     config_path = _write_config(tmp_path, registry_path=registry_path)
     session_token = generate_session_token()
     httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
@@ -795,10 +836,11 @@ def test_redis_clear_propagates_failure_from_redis_min(tmp_path, monkeypatch):
     assert "не удалось подключиться" in body.get("error", "")
 
 
-def test_api_stands_logs_bpmkit_available_true_when_logs_path_exists(tmp_path):
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
-    registry_path = _write_registry_with_extra(tmp_path, extra={"logs_path": str(logs_dir)})
+def test_api_stands_logs_bpmkit_available_true_when_docs_folder_logs_exists(tmp_path):
+    docs_dir = tmp_path / "project_docs"
+    logs_dir = docs_dir / "logs"
+    logs_dir.mkdir(parents=True)
+    registry_path = _write_registry_with_extra(tmp_path, extra={"docs_folder": str(docs_dir)})
     config_path = _write_config(tmp_path, registry_path=registry_path)
     session_token = generate_session_token()
     httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
@@ -814,8 +856,8 @@ def test_api_stands_logs_bpmkit_available_true_when_logs_path_exists(tmp_path):
     assert stand["logs"]["bpmkit_available"] is True
 
 
-def test_api_stands_logs_bpmkit_available_false_when_logs_path_not_set(tmp_path):
-    # demo-стенд из _write_registry не задаёт extra["logs_path"].
+def test_api_stands_logs_bpmkit_available_false_when_docs_folder_not_set(tmp_path):
+    # demo-стенд из _write_registry не задаёт extra["docs_folder"].
     base_url, token, *_ = _start_hub(tmp_path)
     status, body, _ = _request(base_url, "/api/stands", token=token)
     assert status == 200
@@ -823,10 +865,29 @@ def test_api_stands_logs_bpmkit_available_false_when_logs_path_not_set(tmp_path)
     assert stand["logs"]["bpmkit_available"] is False
 
 
-def test_api_stands_logs_bpmkit_available_false_when_logs_path_does_not_exist(tmp_path):
+def test_api_stands_logs_bpmkit_available_false_when_docs_folder_does_not_exist(tmp_path):
     registry_path = _write_registry_with_extra(
-        tmp_path, extra={"logs_path": str(tmp_path / "no-such-dir")}
+        tmp_path, extra={"docs_folder": str(tmp_path / "no-such-dir")}
     )
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    status, body, _ = _request(base_url, "/api/stands", token=session_token)
+    assert status == 200
+    assert body["stands"][0]["logs"]["bpmkit_available"] is False
+
+
+def test_api_stands_logs_bpmkit_available_false_when_docs_folder_set_but_logs_subdir_missing(tmp_path):
+    # docs_folder существует, но подпапка logs внутри него не создана.
+    docs_dir = tmp_path / "project_docs"
+    docs_dir.mkdir()
+    registry_path = _write_registry_with_extra(tmp_path, extra={"docs_folder": str(docs_dir)})
     config_path = _write_config(tmp_path, registry_path=registry_path)
     session_token = generate_session_token()
     httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)

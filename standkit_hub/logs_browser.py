@@ -9,22 +9,26 @@
   каталог ``<stand.stand_dir>/logs`` (папка ``logs`` в корне стенда). Это
   ближе всего к тому, что видно в PS-окне/консоли самого стенда — дефолт
   для панели "Текущее состояние".
-- ``"bpmkit"`` — логи, которые пишет BPMkit MCP (сервер-диспетчер), каталог
-  берётся из реестра BPMkit как ``Stand.extra["logs_path"]``. На практике
-  стенды часто подняты извне (вручную, IIS/Kestrel-службой, сторонним
-  скриптом) — тогда лог самого стенда (``source="stand"``) может быть
-  единственным полезным источником, а ``logs_path`` не задан вовсе.
+- ``"bpmkit"`` — логи BPMkit-ПРОЕКТА (scaffold, ``project_scaffold``): не
+  логи стенда и НЕ ``Stand.extra["logs_path"]`` (та запись указывает на тот
+  же каталог, что и ``"stand"``, — путать источники не нужно), а подпапка
+  ``logs`` внутри папки проекта ``Stand.extra["docs_folder"]``
+  (``<docs_folder>/logs``). Туда пишутся логи разработки поверх стенда;
+  если ``docs_folder`` в записи стенда не задан (провижининг без
+  project_scaffold), источник недоступен целиком.
 
 Важно отличать оба источника от ``standkit.lifecycle.log_path``/
 ``standkit.logs`` (см. ``standkit_hub.server._api_stand_logs``) — тот лог
 существует только для стендов, ЗАПУЩЕННЫХ САМИМ standkit
 (``transport=local`` через ``lifecycle.start``), это третий, отдельный канал.
 
-STDLIB-ONLY: ``pathlib``, ``subprocess``, ``sys``.
+STDLIB-ONLY: ``pathlib``, ``subprocess``, ``sys``, ``os`` (только ``os.startfile``
+на Windows).
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -52,8 +56,8 @@ def raw_logs_path(stand: Stand, source: str = DEFAULT_LOG_SOURCE) -> Optional[st
     if source == "stand":
         return str(Path(stand.stand_dir) / "logs") if stand.stand_dir else None
     if source == "bpmkit":
-        raw = stand.extra.get("logs_path")
-        return str(raw) if raw else None
+        docs_folder = stand.extra.get("docs_folder")
+        return str(Path(docs_folder) / "logs") if docs_folder else None
     raise ValueError(f"неизвестный источник логов: {source!r}")
 
 
@@ -62,10 +66,13 @@ def resolve_logs_dir(stand: Stand, source: str = DEFAULT_LOG_SOURCE) -> Optional
     Резолвит каталог логов стенда для выбранного источника:
 
     - ``source="stand"`` (по умолчанию) — ``<stand.stand_dir>/logs``;
-    - ``source="bpmkit"`` — ``stand.extra["logs_path"]``.
+    - ``source="bpmkit"`` — ``<stand.extra["docs_folder"]>/logs`` (логи
+      BPMkit-проекта, папка ``logs`` внутри project-scaffold, НЕ
+      ``stand.extra["logs_path"]``).
 
     Возвращает ``None``, если путь не задан (для "stand" — пуст сам
-    ``stand_dir``), либо не существует, либо указывает не на каталог —
+    ``stand_dir``; для "bpmkit" — не задан ``docs_folder``), либо не
+    существует, либо указывает не на каталог —
     вызывающая сторона (хаб) обязана отдать понятное сообщение "лог
     недоступен", а не падать с исключением.
 
@@ -142,9 +149,12 @@ class OpenFolderResult:
 
 def open_folder(path: Path) -> OpenFolderResult:
     """
-    Открывает каталог в файловом менеджере ОС хоста (Windows — ``explorer``,
-    macOS — ``open``, остальное — ``xdg-open``) через ``subprocess.Popen``
-    (не блокируясь на ожидании закрытия окна).
+    Открывает каталог в файловом менеджере ОС хоста: Windows — ``os.startfile``
+    (штатный способ ОС попросить проводник открыть путь — надёжнее выводит
+    открытое окно на передний план, чем спавн ``explorer`` через subprocess,
+    который часто просто сворачивает уже открытое окно той же папки в
+    таскбар вместо фокуса); macOS — ``open``, остальное — ``xdg-open`` (оба
+    через ``subprocess.Popen``, не блокируясь на ожидании закрытия окна).
 
     Никогда не бросает исключение наружу — при отсутствии DISPLAY, нужной
     утилиты в PATH и т.п. возвращает ``ok=False`` с текстом причины, чтобы
@@ -154,7 +164,7 @@ def open_folder(path: Path) -> OpenFolderResult:
         return OpenFolderResult(False, f"каталог не существует: {path}")
     try:
         if sys.platform == "win32":
-            subprocess.Popen(["explorer", str(path)])
+            os.startfile(str(path))  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
             subprocess.Popen(["open", str(path)])
         else:

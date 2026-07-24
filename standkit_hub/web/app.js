@@ -379,6 +379,7 @@
       lastStandsData = data.stands || [];
       checkStartingTransitions(lastStandsData);
       renderStands(lastStandsData);
+      updateLogsMenuState();
       setConnStatus(true);
     } catch (e) {
       errorEl.textContent = `Ошибка обновления: ${e.message}`;
@@ -417,11 +418,6 @@
         onStandAction(btn.dataset.name, btn.dataset.action);
       });
     });
-
-    // Данные могли смениться (redis/logs резолвятся на бэкенде из реестра И
-    // конфига стенда) — переоцениваем доступность пункта "Папка BPMkit" для
-    // ТЕКУЩЕГО выбранного стенда на каждый перерендер таблицы.
-    updateLogFolderMenuState();
   }
 
   function selectStand(name) {
@@ -429,24 +425,8 @@
     document.querySelectorAll(".stands-table tbody tr").forEach((tr) => {
       tr.classList.toggle("selected", tr.dataset.name === name);
     });
-    updateLogFolderMenuState();
+    updateLogsMenuState();
     refreshState();
-  }
-
-  // --- доступность пункта "Папка BPMkit" сплит-меню (см. logs.bpmkit_available) ---
-  //
-  // Пункт "Папка BPMkit" дизейблится, если у ВЫБРАННОГО стенда не задан
-  // extra["logs_path"] (или каталог не существует) — открывать в этом случае
-  // нечего, кнопка не должна молча открывать не тот источник (см. bug-фикс
-  // "обе кнопки открывают папку стенда").
-
-  function updateLogFolderMenuState() {
-    const bpmkitItem = document.getElementById("log-folder-item-bpmkit");
-    if (!bpmkitItem) return;
-    const stand = lastStandsData.find((s) => s.name === selectedStand);
-    const available = !!(stand && stand.logs && stand.logs.bpmkit_available);
-    bpmkitItem.disabled = !available;
-    bpmkitItem.title = available ? "" : "у стенда не задан BPMkit logs_path";
   }
 
   // --- подтверждения (стилизованная модалка) + обратная связь по действиям ---
@@ -515,7 +495,19 @@
     }
   }
 
-  // --- "Открыть папку логов" — сплит-кнопка с маленьким меню (Папка стенда / Папка BPMkit) ---
+  // --- "Открыть папку логов" — сплит-кнопка с выбором источника ---
+  //
+  // У стенда ДВА разных места логов (см. standkit_hub/logs_browser.py):
+  // "stand" — логи самого стенда (<stand_dir>/logs, платформа/сборка) и
+  // "bpmkit" — логи BPMkit-ПРОЕКТА (scaffold, <docs_folder>/logs, куда
+  // пишутся логи разработки). Это разные каталоги — основная кнопка
+  // выполняет последний выбранный источник (по умолчанию "stand"), стрелка
+  // раскрывает меню с явным выбором. Пункт "Логи BPMkit-проекта"
+  // дизейблится, если у выбранного стенда нет logs.bpmkit_available (см.
+  // /api/stands — не задан extra["docs_folder"] либо нет папки
+  // <docs_folder>/logs).
+
+  let logsFolderSource = "stand";
 
   async function openLogsFolder(source) {
     if (!selectedStand) return;
@@ -533,39 +525,65 @@
     }
   }
 
-  function setupStatePanel() {
-    const toggleBtn = document.getElementById("log-folder-open-btn");
+  function closeLogsMenu() {
     const menu = document.getElementById("log-folder-menu");
+    const toggleBtn = document.getElementById("log-folder-menu-toggle-btn");
+    menu.hidden = true;
+    toggleBtn.setAttribute("aria-expanded", "false");
+  }
 
-    function closeMenu() {
-      menu.hidden = true;
-      toggleBtn.setAttribute("aria-expanded", "false");
-    }
-    function openMenu() {
-      menu.hidden = false;
-      toggleBtn.setAttribute("aria-expanded", "true");
-    }
+  function toggleLogsMenu() {
+    const menu = document.getElementById("log-folder-menu");
+    const toggleBtn = document.getElementById("log-folder-menu-toggle-btn");
+    const willOpen = menu.hidden;
+    menu.hidden = !willOpen;
+    toggleBtn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+  }
 
-    toggleBtn.addEventListener("click", (evt) => {
-      evt.stopPropagation();
-      if (menu.hidden) openMenu();
-      else closeMenu();
+  // Дизейблит пункт меню "Логи BPMkit-проекта", если у ВЫБРАННОГО стенда
+  // источник bpmkit недоступен (нет extra["docs_folder"] или нет папки
+  // <docs_folder>/logs) — см. /api/stands::logs.bpmkit_available. Вызывается
+  // после каждого refreshStands() и при смене выбранного стенда, т.к.
+  // доступность может измениться между обновлениями (например, после
+  // первого запуска разработки в scaffold-проекте).
+  function updateLogsMenuState() {
+    const bpmkitItem = document.getElementById("log-folder-menu-bpmkit");
+    const stand = selectedStand ? lastStandsData.find((s) => s.name === selectedStand) : null;
+    const available = Boolean(stand && stand.logs && stand.logs.bpmkit_available);
+    bpmkitItem.disabled = !available;
+    bpmkitItem.title = available
+      ? "Логи BPMkit-проекта"
+      : "у стенда не задан docs_folder / нет папки logs";
+    // Если ранее выбранный источник стал недоступен — откатываемся на
+    // всегда-доступный "stand" по умолчанию.
+    if (logsFolderSource === "bpmkit" && !available) {
+      logsFolderSource = "stand";
+    }
+  }
+
+  function setupStatePanel() {
+    document.getElementById("log-folder-open-btn").addEventListener("click", () => {
+      openLogsFolder(logsFolderSource);
     });
-
-    menu.querySelectorAll(".split-btn-menu-item").forEach((item) => {
+    document.getElementById("log-folder-menu-toggle-btn").addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      toggleLogsMenu();
+    });
+    document.querySelectorAll(".split-btn-menu-item").forEach((item) => {
       item.addEventListener("click", (evt) => {
         evt.stopPropagation();
         if (item.disabled) return;
-        closeMenu();
-        openLogsFolder(item.dataset.source);
+        logsFolderSource = item.dataset.source;
+        closeLogsMenu();
+        openLogsFolder(logsFolderSource);
       });
     });
-
     document.addEventListener("click", (evt) => {
-      if (!menu.hidden && !evt.target.closest("#log-folder-split-btn")) closeMenu();
+      const splitBtn = document.getElementById("log-folder-split-btn");
+      if (!splitBtn.contains(evt.target)) closeLogsMenu();
     });
     document.addEventListener("keydown", (evt) => {
-      if (evt.key === "Escape" && !menu.hidden) closeMenu();
+      if (evt.key === "Escape") closeLogsMenu();
     });
   }
 
