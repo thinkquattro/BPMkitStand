@@ -248,15 +248,25 @@ class IisBackend:
         except HostingError:
             return _tcp_fallback(stand)
 
+        # ВАЖНО: НЕ падать на TCP-фолбэк, если appcmd дал определённый ответ.
+        # IIS слушает порт (80/443) на уровне http.sys ОС даже когда сайт/пул
+        # ОСТАНОВЛЕН (отдаёт 503) — открытый порт НЕ означает «стенд работает».
+        # Поэтому доверяем состоянию appcmd; TCP-фолбэк только когда appcmd
+        # состояние не вернул (не найден пул/сайт, ошибка команды).
+        definitive = False
         running = False
         if stand.iis_app_pool:
             state = self._query_state(appcmd, "apppool", stand.iis_app_pool)
-            running = state == "Started"
-        if not running and stand.iis_site:
+            if state is not None:
+                definitive = True
+                running = running or state == "Started"
+        if stand.iis_site:
             state = self._query_state(appcmd, "site", stand.iis_site)
-            running = state == "Started"
-        if running:
-            return True
+            if state is not None:
+                definitive = True
+                running = running or state == "Started"
+        if definitive:
+            return running
         return _tcp_fallback(stand)
 
     def read_logs(

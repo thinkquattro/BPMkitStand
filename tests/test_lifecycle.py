@@ -124,3 +124,30 @@ def test_start_returns_existing_pid_without_resolving_dotnet(tmp_path, monkeypat
     monkeypatch.setattr(shutil, "which", _boom)
 
     assert start(stand, run_dir=run_dir, log_dir=tmp_path / "logs", startup_check_delay=0) == 123
+
+
+# --- stop: честный отказ, если стенд запущен НЕ диспетчером (нет pidfile) ---
+
+
+def test_stop_honest_refusal_when_no_pidfile_but_stand_is_up(tmp_path, monkeypatch):
+    # Нет pidfile (стенд поднят вне диспетчера), но порт отвечает → мы НЕ знаем
+    # pid и не можем убить процесс → честный LifecycleError, а не фейковый успех.
+    from standkit import health as health_module
+
+    stand = _make_stand(tmp_path, stand_host="127.0.0.1", stand_port=5000)
+    run_dir = tmp_path / "run"
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+
+    with pytest.raises(LifecycleError, match="не диспетчером"):
+        lifecycle.stop(stand, run_dir=run_dir)
+
+
+def test_stop_returns_true_when_no_pidfile_and_stand_not_running(tmp_path, monkeypatch):
+    # Нет pidfile и порт закрыт → останавливать нечего, возвращаем True.
+    from standkit import health as health_module
+
+    stand = _make_stand(tmp_path, stand_host="127.0.0.1", stand_port=5000)
+    run_dir = tmp_path / "run"
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: False)
+
+    assert lifecycle.stop(stand, run_dir=run_dir) is True
