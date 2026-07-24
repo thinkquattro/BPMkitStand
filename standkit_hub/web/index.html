@@ -66,6 +66,125 @@
     </div>
   </div>
 
+  <!-- Модалка "Зарегистрировать стенд" — форма записи УЖЕ существующего
+       стенда в общий реестр (projects.json), НЕ провижининг. Та же
+       разметка/классы оверлея-модалки, что у "О программе" (см. style.css:
+       .modal-overlay/.modal-box). Условные поля (agent_*/iis_*/docker_*/
+       k8s_*) показываются по значению select'ов transport/host_kind — см.
+       app.js::updateRegisterConditionalFields. -->
+  <div id="register-modal-overlay" class="modal-overlay" hidden>
+    <div class="modal-box modal-box-register" role="dialog" aria-modal="true" aria-labelledby="register-modal-title">
+      <div class="modal-header">
+        <h2 id="register-modal-title">Зарегистрировать стенд</h2>
+        <button id="register-modal-close-btn" class="modal-close-btn" type="button" title="Закрыть">✕</button>
+      </div>
+      <form id="register-form">
+        <div class="modal-body">
+          <p class="modal-note-plain">
+            Регистрирует уже существующий стенд в общем реестре — каталог, БД и
+            дистрибутив должны быть готовы заранее (это не провижининг нового стенда).
+          </p>
+          <div id="register-form-error" class="error-text register-form-error" role="alert"></div>
+
+          <label>Имя стенда
+            <input type="text" name="name" required autocomplete="off" />
+          </label>
+
+          <div class="form-row">
+            <label>Транспорт
+              <select name="transport">
+                <option value="local" selected>local</option>
+                <option value="agent">agent</option>
+              </select>
+            </label>
+            <label>Хостинг
+              <select name="host_kind">
+                <option value="kestrel" selected>kestrel</option>
+                <option value="iis">iis</option>
+                <option value="docker">docker</option>
+                <option value="k8s">k8s</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="register-conditional" data-when-transport="agent" hidden>
+            <label>Agent URL
+              <input type="text" name="agent_url" placeholder="https://host:8765" />
+            </label>
+            <label>Ссылка на секрет агента (agent_secret_ref)
+              <input type="text" name="agent_secret_ref" />
+            </label>
+          </div>
+
+          <label>Каталог стенда (stand_dir)
+            <input type="text" name="stand_dir" />
+          </label>
+
+          <div class="form-row">
+            <label>Host
+              <input type="text" name="stand_host" value="127.0.0.1" />
+            </label>
+            <label>Port
+              <input type="number" name="stand_port" min="1" max="65535" value="5000" />
+            </label>
+          </div>
+
+          <div class="register-conditional" data-when-host-kind="iis" hidden>
+            <label>IIS-сайт (iis_site)
+              <input type="text" name="iis_site" />
+            </label>
+            <label>Пул приложений (iis_app_pool)
+              <input type="text" name="iis_app_pool" />
+            </label>
+          </div>
+
+          <div class="register-conditional" data-when-host-kind="docker" hidden>
+            <label>Контейнер (docker_container)
+              <input type="text" name="docker_container" />
+            </label>
+            <label>Compose-файл (docker_compose_file)
+              <input type="text" name="docker_compose_file" />
+            </label>
+            <label>Compose-сервис (docker_compose_service)
+              <input type="text" name="docker_compose_service" />
+            </label>
+          </div>
+
+          <div class="register-conditional" data-when-host-kind="k8s" hidden>
+            <label>Namespace (k8s_namespace)
+              <input type="text" name="k8s_namespace" />
+            </label>
+            <label>Deployment (k8s_deployment)
+              <input type="text" name="k8s_deployment" />
+            </label>
+          </div>
+
+          <div class="form-row">
+            <label>Тип БД
+              <select name="db_type">
+                <option value="postgres" selected>postgres</option>
+                <option value="mssql">mssql</option>
+              </select>
+            </label>
+            <label>DB host
+              <input type="text" name="db_host" />
+            </label>
+            <label>DB port
+              <input type="number" name="db_port" min="1" max="65535" />
+            </label>
+          </div>
+          <label>DB name
+            <input type="text" name="db_name" />
+          </label>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="register-modal-cancel-btn" class="secondary">Отмена</button>
+          <button type="submit" id="register-modal-submit-btn">Зарегистрировать</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- Стилизованное подтверждение (замена window.confirm) — переиспользует
        классы модалки "О программе"; используется для Стоп/Рестарт/Очистить Redis. -->
   <div id="confirm-modal-overlay" class="modal-overlay" hidden>
@@ -88,6 +207,7 @@
     <section id="tab-stands" class="tab-panel active">
       <div class="panel-toolbar">
         <button id="refresh-stands-btn">Обновить</button>
+        <button id="register-stand-btn" class="secondary" type="button">Зарегистрировать стенд</button>
         <span id="stands-error" class="error-text"></span>
       </div>
       <div id="action-status" class="action-status" role="status" aria-live="polite"></div>

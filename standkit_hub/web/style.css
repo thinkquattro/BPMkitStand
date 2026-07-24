@@ -203,6 +203,74 @@ body {
   width: min(380px, calc(100vw - 32px));
 }
 
+/* --- модалка "Зарегистрировать стенд" --- */
+
+.modal-box-register {
+  width: min(480px, calc(100vw - 32px));
+}
+
+.modal-note-plain {
+  margin: 0 0 12px;
+  color: var(--bpmkit-muted);
+  font-size: 12px;
+}
+
+.register-form-error {
+  display: none;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bpmkit-code-bg);
+  border: 1px solid var(--bpmkit-down);
+  font-size: 12px;
+}
+
+.register-form-error.visible {
+  display: block;
+}
+
+#register-form label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--bpmkit-muted);
+}
+
+#register-form input[type="text"],
+#register-form input[type="number"],
+#register-form select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bpmkit-panel-bg);
+  color: var(--bpmkit-text);
+}
+
+.form-row {
+  display: flex;
+  gap: 10px;
+}
+
+.form-row label {
+  flex: 1;
+  min-width: 0;
+}
+
+.register-conditional {
+  border-top: 1px dashed var(--bpmkit-border);
+  padding-top: 10px;
+  margin-top: 2px;
+  margin-bottom: 10px;
+}
+
+.register-conditional[hidden] {
+  display: none;
+}
+
 .modal-header {
   display: flex;
   align-items: center;
