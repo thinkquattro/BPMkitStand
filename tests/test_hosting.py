@@ -261,14 +261,37 @@ def test_iis_backend_start_raises_hostingerror_on_nonzero_returncode(monkeypatch
         IisBackend().start(stand)
 
 
-def test_iis_backend_restart_recycles_apppool_when_configured(monkeypatch, tmp_path):
+def test_iis_backend_stop_stops_only_site_not_pool_when_site_configured(monkeypatch, tmp_path):
+    # «Только стенд»: гасим Site, App Pool НЕ трогаем (он может быть общим).
+    appcmd = _prep_iis_windows(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _completed(cmd, returncode=0))
+    stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1", iis_site="site1")
+    assert IisBackend().stop(stand) is True
+    assert [appcmd, "stop", "site", "/site.name:site1"] in calls
+    assert not any("apppool" in c for c in calls)
+
+
+def test_iis_backend_stop_stops_apppool_when_only_pool_configured(monkeypatch, tmp_path):
+    # Сайт не задан — App Pool единственный хэндл стенда, гасим его.
+    appcmd = _prep_iis_windows(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _completed(cmd, returncode=0))
+    stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1")
+    assert IisBackend().stop(stand) is True
+    assert [appcmd, "stop", "apppool", "/apppool.name:pool1"] in calls
+
+
+def test_iis_backend_restart_restarts_site_not_pool_when_site_configured(monkeypatch, tmp_path):
+    # Рестарт стенда = stop+start Site; App Pool НЕ рециклим (может быть общим).
     appcmd = _prep_iis_windows(monkeypatch, tmp_path)
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _completed(cmd, returncode=0))
     stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1", iis_site="site1")
     IisBackend().restart(stand)
-    assert [appcmd, "recycle", "apppool", "/apppool.name:pool1"] in calls
-    assert not any("stop" in c for c in calls)
+    assert [appcmd, "stop", "site", "/site.name:site1"] in calls
+    assert [appcmd, "start", "site", "/site.name:site1"] in calls
+    assert not any("apppool" in c for c in calls)
 
 
 def test_iis_backend_restart_stop_start_site_when_only_site_configured(monkeypatch, tmp_path):
@@ -307,6 +330,22 @@ def test_iis_backend_is_running_tcp_fallback_when_appcmd_state_indeterminate(mon
     monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
     stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1")
     assert IisBackend().is_running(stand) is True
+
+
+def test_iis_backend_is_running_keys_off_site_state_ignoring_pool(monkeypatch, tmp_path):
+    # Идентичность стенда = Site. Сайт Stopped, а пул (возможно общий) ещё
+    # Started → стенд считаем DOWN (смотрим САЙТ, не пул).
+    _prep_iis_windows(monkeypatch, tmp_path)
+
+    def _fake_run(cmd, **kw):
+        if "site" in cmd:
+            return _completed(cmd, returncode=0, stdout="Stopped")
+        return _completed(cmd, returncode=0, stdout="Started")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+    stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1", iis_site="site1")
+    assert IisBackend().is_running(stand) is False
 
 
 def test_iis_backend_is_running_appcmd_missing_uses_tcp_fallback(monkeypatch):
