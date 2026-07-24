@@ -41,6 +41,39 @@ def _completed(cmd, returncode=0, stdout="", stderr=""):
 
 
 # --------------------------------------------------------------------------
+# Декодирование вывода консольных утилит + подсказка о правах администратора
+# --------------------------------------------------------------------------
+
+
+def test_decode_console_handles_str_bytes_and_oem(monkeypatch):
+    # str (замоканный вывод в тестах) и None — как есть; bytes декодируются.
+    assert hosting._decode_console("Started") == "Started"
+    assert hosting._decode_console(None) == ""
+    assert hosting._decode_console("Привет".encode("utf-8")) == "Привет"
+    # OEM-байты (cp866 у appcmd на RU-Windows) не превращаются в кракозябры.
+    monkeypatch.setattr(hosting, "_oem_encoding", lambda: "cp866")
+    assert hosting._decode_console("Ошибка".encode("cp866")) == "Ошибка"
+
+
+def test_iis_stop_appcmd_permission_error_adds_admin_hint(monkeypatch, tmp_path):
+    # appcmd падает из-за нехватки прав (redirection.config) → к тексту ошибки
+    # добавляется понятная подсказка «запустите от имени администратора».
+    _prep_iis_windows(monkeypatch, tmp_path)
+
+    def _fake_run(cmd, **kw):
+        return _completed(
+            cmd,
+            returncode=1,
+            stderr="ERROR ( message: redirection.config ... необходимых разрешений )",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    stand = _make_stand(host_kind=HostKind.IIS, iis_site="site1")
+    with pytest.raises(HostingError, match="администратор"):
+        IisBackend().stop(stand)
+
+
+# --------------------------------------------------------------------------
 # get_backend
 # --------------------------------------------------------------------------
 
