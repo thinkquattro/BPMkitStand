@@ -21,6 +21,8 @@ TODO(следующая итерация):
 
 from __future__ import annotations
 
+import shutil
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +31,13 @@ from standkit.models import Stand, Transport
 
 _DEFAULT_RUN_DIR = Path.home() / ".standkit" / "run"
 _DEFAULT_LOG_DIR = Path.home() / ".standkit" / "logs"
+
+# Пауза после spawn_hidden() перед проверкой "жив ли процесс" — типичный
+# симптом "тихого" провала старта: неверный dll/аргументы, .NET-хост пишет
+# ошибку в лог и завершается за доли секунды, а spawn_hidden() успевает
+# вернуть валидный pid до этого момента. Вынесено в параметр start(), чтобы
+# тесты могли передать 0 и не ждать реальное время.
+_DEFAULT_STARTUP_CHECK_DELAY = 0.6
 
 
 class LifecycleError(Exception):
@@ -70,17 +79,53 @@ def _require_local(stand: Stand) -> None:
         )
 
 
-def start(stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None) -> int:
+def _resolve_dotnet(dotnet: str) -> str:
+    """
+    Резолвит команду ``dotnet`` записи стенда в конкретный исполняемый путь.
+
+    - Если ``dotnet`` уже указывает на существующий файл (абсолютный или
+      относительный путь) — используется как есть, PATH не требуется.
+    - Иначе (голое имя вроде ``"dotnet"``, дефолт по схеме ``Stand``) ищется
+      в PATH через ``shutil.which``.
+
+    Раньше отсутствие ``dotnet`` в PATH приводило к "тихому" провалу —
+    subprocess.Popen падал где-то внутри spawn_hidden() с малопонятной
+    OSError, либо (на некоторых системах) вообще не поднимал процесс без
+    видимой ошибки в UI хаба. Явная проверка здесь даёт понятный текст ДО
+    попытки спавна.
+    """
+    candidate = Path(dotnet)
+    if candidate.exists():
+        return str(candidate)
+    resolved = shutil.which(dotnet)
+    if resolved is None:
+        raise LifecycleError(
+            f"dotnet не найден в PATH: {dotnet!r} — установите .NET SDK/Runtime "
+            "или укажите полный путь в поле 'dotnet' записи реестра стенда"
+        )
+    return resolved
+
+
+def start(
+    stand: Stand,
+    *,
+    run_dir: Optional[Path] = None,
+    log_dir: Optional[Path] = None,
+    startup_check_delay: float = _DEFAULT_STARTUP_CHECK_DELAY,
+) -> int:
     """
     Запускает стенд headless-процессом, если он ещё не запущен.
 
     Возвращает pid процесса (существующего, если стенд уже был жив, либо
-    только что созданного).
+    только что созданного). Бросает ``LifecycleError`` с понятным текстом,
+    если ``dotnet`` не резолвится (см. ``_resolve_dotnet``) либо процесс
+    завершился сразу после старта (см. проверку ``is_alive`` ниже) — раньше
+    в обоих случаях start() мог тихо "вернуть успех", хотя стенд не поднялся.
 
-    TODO: команда запуска сейчас собирается по минимальному шаблону
-    ``dotnet <stand_dll>`` в ``stand_dir`` — в реальном стенде BPMSoft может
-    требоваться доп. окружение/аргументы (ASPNETCORE_ENVIRONMENT, --urls и
-    т.п.), это зона расширения следующей итерации.
+    Команда запуска — ``dotnet <stand_dll>`` в ``stand_dir``, БЕЗ аргументов
+    командной строки: BPMSoft.WebHost их не принимает (свой CommandLineParser),
+    адрес/порт берётся из конфига стенда. Доп. окружение (ASPNETCORE_ENVIRONMENT
+    и т.п.) при необходимости — зона расширения следующей итерации.
     """
     _require_local(stand)
 
@@ -93,14 +138,24 @@ def start(stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Pat
     if not stand_dir.exists():
         raise LifecycleError(f"Каталог стенда не найден: {stand_dir}")
 
-    cmd = [
-        stand.dotnet,
-        stand.stand_dll,
-        "--urls",
-        f"http://{stand.stand_host}:{stand.stand_port}",
-    ]
+    dotnet_path = _resolve_dotnet(stand.dotnet)
+    # BPMSoft.WebHost парсит аргументы СВОИМ CommandLineParser и НЕ понимает
+    # ASP.NET-флаги вроде --urls (ошибка «Verb '--urls' is not recognized»).
+    # Адрес/порт стенд берёт из собственного конфига (appsettings). Поэтому
+    # запускаем без доп. аргументов — просто dotnet <stand_dll> в каталоге
+    # стенда (так же, как это делает сам BPMkit/кит).
+    cmd = [dotnet_path, stand.stand_dll]
     lp = log_path(stand, log_dir)
     pid = _platform.spawn_hidden(cmd, cwd=stand_dir, log_path=lp)
+
+    if startup_check_delay > 0:
+        time.sleep(startup_check_delay)
+    if not _platform.is_alive(pid):
+        raise LifecycleError(
+            f"процесс стенда '{stand.name}' завершился сразу после старта — "
+            f"смотрите логи ({lp})"
+        )
+
     _write_pid(pf, pid)
     return pid
 

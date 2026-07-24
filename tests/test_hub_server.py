@@ -342,6 +342,23 @@ def test_settings_get_and_post_roundtrip(tmp_path):
     assert reloaded.refresh_interval_sec == 42
 
 
+# --- API: версия (для модалки "О программе") ---
+
+
+def test_api_version_returns_version_with_token(tmp_path):
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(base_url, "/api/version", token=token)
+    assert status == 200
+    assert body["name"] == "BPMkitStand"
+    assert "version" in body and body["version"]
+
+
+def test_api_version_without_token_is_unauthorized(tmp_path):
+    base_url, *_ = _start_hub(tmp_path)
+    status, _, _ = _request(base_url, "/api/version")
+    assert status == 401
+
+
 # --- статика: санитайзинг путей ---
 
 
@@ -571,96 +588,18 @@ def test_api_stand_state_invalid_source_returns_400(tmp_path):
     assert status == 400
 
 
-# --- API: /api/stand/{name}/logs/list и /logs/file (два источника, санитайзинг) ---
+# --- API: /api/stand/{name}/logs/open-folder (единственный оставшийся суб-путь логов) ---
 
 
-def test_api_stand_logs_list_empty_when_no_logs_path(tmp_path):
-    # Дефолт source="stand": <stand_dir>/logs у свежей записи реестра не существует.
+def test_api_stand_logs_list_and_file_removed(tmp_path):
+    # Просмотр отдельных файлов лога из UI убран — эндпоинты list/file больше
+    # не существуют (панель "Текущее состояние" показывает только консоль
+    # выбранного стенда, единственное действие с логами — открыть папку).
     base_url, token, *_ = _start_hub(tmp_path)
-    status, body, _ = _request(base_url, "/api/stand/demo/logs/list", token=token)
-    assert status == 200
-    assert body["files"] == []
-    assert body["source"] == "stand"
-
-
-def test_api_stand_logs_list_and_file_roundtrip_bpmkit_source(tmp_path):
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
-    (logs_dir / "a.log").write_text("hello\nworld\n", encoding="utf-8")
-    registry_path = _write_registry_with_extra(tmp_path, extra={"logs_path": str(logs_dir)})
-    config_path = _write_config(tmp_path, registry_path=registry_path)
-    session_token = generate_session_token()
-    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
-    port = httpd.server_address[1]
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    _wait_for_port(port)
-    base_url = f"http://127.0.0.1:{port}"
-
-    status, body, _ = _request(base_url, "/api/stand/demo/logs/list?source=bpmkit", token=session_token)
-    assert status == 200
-    assert [f["name"] for f in body["files"]] == ["a.log"]
-
-    status, body, _ = _request(
-        base_url, "/api/stand/demo/logs/file?source=bpmkit&name=a.log", token=session_token
-    )
-    assert status == 200
-    assert body["lines"] == ["hello", "world"]
-
-
-def test_api_stand_logs_list_and_file_roundtrip_stand_source(tmp_path):
-    stand_dir = tmp_path / "demo"
-    logs_dir = stand_dir / "logs"
-    logs_dir.mkdir(parents=True)
-    (logs_dir / "a.log").write_text("hello\nworld\n", encoding="utf-8")
-    registry_path = _write_registry_with_extra(tmp_path)
-    config_path = _write_config(tmp_path, registry_path=registry_path)
-    session_token = generate_session_token()
-    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
-    port = httpd.server_address[1]
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    _wait_for_port(port)
-    base_url = f"http://127.0.0.1:{port}"
-
-    # source не передан — дефолт "stand".
-    status, body, _ = _request(base_url, "/api/stand/demo/logs/list", token=session_token)
-    assert status == 200
-    assert [f["name"] for f in body["files"]] == ["a.log"]
-
-    status, body, _ = _request(base_url, "/api/stand/demo/logs/file?name=a.log", token=session_token)
-    assert status == 200
-    assert body["lines"] == ["hello", "world"]
-
-
-def test_api_stand_logs_file_rejects_traversal(tmp_path):
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
-    (logs_dir / "a.log").write_text("x", encoding="utf-8")
-    registry_path = _write_registry_with_extra(tmp_path, extra={"logs_path": str(logs_dir)})
-    config_path = _write_config(tmp_path, registry_path=registry_path)
-    session_token = generate_session_token()
-    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
-    port = httpd.server_address[1]
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    _wait_for_port(port)
-    base_url = f"http://127.0.0.1:{port}"
-
-    status, _, _ = _request(
-        base_url,
-        "/api/stand/demo/logs/file?source=bpmkit&name=..%2F..%2Fetc%2Fpasswd",
-        token=session_token,
-    )
-    assert status in (400, 404)
-
-
-def test_api_stand_logs_invalid_source_returns_400(tmp_path):
-    base_url, token, *_ = _start_hub(tmp_path)
-    status, _, _ = _request(base_url, "/api/stand/demo/logs/list?source=nope", token=token)
-    assert status == 400
-    status, _, _ = _request(base_url, "/api/stand/demo/logs/file?source=nope&name=a.log", token=token)
-    assert status == 400
+    status, _, _ = _request(base_url, "/api/stand/demo/logs/list", token=token)
+    assert status == 404
+    status, _, _ = _request(base_url, "/api/stand/demo/logs/file?name=a.log", token=token)
+    assert status == 404
 
 
 def test_api_stand_logs_open_folder_requires_mutation_auth(tmp_path):
@@ -710,23 +649,293 @@ def test_api_stand_logs_open_folder_invalid_source_returns_400(tmp_path):
     assert status == 400
 
 
-# --- API: /api/mcp/version ---
+# --- API: /api/stand/{name}/start возвращает pid при успехе ---
 
 
-def test_api_mcp_version_null_when_manifest_not_found(tmp_path, monkeypatch):
-    monkeypatch.delenv("BPMKIT_MANIFEST", raising=False)
+def test_post_stand_start_returns_pid_in_response(tmp_path, monkeypatch):
     base_url, token, *_ = _start_hub(tmp_path)
-    status, body, _ = _request(base_url, "/api/mcp/version", token=token)
+
+    monkeypatch.setattr(hub_client_module.lifecycle, "start", lambda stand: 4242)
+
+    status, body, _ = _request(
+        base_url, "/api/stand/demo/start", token=token, method="POST", origin=base_url
+    )
+
     assert status == 200
-    assert "version" in body
+    assert body.get("ok") is True
+    assert body.get("pid") == 4242
 
 
-def test_api_mcp_version_reads_manifest_from_env(tmp_path, monkeypatch):
-    manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text(json.dumps({"version": "1.2.3"}), encoding="utf-8")
-    monkeypatch.setenv("BPMKIT_MANIFEST", str(manifest_path))
+def test_post_stand_restart_returns_pid_in_response(tmp_path, monkeypatch):
+    base_url, token, *_ = _start_hub(tmp_path)
+
+    monkeypatch.setattr(hub_client_module.lifecycle, "restart", lambda stand: 4343)
+
+    status, body, _ = _request(
+        base_url, "/api/stand/demo/restart", token=token, method="POST", origin=base_url
+    )
+
+    assert status == 200
+    assert body.get("ok") is True
+    assert body.get("pid") == 4343
+
+
+def test_post_stand_action_lifecycle_error_returns_400_with_message(tmp_path, monkeypatch):
+    from standkit.lifecycle import LifecycleError
 
     base_url, token, *_ = _start_hub(tmp_path)
-    status, body, _ = _request(base_url, "/api/mcp/version", token=token)
+
+    def _fake_start(stand):
+        raise LifecycleError("dotnet не найден в PATH: 'dotnet'")
+
+    monkeypatch.setattr(hub_client_module.lifecycle, "start", _fake_start)
+
+    status, body, _ = _request(
+        base_url, "/api/stand/demo/start", token=token, method="POST", origin=base_url
+    )
+
+    assert status == 400
+    assert "dotnet" in body.get("error", "")
+
+
+def test_api_mcp_version_endpoint_removed(tmp_path):
+    # Карточка MCP/Companion убрана из UI — эндпоинт больше не существует.
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, _, _ = _request(base_url, "/api/mcp/version", token=token)
+    assert status == 404
+
+
+# --- API: /api/stand/{name}/redis-clear (кнопка "Очистить Redis") ---
+
+
+def test_redis_clear_without_redis_db_returns_400(tmp_path):
+    # Реестр demo-стенда из _write_registry не содержит extra["redis_db"] —
+    # номер БД Redis НИКОГДА не угадывается, только явный отказ с понятным текстом.
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(
+        base_url, "/api/stand/demo/redis-clear", token=token, method="POST", origin=base_url
+    )
+    assert status == 400
+    assert "redis_db" in body.get("error", "")
+
+
+def test_redis_clear_requires_mutation_auth(tmp_path):
+    base_url, token, *_ = _start_hub(tmp_path)
+    # Только токен, без Origin — мутация должна отклоняться (та же модель, что и /start).
+    status, _, _ = _request(base_url, "/api/stand/demo/redis-clear", token=token, method="POST")
+    assert status == 403
+
+
+def test_redis_clear_unknown_stand_returns_404(tmp_path):
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, _, _ = _request(
+        base_url,
+        "/api/stand/does-not-exist/redis-clear",
+        token=token,
+        method="POST",
+        origin=base_url,
+    )
+    assert status == 404
+
+
+def test_redis_clear_with_redis_db_calls_flush_db_and_returns_200(tmp_path, monkeypatch):
+    registry_path = _write_registry_with_extra(tmp_path, extra={"redis_db": 7})
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    calls = {}
+
+    def _fake_flush_db(host, port_, db, **kwargs):
+        calls["args"] = (host, port_, db)
+        from standkit_hub.redis_min import RedisClearResult
+
+        return RedisClearResult(True, f"Redis db={db} очищен ({host}:{port_})")
+
+    monkeypatch.setattr(server_module.redis_min, "flush_db", _fake_flush_db)
+
+    status, body, _ = _request(
+        base_url, "/api/stand/demo/redis-clear", token=session_token, method="POST", origin=base_url
+    )
+
     assert status == 200
-    assert body["version"] == "1.2.3"
+    assert body["ok"] is True
+    assert calls["args"] == ("127.0.0.1", 6379, 7)
+
+
+def test_redis_clear_propagates_failure_from_redis_min(tmp_path, monkeypatch):
+    registry_path = _write_registry_with_extra(tmp_path, extra={"redis_db": 7})
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    def _fake_flush_db(host, port_, db, **kwargs):
+        from standkit_hub.redis_min import RedisClearResult
+
+        return RedisClearResult(False, "не удалось подключиться к Redis")
+
+    monkeypatch.setattr(server_module.redis_min, "flush_db", _fake_flush_db)
+
+    status, body, _ = _request(
+        base_url, "/api/stand/demo/redis-clear", token=session_token, method="POST", origin=base_url
+    )
+
+    assert status == 502
+    assert body["ok"] is False
+    assert "не удалось подключиться" in body.get("error", "")
+
+
+def test_api_stands_logs_bpmkit_available_true_when_logs_path_exists(tmp_path):
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    registry_path = _write_registry_with_extra(tmp_path, extra={"logs_path": str(logs_dir)})
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    status, body, _ = _request(base_url, "/api/stands", token=session_token)
+    assert status == 200
+    stand = body["stands"][0]
+    assert stand["logs"]["bpmkit_available"] is True
+
+
+def test_api_stands_logs_bpmkit_available_false_when_logs_path_not_set(tmp_path):
+    # demo-стенд из _write_registry не задаёт extra["logs_path"].
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(base_url, "/api/stands", token=token)
+    assert status == 200
+    stand = body["stands"][0]
+    assert stand["logs"]["bpmkit_available"] is False
+
+
+def test_api_stands_logs_bpmkit_available_false_when_logs_path_does_not_exist(tmp_path):
+    registry_path = _write_registry_with_extra(
+        tmp_path, extra={"logs_path": str(tmp_path / "no-such-dir")}
+    )
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    status, body, _ = _request(base_url, "/api/stands", token=session_token)
+    assert status == 200
+    assert body["stands"][0]["logs"]["bpmkit_available"] is False
+
+
+def test_api_stands_redis_number_falls_back_to_stand_config(tmp_path, monkeypatch):
+    # Реестр не содержит redis_db — но _redis_connect_params (через
+    # server_module.redis_min) резолвит db из конфига стенда.
+    base_url, token, config_path, registry_path, httpd = _start_hub(tmp_path)
+
+    monkeypatch.setattr(
+        server_module.redis_min,
+        "resolve_redis_from_stand_config",
+        lambda stand_dir: {"host": "10.0.0.9", "port": 6400, "db": 11},
+    )
+
+    status, body, _ = _request(base_url, "/api/stands", token=token)
+    assert status == 200
+    assert body["stands"][0]["redis"]["number"] == 11
+
+
+def test_api_stands_redis_number_registry_takes_priority_over_config(tmp_path, monkeypatch):
+    registry_path = _write_registry_with_extra(tmp_path, extra={"redis_db": 3})
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    called = {}
+
+    def _fake_resolve(stand_dir):
+        called["invoked"] = True
+        return {"host": "10.0.0.9", "port": 6400, "db": 99}
+
+    monkeypatch.setattr(server_module.redis_min, "resolve_redis_from_stand_config", _fake_resolve)
+
+    status, body, _ = _request(base_url, "/api/stands", token=session_token)
+    assert status == 200
+    # Реестр (db=3) в приоритете — конфиг стенда не должен даже вызываться.
+    assert body["stands"][0]["redis"]["number"] == 3
+    assert "invoked" not in called
+
+
+def test_redis_clear_falls_back_to_stand_config_when_registry_has_no_redis_db(tmp_path, monkeypatch):
+    base_url, token, config_path, registry_path, httpd = _start_hub(tmp_path)
+
+    monkeypatch.setattr(
+        server_module.redis_min,
+        "resolve_redis_from_stand_config",
+        lambda stand_dir: {"host": "10.0.0.9", "port": 6400, "db": 11},
+    )
+
+    calls = {}
+
+    def _fake_flush_db(host, port_, db, **kwargs):
+        calls["args"] = (host, port_, db)
+        from standkit_hub.redis_min import RedisClearResult
+
+        return RedisClearResult(True, "ok")
+
+    monkeypatch.setattr(server_module.redis_min, "flush_db", _fake_flush_db)
+
+    status, body, _ = _request(
+        base_url, "/api/stand/demo/redis-clear", token=token, method="POST", origin=base_url
+    )
+
+    assert status == 200
+    assert calls["args"] == ("10.0.0.9", 6400, 11)
+
+
+def test_redis_clear_uses_custom_host_and_port_from_extra(tmp_path, monkeypatch):
+    registry_path = _write_registry_with_extra(
+        tmp_path, extra={"redis_db": 2, "redis_host": "10.0.0.5", "redis_port": 6380}
+    )
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    calls = {}
+
+    def _fake_flush_db(host, port_, db, **kwargs):
+        calls["args"] = (host, port_, db)
+        from standkit_hub.redis_min import RedisClearResult
+
+        return RedisClearResult(True, "ok")
+
+    monkeypatch.setattr(server_module.redis_min, "flush_db", _fake_flush_db)
+
+    status, _, _ = _request(
+        base_url, "/api/stand/demo/redis-clear", token=session_token, method="POST", origin=base_url
+    )
+
+    assert status == 200
+    assert calls["args"] == ("10.0.0.5", 6380, 2)
