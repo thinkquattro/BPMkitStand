@@ -109,6 +109,63 @@
     return `<span class="${badgeClass(state)}">${state || "unknown"}</span>`;
   }
 
+  function processBadge(state) {
+    const label = state === "ok" ? "up" : state === "down" ? "down" : state || "unknown";
+    return `<span class="${badgeClass(state)}">${label}</span>`;
+  }
+
+  function valueClass(state) {
+    switch (state) {
+      case "ok":
+        return "value-ok";
+      case "down":
+        return "value-down";
+      case "skipped":
+        return "value-skipped";
+      default:
+        return "value-unknown";
+    }
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  function valueSpan(text, state) {
+    return `<span class="value-cell ${valueClass(state)}">${escapeHtml(text)}</span>`;
+  }
+
+  function redisCell(redis) {
+    const r = redis || {};
+    const hasNumber = r.number !== null && r.number !== undefined;
+    if (!hasNumber && (!r.state || r.state === "unknown")) {
+      // Номер Redis не хранится в реестре стендов (он в конфиге самого
+      // стенда) — это ожидаемое отсутствие данных, не ошибка. Показываем
+      // нейтральный прочерк, а не жёлтый/красный статус.
+      return '<span class="value-cell value-muted">—</span>';
+    }
+    return valueSpan(hasNumber ? String(r.number) : "—", r.state);
+  }
+
+  // --- иконки действий (инлайн-SVG, без внешних шрифтов/CDN) ---
+
+  const ICON_PLAY =
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M4 2.5v11l9-5.5-9-5.5z"/></svg>';
+  const ICON_STOP =
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/></svg>';
+  const ICON_RESTART =
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8A5.2 5.2 0 1 1 10.9 3.6"/><path d="M13.4 2.6v3.4h-3.4"/></svg>';
+
+  function actionButtons(name) {
+    return `
+      <button class="icon-btn icon-btn-play" data-action="start" data-name="${name}" title="Запустить">${ICON_PLAY}</button>
+      <button class="icon-btn icon-btn-stop" data-action="stop" data-name="${name}" title="Остановить">${ICON_STOP}</button>
+      <button class="icon-btn icon-btn-restart" data-action="restart" data-name="${name}" title="Перезапустить">${ICON_RESTART}</button>
+    `;
+  }
+
   // --- стенды ---
 
   let selectedStand = null;
@@ -130,54 +187,139 @@
     const tbody = document.getElementById("stands-tbody");
     tbody.innerHTML = "";
     stands.forEach((s) => {
-      const st = s.status || {};
+      const http = s.http || {};
+      const db = s.db || {};
+      const redis = s.redis || {};
+      const process = s.process || {};
       const tr = document.createElement("tr");
+      tr.dataset.name = s.name;
+      if (s.name === selectedStand) tr.classList.add("selected");
       tr.innerHTML = `
-        <td>${s.name}</td>
-        <td>${s.transport}</td>
-        <td>${badge(st.process)}</td>
-        <td>${badge(st.http)}</td>
-        <td>${badge(st.db)}</td>
-        <td>${badge(st.redis)}</td>
-        <td class="row-actions">
-          <button data-action="start" data-name="${s.name}">Старт</button>
-          <button data-action="stop" data-name="${s.name}">Стоп</button>
-          <button data-action="restart" data-name="${s.name}">Рестарт</button>
-          <button data-action="logs" data-name="${s.name}">Логи</button>
-        </td>
+        <td>${escapeHtml(s.name)}</td>
+        <td>${escapeHtml(s.transport)}</td>
+        <td>${processBadge(process.state)}</td>
+        <td>${valueSpan(http.url || "—", http.state)}</td>
+        <td>${valueSpan(db.name || "—", db.state)}</td>
+        <td>${redisCell(redis)}</td>
+        <td class="row-actions">${actionButtons(s.name)}</td>
       `;
+      tr.addEventListener("click", (evt) => {
+        if (evt.target.closest("button")) return;
+        selectStand(s.name);
+      });
       tbody.appendChild(tr);
     });
 
     tbody.querySelectorAll("button[data-action]").forEach((btn) => {
-      btn.addEventListener("click", () => onStandAction(btn.dataset.name, btn.dataset.action));
+      btn.addEventListener("click", (evt) => {
+        evt.stopPropagation();
+        onStandAction(btn.dataset.name, btn.dataset.action);
+      });
     });
+  }
+
+  function selectStand(name) {
+    selectedStand = name;
+    document.querySelectorAll(".stands-table tbody tr").forEach((tr) => {
+      tr.classList.toggle("selected", tr.dataset.name === name);
+    });
+    refreshState();
+    refreshLogFilesList();
   }
 
   async function onStandAction(name, action) {
     const errorEl = document.getElementById("stands-error");
     errorEl.textContent = "";
     try {
-      if (action === "logs") {
-        selectedStand = name;
-        await refreshLogs();
-        return;
-      }
       await apiSend("POST", `/api/stand/${encodeURIComponent(name)}/${action}`);
       await refreshStands();
+      if (name === selectedStand) refreshState();
     } catch (e) {
       errorEl.textContent = `Ошибка (${name}/${action}): ${e.message}`;
     }
   }
 
-  async function refreshLogs() {
+  // --- текущее состояние выбранного стенда ---
+
+  async function refreshState() {
     if (!selectedStand) return;
-    document.getElementById("log-stand-name").textContent = `(${selectedStand})`;
+    document.getElementById("state-stand-name").textContent = `(${selectedStand})`;
     try {
-      const data = await apiGet(`/api/stand/${encodeURIComponent(selectedStand)}/logs?n=200`);
-      document.getElementById("log-output").textContent = (data.lines || []).join("\n") || "(лог пуст)";
+      const data = await apiGet(`/api/stand/${encodeURIComponent(selectedStand)}/state`);
+      document.getElementById("state-output").textContent = data.text || "";
     } catch (e) {
-      document.getElementById("log-output").textContent = `Ошибка чтения логов: ${e.message}`;
+      document.getElementById("state-output").textContent = `Ошибка чтения состояния: ${e.message}`;
+    }
+  }
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return `${bytes} Б`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
+  }
+
+  async function refreshLogFilesList() {
+    if (!selectedStand) return;
+    const select = document.getElementById("log-file-select");
+    const previous = select.value;
+    select.innerHTML = '<option value="">(основной лог)</option>';
+    try {
+      const data = await apiGet(`/api/stand/${encodeURIComponent(selectedStand)}/logs/list`);
+      (data.files || []).forEach((f) => {
+        const opt = document.createElement("option");
+        opt.value = f.name;
+        opt.textContent = `${f.name} (${formatSize(f.size)})`;
+        select.appendChild(opt);
+      });
+      if (previous && Array.from(select.options).some((o) => o.value === previous)) {
+        select.value = previous;
+      }
+    } catch (e) {
+      // Список файлов не критичен для показа "текущего состояния" — не шумим ошибкой.
+    }
+  }
+
+  function setupStatePanel() {
+    document.getElementById("log-file-open-btn").addEventListener("click", async () => {
+      if (!selectedStand) return;
+      const select = document.getElementById("log-file-select");
+      const name = select.value;
+      const out = document.getElementById("state-output");
+      if (!name) {
+        await refreshState();
+        return;
+      }
+      try {
+        const data = await apiGet(
+          `/api/stand/${encodeURIComponent(selectedStand)}/logs/file?name=${encodeURIComponent(name)}&n=500`
+        );
+        out.textContent = (data.lines || []).join("\n") || "(лог пуст)";
+      } catch (e) {
+        out.textContent = `Ошибка чтения файла: ${e.message}`;
+      }
+    });
+
+    document.getElementById("log-folder-open-btn").addEventListener("click", async () => {
+      if (!selectedStand) return;
+      const out = document.getElementById("state-output");
+      try {
+        const data = await apiSend("POST", `/api/stand/${encodeURIComponent(selectedStand)}/logs/open-folder`);
+        out.textContent = data.message || (data.ok ? "Папка логов открыта." : "Не удалось открыть папку логов.");
+      } catch (e) {
+        out.textContent = `Ошибка: ${e.message}`;
+      }
+    });
+  }
+
+  // --- карточка MCP/Companion ---
+
+  async function refreshMcpVersion() {
+    const el = document.getElementById("mcp-version");
+    try {
+      const data = await apiGet("/api/mcp/version");
+      el.textContent = data.version || "не определена (manifest.json не найден)";
+    } catch (e) {
+      el.textContent = `ошибка: ${e.message}`;
     }
   }
 
@@ -366,10 +508,12 @@
     setupTabs();
     setupAgentTab();
     setupSettingsForm();
+    setupStatePanel();
     document.getElementById("refresh-stands-btn").addEventListener("click", refreshStands);
 
     refreshStands();
     refreshAgentStatus();
+    refreshMcpVersion();
     loadSettings().catch((e) => {
       document.getElementById("settings-status").textContent = `Ошибка загрузки настроек: ${e.message}`;
     });
@@ -378,7 +522,7 @@
     setInterval(() => {
       refreshStands();
       refreshAgentStatus();
-      if (selectedStand) refreshLogs();
+      if (selectedStand) refreshState();
     }, intervalMs);
   }
 

@@ -40,15 +40,51 @@
         </thead>
         <tbody id="stands-tbody"></tbody>
       </table>
+      <p class="hint-text">Клик по строке выбирает стенд — выбор управляет панелью «Текущее состояние» ниже.</p>
 
-      <div class="log-panel">
-        <h2>Логи <span id="log-stand-name"></span></h2>
-        <pre id="log-output">Выберите стенд и нажмите «Логи», чтобы увидеть последние строки.</pre>
+      <div class="state-panel">
+        <div class="state-panel-header">
+          <h2>Текущее состояние <span id="state-stand-name"></span></h2>
+          <div class="state-panel-controls">
+            <select id="log-file-select" title="Лог-файл из logs_path стенда">
+              <option value="">(основной лог)</option>
+            </select>
+            <button id="log-file-open-btn" class="secondary" title="Показать выбранный файл">Открыть</button>
+            <button id="log-folder-open-btn" class="secondary" title="Открыть папку логов в проводнике ОС">Открыть папку логов</button>
+          </div>
+        </div>
+        <pre id="state-output">Выберите стенд в таблице, чтобы увидеть текущее состояние.</pre>
+      </div>
+
+      <div class="companion-card">
+        <div class="companion-card-body">
+          <div class="companion-card-title">MCP BPMkit: версия <span id="mcp-version">…</span></div>
+          <div class="companion-card-note">Автообновление MCP и лицензия — в платном Companion.</div>
+        </div>
+        <button id="mcp-update-btn" class="secondary" disabled title="Доступно в Companion">Обновить MCP</button>
       </div>
     </section>
 
     <section id="tab-agent" class="tab-panel">
-      <p>Локальный ``standkit_agent`` — headless-агент, управляющий стендами этой машины по HTTP (используется, когда хаб федерирует несколько машин).</p>
+      <div class="agent-explainer">
+        <p>
+          Локальный <code>standkit_agent</code> — headless-служба, которую ставят
+          <strong>на хост со стендами</strong>, чтобы удалённый диспетчер BPMkitStand
+          (этот дашборд на машине оператора) мог федеративно управлять стендами
+          <strong>этой машины</strong> по HTTP — см. значение <code>transport: agent</code>
+          у записи стенда в реестре.
+        </p>
+        <p>
+          Агент нужен ТОЛЬКО для удалённого управления. Если вы управляете стендами
+          локально, с этой же машины, где они запущены (<code>transport: local</code>),
+          агент не требуется — ядро standkit работает со стендами напрямую.
+        </p>
+        <p>
+          Кнопки ниже запускают/останавливают такой агент на ТЕКУЩЕЙ машине с
+          параметрами из вкладки «Настройки» (host/port/токены/TLS) — чтобы другие
+          хабы могли подключиться к стендам этой машины.
+        </p>
+      </div>
       <p>Статус: <span id="agent-status">…</span></p>
       <div class="panel-toolbar">
         <button id="agent-start-btn">Запустить агент</button>

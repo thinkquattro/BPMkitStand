@@ -170,7 +170,86 @@ button.secondary {
   font-size: 12px;
 }
 
-.log-panel {
+.stands-table tbody tr {
+  cursor: pointer;
+}
+
+.stands-table tbody tr:hover {
+  background: #f8fafd;
+}
+
+.stands-table tbody tr.selected {
+  background: #e8f0fe;
+  box-shadow: inset 3px 0 0 var(--bpmkit-primary);
+}
+
+.hint-text {
+  color: var(--bpmkit-muted);
+  font-size: 12px;
+  margin: 8px 2px 0;
+}
+
+.value-cell {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.value-ok {
+  color: var(--bpmkit-ok);
+}
+
+.value-down {
+  color: var(--bpmkit-down);
+}
+
+.value-unknown {
+  color: var(--bpmkit-unknown);
+}
+
+.value-skipped {
+  color: var(--bpmkit-skipped);
+}
+
+.value-muted {
+  color: var(--bpmkit-muted);
+  font-weight: 400;
+}
+
+/* --- иконки действий (Старт/Стоп/Рестарт) --- */
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 4px;
+  padding: 0;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  color: white;
+}
+
+.icon-btn-play {
+  background: var(--bpmkit-ok);
+}
+
+.icon-btn-stop {
+  background: var(--bpmkit-down);
+}
+
+.icon-btn-restart {
+  background: var(--bpmkit-primary);
+}
+
+.icon-btn:hover {
+  filter: brightness(1.1);
+}
+
+/* --- панель "Текущее состояние" --- */
+
+.state-panel {
   margin-top: 20px;
   background: var(--bpmkit-panel-bg);
   border: 1px solid var(--bpmkit-border);
@@ -178,12 +257,35 @@ button.secondary {
   padding: 12px 16px;
 }
 
-.log-panel h2 {
-  font-size: 14px;
-  margin: 0 0 8px;
+.state-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
-#log-output {
+.state-panel-header h2 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.state-panel-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.state-panel-controls select {
+  padding: 5px 8px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  font-size: 12px;
+  max-width: 260px;
+}
+
+#state-output {
   max-height: 320px;
   overflow: auto;
   background: #10141f;
@@ -193,6 +295,62 @@ button.secondary {
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* --- карточка MCP / Companion --- */
+
+.companion-card {
+  margin-top: 16px;
+  background: var(--bpmkit-panel-bg);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.companion-card-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.companion-card-note {
+  font-size: 12px;
+  color: var(--bpmkit-muted);
+  margin-top: 2px;
+}
+
+.companion-card button:disabled {
+  background: var(--bpmkit-skipped);
+  cursor: not-allowed;
+}
+
+/* --- пояснение вкладки "Локальный агент" --- */
+
+.agent-explainer {
+  background: var(--bpmkit-panel-bg);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+}
+
+.agent-explainer p {
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+
+.agent-explainer p:last-child {
+  margin-bottom: 0;
+}
+
+.agent-explainer code {
+  background: var(--bpmkit-bg);
+  padding: 1px 5px;
+  border-radius: 4px;
 }
 
 .settings-form fieldset {

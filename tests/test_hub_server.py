@@ -426,3 +426,211 @@ def test_unsupported_method_returns_405(tmp_path):
     base_url, token, *_ = _start_hub(tmp_path)
     status, _, _ = _request(base_url, "/api/stands", token=token, method="PUT")
     assert status == 405
+
+
+# --- API: /api/stands обогащённый payload (http/db/redis/process значения) ---
+
+
+def _write_registry_with_extra(tmp_path, *, stand_name="demo", extra=None, db_name="", db_host="", db_port=0):
+    from standkit.models import Stand
+
+    registry_path = tmp_path / "projects.json"
+    registry = Registry(
+        path=registry_path,
+        default=stand_name,
+        stands={
+            stand_name: Stand(
+                name=stand_name,
+                stand_dir=str(tmp_path / stand_name),
+                db_name=db_name,
+                db_host=db_host,
+                db_port=db_port,
+                extra=extra or {},
+            )
+        },
+    )
+    registry.save()
+    return registry_path
+
+
+def test_api_stands_enriched_payload_shape(tmp_path):
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    registry_path = _write_registry_with_extra(
+        tmp_path,
+        extra={"logs_path": str(logs_dir), "redis_db": 3},
+        db_name="mydb",
+    )
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    status, body, _ = _request(base_url, "/api/stands", token=session_token)
+    assert status == 200
+    stand = body["stands"][0]
+
+    assert stand["http"]["url"] == "http://127.0.0.1:5000"
+    assert "state" in stand["http"]
+
+    assert stand["db"]["name"] == "mydb"
+    assert "state" in stand["db"]
+
+    assert stand["redis"]["number"] == 3
+    assert "state" in stand["redis"]
+
+    assert "state" in stand["process"]
+    assert stand["process"]["transport"] == "local"
+    assert stand["process"]["logs_path"] == str(logs_dir)
+
+
+def test_api_stands_redis_number_null_when_not_in_registry(tmp_path):
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(base_url, "/api/stands", token=token)
+    assert status == 200
+    stand = body["stands"][0]
+    # Redis-параметры не хранятся в реестре по умолчанию — это ожидаемое
+    # отсутствие данных, а не ошибка.
+    assert stand["redis"]["number"] is None
+
+
+# --- API: /api/stand/{name}/state ---
+
+
+def test_api_stand_state_unavailable_when_logs_path_not_set(tmp_path):
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(base_url, "/api/stand/demo/state", token=token)
+    assert status == 200
+    assert body["available"] is False
+    assert "logs_path" in body["text"] or "вне standkit" in body["text"]
+
+
+def test_api_stand_state_returns_tail_of_primary_log(tmp_path):
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "stand.log").write_text("line1\nline2\nline3\n", encoding="utf-8")
+    registry_path = _write_registry_with_extra(tmp_path, extra={"logs_path": str(logs_dir)})
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    status, body, _ = _request(base_url, "/api/stand/demo/state", token=session_token)
+    assert status == 200
+    assert body["available"] is True
+    assert "line1" in body["text"]
+    assert body["file"] == "stand.log"
+
+
+# --- API: /api/stand/{name}/logs/list и /logs/file (санитайзинг) ---
+
+
+def test_api_stand_logs_list_empty_when_no_logs_path(tmp_path):
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(base_url, "/api/stand/demo/logs/list", token=token)
+    assert status == 200
+    assert body["files"] == []
+
+
+def test_api_stand_logs_list_and_file_roundtrip(tmp_path):
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "a.log").write_text("hello\nworld\n", encoding="utf-8")
+    registry_path = _write_registry_with_extra(tmp_path, extra={"logs_path": str(logs_dir)})
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    status, body, _ = _request(base_url, "/api/stand/demo/logs/list", token=session_token)
+    assert status == 200
+    assert [f["name"] for f in body["files"]] == ["a.log"]
+
+    status, body, _ = _request(base_url, "/api/stand/demo/logs/file?name=a.log", token=session_token)
+    assert status == 200
+    assert body["lines"] == ["hello", "world"]
+
+
+def test_api_stand_logs_file_rejects_traversal(tmp_path):
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "a.log").write_text("x", encoding="utf-8")
+    registry_path = _write_registry_with_extra(tmp_path, extra={"logs_path": str(logs_dir)})
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    status, _, _ = _request(
+        base_url, "/api/stand/demo/logs/file?name=..%2F..%2Fetc%2Fpasswd", token=session_token
+    )
+    assert status in (400, 404)
+
+
+def test_api_stand_logs_open_folder_requires_mutation_auth(tmp_path):
+    base_url, token, *_ = _start_hub(tmp_path)
+    # Только токен, без Origin — мутация должна отклоняться (та же модель, что и /start).
+    status, _, _ = _request(base_url, "/api/stand/demo/logs/open-folder", token=token, method="POST")
+    assert status == 403
+
+
+def test_api_stand_logs_open_folder_calls_subprocess(tmp_path, monkeypatch):
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    registry_path = _write_registry_with_extra(tmp_path, extra={"logs_path": str(logs_dir)})
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_for_port(port)
+    base_url = f"http://127.0.0.1:{port}"
+
+    import standkit_hub.logs_browser as logs_browser_module
+
+    monkeypatch.setattr(logs_browser_module.subprocess, "Popen", lambda args: None)
+
+    status, body, _ = _request(
+        base_url, "/api/stand/demo/logs/open-folder", token=session_token, method="POST", origin=base_url
+    )
+    assert status == 200
+    assert body["ok"] is True
+
+
+# --- API: /api/mcp/version ---
+
+
+def test_api_mcp_version_null_when_manifest_not_found(tmp_path, monkeypatch):
+    monkeypatch.delenv("BPMKIT_MANIFEST", raising=False)
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(base_url, "/api/mcp/version", token=token)
+    assert status == 200
+    assert "version" in body
+
+
+def test_api_mcp_version_reads_manifest_from_env(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"version": "1.2.3"}), encoding="utf-8")
+    monkeypatch.setenv("BPMKIT_MANIFEST", str(manifest_path))
+
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(base_url, "/api/mcp/version", token=token)
+    assert status == 200
+    assert body["version"] == "1.2.3"

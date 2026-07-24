@@ -5,7 +5,7 @@
 
 import socket
 
-from standkit.health import http_ok, process_alive, tcp_open
+from standkit.health import http_ok, process_alive, process_running, tcp_open
 from standkit.models import ProbeState
 from standkit.health import check_stand
 from standkit.models import Stand, Transport
@@ -83,3 +83,64 @@ def test_check_stand_down_on_closed_ports(tmp_path):
     assert status.http == ProbeState.DOWN
     assert status.db == ProbeState.DOWN
     assert status.is_healthy is False
+
+
+# --- process_running: TCP-фолбэк для процессов, поднятых извне standkit ---
+
+
+def test_process_running_false_when_pidfile_missing_and_no_host_port(tmp_path):
+    assert process_running(tmp_path / "nonexistent.pid") is False
+
+
+def test_process_running_true_via_pidfile(monkeypatch, tmp_path):
+    from standkit import health as health_module
+
+    pf = tmp_path / "alive.pid"
+    pf.write_text("123", encoding="utf-8")
+    monkeypatch.setattr(health_module, "process_alive", lambda pidfile: True)
+    assert process_running(pf) is True
+
+
+def test_process_running_true_via_open_stand_port(monkeypatch):
+    # Даже без pidfile (либо он не жив) — открытый TCP-порт стенда сам по себе
+    # считается признаком "процесс запущен" (стенд поднят вручную/извне).
+    calls = {}
+
+    def _fake_tcp_open(host, port, **kwargs):
+        calls["host"] = host
+        calls["port"] = port
+        return True
+
+    import standkit.health as health_module
+
+    monkeypatch.setattr(health_module, "tcp_open", _fake_tcp_open)
+    assert process_running(None, "127.0.0.1", 5000) is True
+    assert calls == {"host": "127.0.0.1", "port": 5000}
+
+
+def test_process_running_false_when_port_closed_and_no_pidfile():
+    port = _find_closed_port()
+    assert process_running(None, "127.0.0.1", port) is False
+
+
+def test_check_stand_process_up_via_open_port_without_alive_pidfile(tmp_path):
+    # pidfile передан, но не существует/не жив — процесс всё равно "up", если
+    # слушается TCP-порт стенда (стенд поднят вне standkit).
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    try:
+        stand = Stand(
+            name="external",
+            stand_dir="/opt/x",
+            stand_host="127.0.0.1",
+            stand_port=port,
+            db_host="",
+            db_port=0,
+        )
+        pidfile = tmp_path / "missing.pid"  # никогда не создавался standkit'ом
+        status = check_stand(stand, pidfile=pidfile)
+        assert status.process == ProbeState.OK
+    finally:
+        listener.close()

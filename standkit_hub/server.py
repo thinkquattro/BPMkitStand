@@ -37,25 +37,97 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
+from standkit import logs as _logs
 from standkit.lifecycle import LifecycleError
-from standkit.registry import Registry, RegistryError, default_registry_path
+from standkit.models import Stand
+from standkit.registry import Registry, RegistryError, bpmkit_config_dir, default_registry_path
 from standkit.secrets import SecretError, delete_secret, has_secret, set_secret
+from standkit_hub import logs_browser
 from standkit_hub import security as _security
 from standkit_hub.agent_control import AgentControlError, AgentController
 from standkit_hub.client import FederatedClient, RemoteCallError
 from standkit_hub.config import HubConfig
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
 
-_STAND_ACTION_RE = re.compile(r"^/api/stand/(?P<name>[^/]+)/(?P<action>status|logs|start|stop|restart)$")
+_STAND_ACTION_RE = re.compile(
+    r"^/api/stand/(?P<name>[^/]+)/(?P<action>status|logs|start|stop|restart|state)$"
+)
+_STAND_LOGS_SUB_RE = re.compile(r"^/api/stand/(?P<name>[^/]+)/logs/(?P<sub>list|file|open-folder)$")
 _SECRET_RE = re.compile(r"^/api/secret/(?P<ref>[^/]+)$")
 
 _DEFAULT_WEB_DIR = Path(__file__).parent / "web"
+
+# env, которую может задать инсталляция клиентского MCP BPMkit, чтобы хаб
+# нашёл его manifest.json напрямую, без угадывания путей.
+_MCP_MANIFEST_ENV = "BPMKIT_MANIFEST"
+
+
+def _redis_number(stand: Stand) -> Optional[int]:
+    """
+    Номер БД Redis стенда, ЕСЛИ он найден в реестре/``extra``.
+
+    Реестр BPMkit (projects.json) обычно НЕ хранит Redis-параметры — номер БД
+    Redis лежит в конфиге самого стенда (appsettings), не в реестре стендов.
+    Поэтому в подавляющем большинстве случаев эта функция вернёт ``None`` —
+    это ожидаемо, а не ошибка; ищем по нескольким правдоподобным ключам на
+    случай, если значение всё же было добавлено вручную/другим инструментом.
+    """
+    for key in ("redis_db", "redis_number"):
+        val = stand.extra.get(key)
+        if val is not None:
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                continue
+    nested = stand.extra.get("redis")
+    if isinstance(nested, dict):
+        for key in ("db", "number", "redis_db"):
+            val = nested.get(key)
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+
+def _find_mcp_manifest_path(config: "HubConfig") -> Optional[Path]:
+    """
+    Ищет ``manifest.json`` клиентского MCP BPMkit (для карточки версии/
+    Companion на дашборде). Порядок поиска — от явного к угадыванию:
+
+    1. env ``BPMKIT_MANIFEST`` (путь к самому файлу манифеста);
+    2. рядом с реестром стендов (``registry_path`` хаба указывает в общую
+       папку BPMkit, где обычно лежит и manifest.json установленного MCP);
+    3. каноническая папка конфигов BPMkit (``%APPDATA%\\BPMkit`` и т.п.);
+    4. стандартное относительное расположение при поставке рядом со
+       standkit (``../BPMkit/manifest.json`` от корня пакета).
+
+    Не находит — не ошибка, вызывающая сторона отдаёт ``version: null``.
+    """
+    env_value = os.environ.get(_MCP_MANIFEST_ENV)
+    if env_value:
+        p = Path(env_value)
+        if p.is_file():
+            return p
+
+    candidates = []
+    if config.registry_path:
+        candidates.append(Path(config.registry_path).parent / "manifest.json")
+    candidates.append(bpmkit_config_dir() / "manifest.json")
+    candidates.append(Path(__file__).resolve().parents[2] / "BPMkit" / "manifest.json")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _load_config(config_path: Path) -> HubConfig:
@@ -227,11 +299,31 @@ def make_handler(
             for name in registry.names():
                 stand = registry.get(name)
                 status = statuses.get(name)
+                status_dict = status.to_dict() if status else None
+                http_state = status.http.value if status else "unknown"
+                db_state = status.db.value if status else "unknown"
+                redis_state = status.redis.value if status else "unknown"
+                process_state = status.process.value if status else "unknown"
+                logs_dir = logs_browser.resolve_logs_dir(stand)
+                logs_path = str(logs_dir) if logs_dir else (stand.extra.get("logs_path") or None)
+                http_url = (
+                    f"http://{stand.stand_host}:{stand.stand_port}"
+                    if stand.stand_host and stand.stand_port
+                    else None
+                )
                 stands.append(
                     {
                         "name": name,
                         "transport": stand.transport.value,
-                        "status": status.to_dict() if status else None,
+                        "status": status_dict,
+                        "http": {"url": http_url, "state": http_state},
+                        "db": {"name": stand.db_name or None, "state": db_state},
+                        "redis": {"number": _redis_number(stand), "state": redis_state},
+                        "process": {
+                            "state": process_state,
+                            "transport": stand.transport.value,
+                            "logs_path": logs_path,
+                        },
                     }
                 )
             self._send_json(200, {"stands": stands, "default": registry.default})
@@ -276,6 +368,129 @@ def make_handler(
                 self._send_json(400, {"error": str(exc)})
                 return
             self._send_json(200, {"lines": lines})
+
+        def _api_stand_state(self, name: str) -> None:
+            """
+            Текущее состояние стенда (то, что видно в консоли/PS-окне стенда) —
+            tail основного лог-файла из ``extra["logs_path"]``. Не путать с
+            /logs (standkit-managed лог для transport=local через lifecycle) —
+            это отдельный источник, специфичный для того, как реально запущен
+            стенд (зачастую — вне standkit).
+            """
+            config = _load_config(config_path)
+            registry = _load_registry(config)
+            if name not in registry:
+                self._send_json(404, {"error": f"стенд '{name}' не найден"})
+                return
+            stand = registry.get(name)
+            logs_dir = logs_browser.resolve_logs_dir(stand)
+            if logs_dir is None:
+                self._send_json(
+                    200,
+                    {
+                        "available": False,
+                        "text": "лог недоступен (стенд запущен вне standkit / logs_path не задан)",
+                        "file": None,
+                    },
+                )
+                return
+            primary = logs_browser.pick_primary_log(logs_dir)
+            if primary is None:
+                self._send_json(
+                    200,
+                    {
+                        "available": False,
+                        "text": "лог недоступен (в logs_path нет файлов)",
+                        "file": None,
+                    },
+                )
+                return
+            lines = _logs.tail(primary, 200)
+            self._send_json(
+                200,
+                {
+                    "available": True,
+                    "text": "\n".join(lines) if lines else "(лог пуст)",
+                    "file": primary.name,
+                },
+            )
+
+        def _api_stand_logs_list(self, name: str) -> None:
+            config = _load_config(config_path)
+            registry = _load_registry(config)
+            if name not in registry:
+                self._send_json(404, {"error": f"стенд '{name}' не найден"})
+                return
+            stand = registry.get(name)
+            logs_dir = logs_browser.resolve_logs_dir(stand)
+            if logs_dir is None:
+                self._send_json(200, {"files": [], "logs_path": stand.extra.get("logs_path") or None})
+                return
+            files = logs_browser.list_log_files(logs_dir)
+            self._send_json(200, {"files": files, "logs_path": str(logs_dir)})
+
+        def _api_stand_logs_file(self, name: str, parsed) -> None:
+            config = _load_config(config_path)
+            registry = _load_registry(config)
+            if name not in registry:
+                self._send_json(404, {"error": f"стенд '{name}' не найден"})
+                return
+            stand = registry.get(name)
+            logs_dir = logs_browser.resolve_logs_dir(stand)
+            if logs_dir is None:
+                self._send_json(404, {"error": "logs_path не задан или недоступен"})
+                return
+            qs = parse_qs(parsed.query)
+            raw_name = (qs.get("name") or [None])[0]
+            if not raw_name:
+                self._send_json(400, {"error": "параметр 'name' обязателен"})
+                return
+            target = logs_browser.sanitize_log_filename(logs_dir, raw_name)
+            if target is None:
+                self._send_json(404, {"error": "файл не найден"})
+                return
+            raw_n = (qs.get("n") or ["500"])[0]
+            try:
+                n = _security.clamp_logs_n(raw_n, max_n=max_logs_n)
+            except (ValueError, TypeError):
+                self._send_json(400, {"error": "invalid n"})
+                return
+            lines = _logs.tail(target, n)
+            self._send_json(200, {"lines": lines, "name": target.name})
+
+        def _api_stand_logs_open_folder(self, name: str) -> None:
+            config = _load_config(config_path)
+            registry = _load_registry(config)
+            if name not in registry:
+                self._send_json(404, {"error": f"стенд '{name}' не найден"})
+                return
+            stand = registry.get(name)
+            logs_dir = logs_browser.resolve_logs_dir(stand)
+            if logs_dir is None:
+                self._send_json(400, {"error": "logs_path не задан или недоступен"})
+                return
+            result = logs_browser.open_folder(logs_dir)
+            self._send_json(200 if result.ok else 400, {"ok": result.ok, "message": result.message})
+
+        # --- API: MCP / Companion ---
+
+        def _api_mcp_version(self) -> None:
+            config = _load_config(config_path)
+            manifest_path = _find_mcp_manifest_path(config)
+            version = None
+            if manifest_path is not None:
+                try:
+                    data = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+                    version = data.get("version")
+                except (OSError, json.JSONDecodeError):
+                    version = None
+            self._send_json(
+                200,
+                {
+                    "version": version,
+                    "manifest_path": str(manifest_path) if manifest_path else None,
+                },
+            )
 
         def _api_stand_action(self, name: str, action: str) -> None:
             config = _load_config(config_path)
@@ -424,11 +639,34 @@ def make_handler(
                 self._api_agent_status()
                 return
 
+            if path == "/api/mcp/version":
+                if not self._authorize_read():
+                    return
+                self._api_mcp_version()
+                return
+
             m = _SECRET_RE.match(path)
             if m:
                 if not self._authorize_read():
                     return
                 self._api_secret_get(m.group("ref"))
+                return
+
+            m = _STAND_LOGS_SUB_RE.match(path)
+            if m:
+                if not self._authorize_read():
+                    return
+                if not _security.validate_stand_name(m.group("name")):
+                    self._send_json(400, {"error": "invalid stand name"})
+                    return
+                if m.group("sub") == "list":
+                    self._api_stand_logs_list(m.group("name"))
+                    return
+                if m.group("sub") == "file":
+                    self._api_stand_logs_file(m.group("name"), parsed)
+                    return
+                # "open-folder" — только POST (мутация: запускает процесс на хосте).
+                self._send_json(404, {"error": "not found"})
                 return
 
             m = _STAND_ACTION_RE.match(path)
@@ -447,6 +685,14 @@ def make_handler(
                     self._send_json(400, {"error": "invalid stand name"})
                     return
                 self._api_stand_logs(m.group("name"), parsed)
+                return
+            if m and m.group("action") == "state":
+                if not self._authorize_read():
+                    return
+                if not _security.validate_stand_name(m.group("name")):
+                    self._send_json(400, {"error": "invalid stand name"})
+                    return
+                self._api_stand_state(m.group("name"))
                 return
 
             self._send_json(404, {"error": "not found"})
@@ -492,6 +738,16 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_secret_post(m.group("ref"))
+                return
+
+            m = _STAND_LOGS_SUB_RE.match(path)
+            if m and m.group("sub") == "open-folder":
+                if not self._authorize_mutation():
+                    return
+                if not _security.validate_stand_name(m.group("name")):
+                    self._send_json(400, {"error": "invalid stand name"})
+                    return
+                self._api_stand_logs_open_folder(m.group("name"))
                 return
 
             m = _STAND_ACTION_RE.match(path)
