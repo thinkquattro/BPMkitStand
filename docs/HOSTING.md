@@ -113,12 +113,23 @@
 - **kestrel** — без изменений: `dotnet <stand_dll>` + pidfile
   (`standkit.lifecycle`/`standkit.platform`).
 - **iis** — через `appcmd.exe`
-  (`%windir%\system32\inetsrv\appcmd.exe`):
-  - старт: `start apppool /apppool.name:<pool>` и/или `start site /site.name:<site>`;
-  - стоп: `stop apppool` / `stop site`;
-  - рестарт: `recycle apppool /apppool.name:<pool>` (graceful) либо stop+start сайта;
-  - проверка «жив»: `list apppool <pool> /text:state` → `Started`; иначе по сайту;
-    фолбэк — открытый TCP-порт стенда.
+  (`%windir%\system32\inetsrv\appcmd.exe`). ⚠️ **Требует запуска диспетчера
+  «от имени администратора»** — см. раздел «Требования».
+  «Стенд в IIS» = его **Site**: диспетчер управляет сайтом и намеренно **не
+  трогает App Pool** (пул может быть общим с другими приложениями, его остановка
+  положила бы и их). App Pool задействуется только когда `iis_site` не задан
+  вовсе (единственный хэндл стенда).
+  - старт: `start apppool /apppool.name:<pool>` (если задан, чтобы сайт мог
+    обслуживаться) + `start site /site.name:<site>`;
+  - стоп: `stop site /site.name:<site>` (**только сайт**; при отсутствии
+    `iis_site` — `stop apppool`);
+  - рестарт: `stop site` + `start site` (**App Pool не рециклится**; recycle
+    пула — только когда сайт не задан);
+  - проверка «жив»: состояние **сайта** `list site <site> /text:state` →
+    `Started` (при отсутствии `iis_site` — состояние пула); фолбэк на открытый
+    TCP-порт — только если `appcmd` не дал определённого состояния (порт держит
+    http.sys даже у остановленного сайта, поэтому открытый порт сам по себе
+    «живым» не считается).
 - **docker** — через CLI `docker` / `docker compose`:
   - одиночный контейнер: `docker start|stop|restart <container>`,
     `docker inspect -f "{{.State.Running}}" <container>`,
@@ -144,10 +155,17 @@ Health-проба «процесс» (`standkit.health.check_stand`) для `iis
 
 ## Требования
 
-- **IIS**: платформа — только Windows; агент/служба standkit должна иметь
-  права на управление IIS (обычно — членство в группе `IIS_IUSRS` недостаточно,
-  нужны права на `appcmd.exe`/WAS, см. документацию IIS по правам на удалённое
-  администрирование). Живая приёмка — на стенде с реальным IIS.
+- **IIS**: платформа — только Windows. ⚠️ **Диспетчер (`standkit-hub`) должен
+  быть запущен «от имени администратора» (elevated).** `appcmd.exe` управляет
+  конфигурацией IIS и читает `%windir%\system32\inetsrv\config\redirection.config`,
+  что требует прав администратора; без elevation любая IIS-операция падает с
+  ошибкой прав (например, `код 1168` / «не удалось открыть файл конфигурации
+  из-за отсутствия необходимых разрешений»). Членства в группе `IIS_IUSRS`
+  **недостаточно**. Как запускать elevated: ярлык/консоль → правый клик →
+  «Запуск от имени администратора», либо из уже поднятой административной
+  консоли `standkit-hub`. Диспетчер в такой ситуации отдаёт понятную подсказку
+  «запустите от имени администратора» в тексте ошибки. Живая приёмка — на
+  стенде с реальным IIS.
 - **Docker**: установленный Docker Engine (`docker` в PATH процесса
   standkit); для compose-режима — плагин `docker compose` (Compose V2).
 - **Kubernetes**: установленный `kubectl` в PATH процесса standkit и
