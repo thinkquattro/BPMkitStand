@@ -385,6 +385,23 @@
     return `<span class="value-cell ${valueClass(state)}">${escapeHtml(text)}</span>`;
   }
 
+  // escapeHtml (через textContent) не экранирует кавычки — для значения в
+  // атрибуте href этого мало; добавляем экранирование " и '.
+  function escapeAttr(text) {
+    return escapeHtml(text).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  // Ячейка HTTP: если у стенда есть URL — отдаём кликабельную ссылку
+  // (открывается в новой вкладке), иначе — прочерк. Цвет по состоянию пробы.
+  function httpCell(http) {
+    const url = http && http.url;
+    const cls = valueClass(http && http.state);
+    if (!url) {
+      return `<span class="value-cell ${cls}">—</span>`;
+    }
+    return `<a class="value-cell value-link ${cls}" href="${escapeAttr(url)}" target="_blank" rel="noopener">${escapeHtml(url)}</a>`;
+  }
+
   // --- иконки действий (инлайн-SVG, без внешних шрифтов/CDN) ---
 
   const ICON_PLAY =
@@ -517,7 +534,7 @@
         <td>${escapeHtml(s.name)}</td>
         <td>${escapeHtml(s.transport)}</td>
         <td>${processCell(s)}</td>
-        <td>${valueSpan(http.url || "—", http.state)}</td>
+        <td>${httpCell(http)}</td>
         <td>${valueSpan(db.name || "—", db.state)}</td>
         <td class="row-actions">${actionButtons(s)}</td>
       `;

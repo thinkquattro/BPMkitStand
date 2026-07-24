@@ -533,14 +533,32 @@ button:disabled {
   color: var(--bpmkit-down);
 }
 
-.stands-table {
-  width: 100%;
-  border-collapse: collapse;
-  background: var(--bpmkit-panel-bg);
+/* Обёртка таблицы: на узком окне даёт горизонтальную прокрутку вместо того,
+   чтобы сжимать колонки (см. .stands-table min-width ниже). */
+.stands-table-wrap {
+  overflow-x: auto;
   border: 1px solid var(--bpmkit-border);
   border-radius: 8px;
-  overflow: hidden;
 }
+
+.stands-table {
+  width: 100%;
+  /* Фиксированная раскладка: ширина колонок НЕ зависит от содержимого ячеек,
+     поэтому смена текста статуса («работает» → «Запускается…») больше не
+     «дёргает» соседние колонки. Ширины заданы через <colgroup>. */
+  table-layout: fixed;
+  min-width: 760px;
+  border-collapse: collapse;
+  background: var(--bpmkit-panel-bg);
+}
+
+/* Ширины колонок (сумма = 100%); действия держат минимум под 4 кнопки. */
+.col-stand { width: 22%; }
+.col-transport { width: 12%; }
+.col-process { width: 16%; }
+.col-http { width: 22%; }
+.col-db { width: 12%; }
+.col-actions { width: 16%; }
 
 .stands-table th,
 .stands-table td {
@@ -548,6 +566,17 @@ button:disabled {
   padding: 10px 12px;
   border-bottom: 1px solid var(--bpmkit-border);
   font-size: 13px;
+  /* Длинные значения (URL в HTTP) обрезаются многоточием, а не растягивают
+     колонку; фиксированная раскладка это позволяет. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Действия — не переносить кнопки и не обрезать их. */
+.stands-table td.row-actions {
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .stands-table tbody tr:last-child td {
@@ -628,6 +657,17 @@ button:disabled {
 .value-muted {
   color: var(--bpmkit-muted);
   font-weight: 400;
+}
+
+/* HTTP-значение как ссылка: цвет наследуется от value-* (состояние пробы),
+   подчёркивание — по наведению. */
+.value-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.value-link:hover {
+  text-decoration: underline;
 }
 
 /* --- иконки действий (Старт/Стоп/Рестарт/Очистить Redis) --- */

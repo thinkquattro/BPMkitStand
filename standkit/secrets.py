@@ -134,11 +134,6 @@ def get_secret(ref: str, *, fallback: Optional[str] = None) -> str:
     )
 
 
-# --- TODO(следующая итерация) ---
-# - CLI-обёртка (set/get/status/rotate/delete/list) по аналогии с
-#   BPMkit/server/secretstore.py, но для сервиса "standkit" (set_secret/
-#   delete_secret уже есть как программное API — CLI поверх них тривиален);
-# - файловый фолбэк secrets.enc с мастер-ключом из переменной окружения — для
-#   машин без доступного системного keyring (headless Linux без dbus/libsecret);
-# - явный `status()` с диагностикой источника (env/keyring/fallback/not found)
-#   для онбординга новой машины без раскрытия самого значения.
+# Бэклог следующих итераций (CLI-обёртка set/get/status/rotate, файловый фолбэк
+# secrets.enc для машин без keyring, диагностический status() по источнику) —
+# см. docs/ARCHITECTURE.md.

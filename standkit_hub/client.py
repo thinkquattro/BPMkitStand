@@ -7,12 +7,9 @@
 ``http.server``. Используется только stdlib (``urllib``) — как и
 standkit_agent.server, без сторонних HTTP-клиентов.
 
-TODO(следующая итерация):
-  - параллельный (не последовательный) опрос агентов — сейчас FederatedClient
-    ходит к агентам по очереди, что при N агентах и таймаутах масштабируется
-    плохо; кандидат — concurrent.futures.ThreadPoolExecutor;
-  - кэширование/дебаунс частых опросов (polling из хаба по таймеру);
-  - TLS/проверка сертификата агента (см. TODO в standkit_agent.server).
+Остаточные пункты следующих итераций (параллельный опрос агентов через
+ThreadPoolExecutor вместо последовательного, кэш/дебаунс частых опросов, TLS-
+проверка сертификата агента) — см. docs/ARCHITECTURE.md и SECURITY.md.
 """
 
 from __future__ import annotations
@@ -93,7 +90,8 @@ class FederatedClient:
         общий опрос — недоступный стенд получает StandStatus с UNKNOWN-пробами
         и текстом ошибки в ``details``.
 
-        TODO: см. модульный TODO — сделать параллельным.
+        Опрос агентов сейчас последовательный (бэклог — параллелизация,
+        см. докстринг модуля).
         """
         result: dict[str, StandStatus] = {}
         for name in self.registry.names():

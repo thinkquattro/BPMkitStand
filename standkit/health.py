@@ -95,19 +95,17 @@ def tcp_open(host: str, port: int, *, timeout: float = 2.0) -> bool:
 
 def db_deep_check(stand: Stand) -> ProbeState:
     """
-    TODO(следующая итерация): полноценная проверка БД (реальный SELECT 1 через
-    psycopg2 для postgres / pyodbc для mssql). Требует опциональных
-    зависимостей, которые НЕ должны стать обязательными для ядра — включать
-    только по явному флагу вызывающей стороны.
-
     Пока — заглушка, всегда возвращающая SKIPPED, чтобы вызывающий код мог
     отличить "проверка не выполнялась" от "проверка провалилась".
+
+    Полноценная проверка (реальный SELECT 1 через psycopg2/pyodbc под опциональный
+    флаг) — бэклог, см. docs/ARCHITECTURE.md.
     """
     return ProbeState.SKIPPED
 
 
 def redis_deep_check(stand: Stand) -> ProbeState:
-    """TODO(следующая итерация): полноценный PING к Redis (redis-py, опциональная зависимость)."""
+    """Заглушка (SKIPPED). Полноценный PING к Redis (redis-py, опц. зависимость) — бэклог, см. docs/ARCHITECTURE.md."""
     return ProbeState.SKIPPED
 
 
@@ -172,8 +170,8 @@ def check_stand(
     else:
         status.redis = ProbeState.UNKNOWN
 
-    # TODO: last_deploy — задел на будущее, источник данных пока не определён
-    # (кандидат — метаданные из BPMkit deploy_status/deploy_verify).
+    # last_deploy — задел на будущее, источник данных пока не определён (бэклог,
+    # см. docs/ARCHITECTURE.md).
     status.last_deploy = ProbeState.UNKNOWN
 
     return status
