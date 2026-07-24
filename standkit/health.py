@@ -39,6 +39,27 @@ def process_alive(pidfile: Path) -> bool:
     return _platform.is_alive(pid)
 
 
+def process_running(
+    pidfile: Optional[Path],
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+) -> bool:
+    """
+    Считает процесс стенда "живым", если ЛИБО жив pidfile standkit (стенд
+    поднят самим ядром), ЛИБО слушается TCP-порт стенда (стенд поднят извне
+    standkit — вручную, через IIS/systemd/сторонний скрипт и т.п.).
+
+    Это расширение process_alive: тот проверяет только pidfile, этот —
+    комбинирует обе приметы живости, потому что реальные стенды часто
+    поднимаются не через lifecycle.start().
+    """
+    if pidfile is not None and process_alive(pidfile):
+        return True
+    if host and port:
+        return tcp_open(host, port)
+    return False
+
+
 def http_ok(url: str, *, timeout: float = 3.0) -> bool:
     """
     Проверяет, отвечает ли HTTP(S)-эндпоинт (любой код ответа < 500 считается
@@ -107,8 +128,9 @@ def check_stand(
     """
     status = StandStatus(name=stand.name)
 
-    if pidfile is not None:
-        status.process = ProbeState.OK if process_alive(pidfile) else ProbeState.DOWN
+    if pidfile is not None or (stand.stand_host and stand.stand_port):
+        is_up = process_running(pidfile, stand.stand_host, stand.stand_port)
+        status.process = ProbeState.OK if is_up else ProbeState.DOWN
     else:
         status.process = ProbeState.UNKNOWN
 

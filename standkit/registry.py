@@ -103,10 +103,15 @@ class Registry:
         reg.save()
     """
 
-    def __init__(self, path: Path, default: str = "", stands: Optional[dict[str, Stand]] = None):
+    def __init__(self, path: Path, default: str = "", stands: Optional[dict[str, Stand]] = None,
+                 extra_top: Optional[dict] = None):
         self.path = Path(path)
         self.default = default
         self._stands: dict[str, Stand] = stands or {}
+        # Прочие top-level ключи исходного файла (у реестра BPMkit: _comment,
+        # scaffold_root, shared_docs_root, default_locked и т.п.) — сохраняются,
+        # чтобы save() не затирал их и не портил общий с китом projects.json.
+        self._extra_top: dict = extra_top or {}
 
     # --- чтение/запись ---
 
@@ -128,17 +133,22 @@ class Registry:
             raise RegistryError(f"Некорректный JSON реестра {p}: {exc}") from exc
 
         default = data.get("default", "")
-        stands_raw = data.get("stands", {})
+        # Реестр BPMkit (и кита) хранит стенды под ключом "projects"; поддерживаем
+        # и "stands" для обратной совместимости со старым форматом standkit.
+        stands_raw = data.get("projects")
+        if stands_raw is None:
+            stands_raw = data.get("stands", {})
+        extra_top = {k: v for k, v in data.items() if k not in ("projects", "stands", "default")}
         stands = {name: Stand.from_dict(name, rec) for name, rec in stands_raw.items()}
-        return cls(path=p, default=default, stands=stands)
+        return cls(path=p, default=default, stands=stands, extra_top=extra_top)
 
     def save(self) -> None:
         """Пишет реестр обратно в файл БЕЗ BOM, с отступом для читаемости диффов."""
-        payload = {
-            "_schema_version": _DEFAULT_SCHEMA_VERSION,
-            "default": self.default,
-            "stands": {name: stand.to_dict() for name, stand in self._stands.items()},
-        }
+        # Сохраняем В ФОРМАТЕ BPMkit (ключ "projects") и переносим прочие top-level
+        # ключи исходного файла — чтобы не разрушить общий с китом реестр.
+        payload: dict = dict(self._extra_top)
+        payload["default"] = self.default
+        payload["projects"] = {name: stand.to_dict() for name, stand in self._stands.items()}
         text = json.dumps(payload, ensure_ascii=False, indent=2)
         self.path.write_text(text, encoding="utf-8")
 
