@@ -6,6 +6,6 @@ standkit — свободное (MIT) ядро управления жизнен
 и docs/ARCHITECTURE.md в корне репозитория.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 __all__ = ["__version__"]

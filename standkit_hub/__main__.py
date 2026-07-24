@@ -133,6 +133,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         httpd.serve_forever()
+    except KeyboardInterrupt:
+        # Ctrl+C — штатная остановка дашборда: печатаем понятное сообщение, а не
+        # трейсбек KeyboardInterrupt из глубины serve_forever/selectors.
+        print("\n[standkit-hub] остановлено (Ctrl+C)")
     finally:
         httpd.server_close()
     return 0
