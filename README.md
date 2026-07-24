@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="standkit_hub/web/bpmkit-logo.svg" alt="BPMkit" width="300"/>
+<img src="https://raw.githubusercontent.com/thinkquattro/BPMkitStand/main/standkit_hub/web/bpmkit-logo.svg" alt="BPMkit" width="300"/>
 
 # BPMkitStand
 
@@ -41,10 +41,10 @@
 
 | Дашборд (светлая тема) | Дашборд (тёмная тема) |
 |---|---|
-| ![Дашборд, светлая тема](docs/img/dashboard-light.png) | ![Дашборд, тёмная тема](docs/img/dashboard-dark.png) |
+| ![Дашборд, светлая тема](https://raw.githubusercontent.com/thinkquattro/BPMkitStand/main/docs/img/dashboard-light.png) | ![Дашборд, тёмная тема](https://raw.githubusercontent.com/thinkquattro/BPMkitStand/main/docs/img/dashboard-dark.png) |
 
 <div align="center">
-  <img src="docs/img/about.png" alt="Модальное окно «О программе»" width="360"/>
+  <img src="https://raw.githubusercontent.com/thinkquattro/BPMkitStand/main/docs/img/about.png" alt="Модальное окно «О программе»" width="360"/>
 </div>
 
 ## Как это работает
