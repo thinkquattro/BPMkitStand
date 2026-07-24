@@ -45,6 +45,7 @@ from urllib.parse import parse_qs, urlparse
 
 from standkit import __version__ as _standkit_version
 from standkit import logs as _logs
+from standkit.hosting import HostingError
 from standkit.lifecycle import LifecycleError
 from standkit.models import HostKind, Stand, Transport
 from standkit.registry import Registry, RegistryError, default_registry_path
@@ -579,8 +580,15 @@ def make_handler(
                 return
             except LifecycleError as exc:
                 # Понятная причина отказа (dotnet не найден в PATH, процесс
-                # умер сразу после старта и т.п., см. standkit.lifecycle.start)
+                # умер сразу после старта, стенд запущен не диспетчером и т.п.)
                 # — фронт обязан показать текст пользователю, а не просто "ошибка".
+                self._send_json(400, {"error": str(exc)})
+                return
+            except HostingError as exc:
+                # Отказ бэкенда хостинга (appcmd/docker/kubectl не найден, нет
+                # прав, App Pool/контейнер/деплоймент не остановился и т.п.) —
+                # честный текст ошибки пользователю (включая stderr команды),
+                # а не молчаливый 500.
                 self._send_json(400, {"error": str(exc)})
                 return
             except NotImplementedError as exc:

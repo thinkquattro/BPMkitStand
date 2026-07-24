@@ -136,11 +136,17 @@ def check_stand(
         from standkit import hosting as _hosting  # локальный импорт — избегаем цикла
 
         try:
+            # Бэкенд авторитетен: он сам консультируется с appcmd/docker/kubectl
+            # и при НЕОПРЕДЕЛЁННОСТИ уже делает собственный TCP-фолбэк. Здесь
+            # НЕ добавляем ещё один tcp_open — иначе остановленный IIS-сайт,
+            # у которого http.sys держит порт 80, ложно показывался бы «up».
             is_up = _hosting.get_backend(stand).is_running(stand)
         except Exception:
-            is_up = False
-        if not is_up and stand.stand_host and stand.stand_port:
-            is_up = tcp_open(stand.stand_host, stand.stand_port)
+            # Бэкенд вовсе не смог ответить (нет appcmd/docker/kubectl) —
+            # осторожный фолбэк на TCP-порт, чтобы не показать ложный DOWN.
+            is_up = bool(
+                stand.stand_host and stand.stand_port and tcp_open(stand.stand_host, stand.stand_port)
+            )
         status.process = ProbeState.OK if is_up else ProbeState.DOWN
     elif pidfile is not None or (stand.stand_host and stand.stand_port):
         is_up = process_running(pidfile, stand.stand_host, stand.stand_port)

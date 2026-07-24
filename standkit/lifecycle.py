@@ -234,7 +234,18 @@ def _kestrel_stop(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
     pf = pidfile_path(stand, run_dir)
     pid = _read_pid(pf)
     if pid is None:
-        return True
+        # Нет pidfile — стенд не запускался диспетчером. Если он при этом
+        # РЕАЛЬНО жив (отвечает TCP-порт), честно отказываем, а не делаем вид,
+        # что остановили: pid чужого процесса нам неизвестен, убить его нечем.
+        from standkit import health as _health  # локальный импорт — избегаем цикла
+
+        if stand.stand_host and stand.stand_port and _health.tcp_open(stand.stand_host, stand.stand_port):
+            raise LifecycleError(
+                f"стенд '{stand.name}' запущен не диспетчером (нет pidfile {pf}) — его pid "
+                f"неизвестен, поэтому остановить его я не могу. Остановите процесс вручную "
+                f"либо перезапустите стенд через диспетчер, чтобы он взял процесс под контроль."
+            )
+        return True  # действительно ничего не запущено — останавливать нечего
 
     stopped = _platform.stop(pid)
     if stopped:

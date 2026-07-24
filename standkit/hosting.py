@@ -220,22 +220,28 @@ class IisBackend:
             raise HostingError(
                 f"стенд '{stand.name}': host_kind=iis требует iis_site и/или iis_app_pool"
             )
-        if stand.iis_app_pool:
-            _run_checked([appcmd, "stop", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
+        # «Стенд в IIS» = его SITE. Останавливаем ТОЛЬКО сайт и НЕ трогаем
+        # App Pool: пул может быть общим с другими приложениями, а его остановка
+        # положила бы и их (решение Владимира — гасить только стенд). App Pool
+        # гасим лишь как единственный хэндл, когда сайт вообще не задан.
         if stand.iis_site:
             _run_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"])
+            return True
+        _run_checked([appcmd, "stop", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
         return True
 
     def restart(
         self, stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None
     ) -> Optional[int]:
         appcmd = _resolve_appcmd()
-        if stand.iis_app_pool:
-            # Graceful — recycle App Pool, без остановки сайта целиком.
-            _run_checked([appcmd, "recycle", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
-        elif stand.iis_site:
+        # Рестарт стенда = рестарт его SITE (stop+start сайта). App Pool НЕ
+        # трогаем/не рециклим — он может быть общим (см. stop). Recycle пула —
+        # только когда сайт не задан (пул — единственный хэндл стенда).
+        if stand.iis_site:
             _run_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"])
             _run_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"])
+        elif stand.iis_app_pool:
+            _run_checked([appcmd, "recycle", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
         else:
             raise HostingError(
                 f"стенд '{stand.name}': host_kind=iis требует iis_site и/или iis_app_pool"
@@ -248,15 +254,18 @@ class IisBackend:
         except HostingError:
             return _tcp_fallback(stand)
 
-        running = False
-        if stand.iis_app_pool:
-            state = self._query_state(appcmd, "apppool", stand.iis_app_pool)
-            running = state == "Started"
-        if not running and stand.iis_site:
-            state = self._query_state(appcmd, "site", stand.iis_site)
-            running = state == "Started"
-        if running:
-            return True
+        # Идентичность стенда в IIS — его SITE (см. stop/restart: управляем
+        # только сайтом, App Pool не трогаем). Поэтому «работает ли стенд» =
+        # состояние САЙТА; пул смотрим лишь когда сайт не задан (единственный
+        # хэндл). ВАЖНО: НЕ падать на TCP-фолбэк при определённом ответе appcmd —
+        # IIS/http.sys держит порт 80/443 даже у остановленного сайта (503),
+        # открытый порт НЕ означает «стенд работает». TCP-фолбэк — только когда
+        # appcmd состояния не дал (сайт/пул не найден, ошибка команды).
+        target, name = ("site", stand.iis_site) if stand.iis_site else ("apppool", stand.iis_app_pool)
+        if name:
+            state = self._query_state(appcmd, target, name)
+            if state is not None:
+                return state == "Started"
         return _tcp_fallback(stand)
 
     def read_logs(

@@ -547,18 +547,19 @@ button:disabled {
      поэтому смена текста статуса («работает» → «Запускается…») больше не
      «дёргает» соседние колонки. Ширины заданы через <colgroup>. */
   table-layout: fixed;
-  min-width: 760px;
+  min-width: 820px;
   border-collapse: collapse;
   background: var(--bpmkit-panel-bg);
 }
 
 /* Ширины колонок (сумма = 100%); действия держат минимум под 4 кнопки. */
-.col-stand { width: 22%; }
-.col-transport { width: 12%; }
-.col-process { width: 16%; }
-.col-http { width: 22%; }
-.col-db { width: 12%; }
-.col-actions { width: 16%; }
+.col-stand { width: 20%; }
+.col-transport { width: 11%; }
+.col-process { width: 15%; }
+.col-http { width: 20%; }
+.col-db { width: 11%; }
+.col-redis { width: 8%; }
+.col-actions { width: 15%; }
 
 .stands-table th,
 .stands-table td {

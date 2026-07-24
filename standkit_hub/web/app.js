@@ -140,10 +140,9 @@
     document.getElementById("about-btn").addEventListener("click", openAboutModal);
     document.getElementById("about-modal-close-btn").addEventListener("click", closeAboutModal);
     document.getElementById("about-modal-close-footer-btn").addEventListener("click", closeAboutModal);
-    document.getElementById("about-modal-overlay").addEventListener("click", (evt) => {
-      // Клик по затемнённому фону (не по самому окну) закрывает модалку.
-      if (evt.target.id === "about-modal-overlay") closeAboutModal();
-    });
+    // Клик по затемнённому фону закрывает модалку — но только если нажатие
+    // началось на фоне (см. bindOverlayDismiss: защита от выделения текста).
+    bindOverlayDismiss(document.getElementById("about-modal-overlay"), closeAboutModal);
     document.addEventListener("keydown", (evt) => {
       if (evt.key === "Escape" && !document.getElementById("about-modal-overlay").hidden) {
         closeAboutModal();
@@ -230,6 +229,21 @@
     return payload;
   }
 
+  // Закрытие модалки кликом по подложке — но ТОЛЬКО если нажатие (mousedown)
+  // началось на самой подложке. Иначе выделение текста мышью внутри окна,
+  // отпущенное за его пределами (на подложке/за окном), ложно закрывает
+  // модалку: браузер шлёт click на общего предка mousedown/mouseup — подложку.
+  function bindOverlayDismiss(overlay, onClose) {
+    let pressStartedOnOverlay = false;
+    overlay.addEventListener("mousedown", (evt) => {
+      pressStartedOnOverlay = evt.target === overlay;
+    });
+    overlay.addEventListener("click", (evt) => {
+      if (evt.target === overlay && pressStartedOnOverlay) onClose();
+      pressStartedOnOverlay = false;
+    });
+  }
+
   function setupRegisterModal() {
     const overlay = document.getElementById("register-modal-overlay");
     const form = document.getElementById("register-form");
@@ -237,9 +251,7 @@
     document.getElementById("register-stand-btn").addEventListener("click", openRegisterModal);
     document.getElementById("register-modal-close-btn").addEventListener("click", closeRegisterModal);
     document.getElementById("register-modal-cancel-btn").addEventListener("click", closeRegisterModal);
-    overlay.addEventListener("click", (evt) => {
-      if (evt.target.id === "register-modal-overlay") closeRegisterModal();
-    });
+    bindOverlayDismiss(overlay, closeRegisterModal);
     document.addEventListener("keydown", (evt) => {
       if (evt.key === "Escape" && !overlay.hidden) closeRegisterModal();
     });
@@ -292,6 +304,7 @@
         cancelBtn.removeEventListener("click", onCancel);
         closeBtn.removeEventListener("click", onCancel);
         overlay.removeEventListener("click", onOverlayClick);
+        overlay.removeEventListener("mousedown", onOverlayMouseDown);
         document.removeEventListener("keydown", onKeydown);
         resolve(result);
       }
@@ -301,8 +314,15 @@
       function onCancel() {
         cleanup(false);
       }
+      let pressStartedOnOverlay = false;
+      function onOverlayMouseDown(evt) {
+        pressStartedOnOverlay = evt.target === overlay;
+      }
       function onOverlayClick(evt) {
-        if (evt.target.id === "confirm-modal-overlay") cleanup(false);
+        // Закрываем только если нажатие началось на подложке (не выделение
+        // текста, отпущенное за пределами окна) — см. bindOverlayDismiss.
+        if (evt.target === overlay && pressStartedOnOverlay) cleanup(false);
+        pressStartedOnOverlay = false;
       }
       function onKeydown(evt) {
         if (evt.key === "Escape") cleanup(false);
@@ -311,6 +331,7 @@
       okBtn.addEventListener("click", onOk);
       cancelBtn.addEventListener("click", onCancel);
       closeBtn.addEventListener("click", onCancel);
+      overlay.addEventListener("mousedown", onOverlayMouseDown);
       overlay.addEventListener("click", onOverlayClick);
       document.addEventListener("keydown", onKeydown);
     });
@@ -400,6 +421,17 @@
       return `<span class="value-cell ${cls}">—</span>`;
     }
     return `<a class="value-cell value-link ${cls}" href="${escapeAttr(url)}" target="_blank" rel="noopener">${escapeHtml(url)}</a>`;
+  }
+
+  // Ячейка Redis: показывает НОМЕР базы Redis стенда (тот же, что фигурирует
+  // при очистке Redis), цвет — по состоянию пробы. Прочерк, если у стенда
+  // Redis не настроен.
+  function redisCell(redis) {
+    const num = redis && redis.number;
+    if (num === null || num === undefined) {
+      return `<span class="value-cell value-muted" title="Redis не настроен у стенда">—</span>`;
+    }
+    return `<span class="value-cell ${valueClass(redis.state)}" title="Номер базы Redis">${escapeHtml(String(num))}</span>`;
   }
 
   // --- иконки действий (инлайн-SVG, без внешних шрифтов/CDN) ---
@@ -527,6 +559,7 @@
     stands.forEach((s) => {
       const http = s.http || {};
       const db = s.db || {};
+      const redis = s.redis || {};
       const tr = document.createElement("tr");
       tr.dataset.name = s.name;
       if (s.name === selectedStand) tr.classList.add("selected");
@@ -536,6 +569,7 @@
         <td>${processCell(s)}</td>
         <td>${httpCell(http)}</td>
         <td>${valueSpan(db.name || "—", db.state)}</td>
+        <td>${redisCell(redis)}</td>
         <td class="row-actions">${actionButtons(s)}</td>
       `;
       tr.addEventListener("click", (evt) => {

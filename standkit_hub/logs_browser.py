@@ -92,19 +92,26 @@ def resolve_logs_dir(stand: Stand, source: str = DEFAULT_LOG_SOURCE) -> Optional
 
 def list_log_files(logs_dir: Path) -> list[dict]:
     """
-    Список лог-файлов каталога (без рекурсии в подкаталоги): имя, размер в
-    байтах, mtime (unix timestamp). Отсортирован по mtime по убыванию (самый
-    свежий — первым), чтобы фронтенду не нужно было сортировать самому.
+    Список лог-файлов каталога, ВКЛЮЧАЯ вложенные подкаталоги: стенды BPMSoft
+    (и .NET-хосты вообще) часто пишут логи не плоско, а в подпапки по датам,
+    например ``logs/2026-07-24/*.log``. Без рекурсии верхний уровень содержал
+    бы только папки, и хаб ошибочно сообщал «в каталоге нет файлов».
+
+    ``name`` — путь файла ОТНОСИТЕЛЬНО ``logs_dir`` в POSIX-форме (с прямыми
+    слэшами, напр. ``2026-07-24/app.log``), совместимый с
+    ``sanitize_log_filename`` на любой ОС. Размер в байтах, mtime (unix
+    timestamp). Отсортирован по mtime по убыванию (самый свежий — первым).
     """
     entries: list[dict] = []
-    for child in logs_dir.iterdir():
+    for child in logs_dir.rglob("*"):
         if not child.is_file():
             continue
         try:
             st = child.stat()
         except OSError:
             continue
-        entries.append({"name": child.name, "size": st.st_size, "mtime": st.st_mtime})
+        rel = child.relative_to(logs_dir).as_posix()
+        entries.append({"name": rel, "size": st.st_size, "mtime": st.st_mtime})
     entries.sort(key=lambda e: e["mtime"], reverse=True)
     return entries
 

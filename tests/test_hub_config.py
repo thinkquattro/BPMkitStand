@@ -132,6 +132,19 @@ def test_save_creates_parent_directory(tmp_path):
     assert nested.exists()
 
 
+def test_ensure_registry_dir_creates_missing_folder(tmp_path):
+    # Свежая машина: папки реестра (напр. %APPDATA%\BPMkit) ещё нет.
+    reg_path = tmp_path / "does_not_exist" / "BPMkit" / "projects.json"
+    cfg = HubConfig(registry_path=str(reg_path))
+
+    created = cfg.ensure_registry_dir()
+
+    assert created == reg_path.parent
+    assert reg_path.parent.is_dir()
+    # Идемпотентно: повторный вызов не падает.
+    assert cfg.ensure_registry_dir() == reg_path.parent
+
+
 def test_to_dict_from_dict_roundtrip():
     cfg = HubConfig(refresh_interval_sec=99, agents=[RemoteAgent(name="x", url="http://x", token_ref="r")])
 
