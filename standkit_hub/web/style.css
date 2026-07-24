@@ -285,6 +285,14 @@ button.secondary {
   max-width: 260px;
 }
 
+.log-source-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 #state-output {
   max-height: 320px;
   overflow: auto;

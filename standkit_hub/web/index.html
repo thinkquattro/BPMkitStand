@@ -46,11 +46,18 @@
         <div class="state-panel-header">
           <h2>Текущее состояние <span id="state-stand-name"></span></h2>
           <div class="state-panel-controls">
-            <select id="log-file-select" title="Лог-файл из logs_path стенда">
+            <label class="log-source-label">
+              Источник логов
+              <select id="log-source-select">
+                <option value="stand" title="Логи стенда (&lt;stand_dir&gt;/logs)" selected>Стенд</option>
+                <option value="bpmkit" title="Логи MCP (logs_path)">BPMkit</option>
+              </select>
+            </label>
+            <select id="log-file-select" title="Лог-файл из выбранного источника">
               <option value="">(основной лог)</option>
             </select>
             <button id="log-file-open-btn" class="secondary" title="Показать выбранный файл">Открыть</button>
-            <button id="log-folder-open-btn" class="secondary" title="Открыть папку логов в проводнике ОС">Открыть папку логов</button>
+            <button id="log-folder-open-btn" class="secondary" title="Открыть папку логов выбранного источника в проводнике ОС">Открыть папку логов</button>
           </div>
         </div>
         <pre id="state-output">Выберите стенд в таблице, чтобы увидеть текущее состояние.</pre>

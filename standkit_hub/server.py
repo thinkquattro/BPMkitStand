@@ -62,6 +62,9 @@ _STAND_ACTION_RE = re.compile(
 _STAND_LOGS_SUB_RE = re.compile(r"^/api/stand/(?P<name>[^/]+)/logs/(?P<sub>list|file|open-folder)$")
 _SECRET_RE = re.compile(r"^/api/secret/(?P<ref>[^/]+)$")
 
+# Человекочитаемые подписи источника логов для сообщений "лог недоступен".
+_LOG_SOURCE_LABELS = {"stand": "Стенд", "bpmkit": "BPMkit"}
+
 _DEFAULT_WEB_DIR = Path(__file__).parent / "web"
 
 # env, которую может задать инсталляция клиентского MCP BPMkit, чтобы хаб
@@ -205,6 +208,26 @@ def make_handler(
                 return False
             return True
 
+        def _log_source_from_qs(self, parsed) -> Optional[str]:
+            """
+            Разбирает query-параметр ``source`` (какой источник логов стенда
+            использовать — "stand" — логи самого стенда, "bpmkit" — логи,
+            которые пишет BPMkit MCP). Дефолт — "stand" (см.
+            ``logs_browser.DEFAULT_LOG_SOURCE``).
+
+            При некорректном значении сразу отправляет 400 и возвращает
+            ``None`` — вызывающая сторона обязана прервать обработку запроса.
+            """
+            qs = parse_qs(parsed.query)
+            raw = (qs.get("source") or [logs_browser.DEFAULT_LOG_SOURCE])[0]
+            if raw not in logs_browser.LOG_SOURCES:
+                self._send_json(
+                    400,
+                    {"error": f"invalid source: {raw!r} (ожидается 'stand' или 'bpmkit')"},
+                )
+                return None
+            return raw
+
         def _read_json_body(self, *, max_bytes: int) -> Optional[dict]:
             try:
                 length = _security.validate_content_length(
@@ -304,7 +327,11 @@ def make_handler(
                 db_state = status.db.value if status else "unknown"
                 redis_state = status.redis.value if status else "unknown"
                 process_state = status.process.value if status else "unknown"
-                logs_dir = logs_browser.resolve_logs_dir(stand)
+                # Таблица стендов исторически показывает именно BPMkit-каталог
+                # логов (extra["logs_path"]) — источник "stand" здесь не
+                # запрашивается ни query-параметром, ни выбором пользователя
+                # (тот выбор — только у панели "Текущее состояние" ниже).
+                logs_dir = logs_browser.resolve_logs_dir(stand, source="bpmkit")
                 logs_path = str(logs_dir) if logs_dir else (stand.extra.get("logs_path") or None)
                 http_url = (
                     f"http://{stand.stand_host}:{stand.stand_port}"
@@ -369,12 +396,13 @@ def make_handler(
                 return
             self._send_json(200, {"lines": lines})
 
-        def _api_stand_state(self, name: str) -> None:
+        def _api_stand_state(self, name: str, parsed) -> None:
             """
             Текущее состояние стенда (то, что видно в консоли/PS-окне стенда) —
-            tail основного лог-файла из ``extra["logs_path"]``. Не путать с
-            /logs (standkit-managed лог для transport=local через lifecycle) —
-            это отдельный источник, специфичный для того, как реально запущен
+            tail основного лог-файла из выбранного источника (``source``,
+            дефолт "stand" — см. ``logs_browser``). Не путать с /logs
+            (standkit-managed лог для transport=local через lifecycle) — это
+            отдельный источник, специфичный для того, как реально запущен
             стенд (зачастую — вне standkit).
             """
             config = _load_config(config_path)
@@ -382,15 +410,22 @@ def make_handler(
             if name not in registry:
                 self._send_json(404, {"error": f"стенд '{name}' не найден"})
                 return
+            source = self._log_source_from_qs(parsed)
+            if source is None:
+                return
             stand = registry.get(name)
-            logs_dir = logs_browser.resolve_logs_dir(stand)
+            label = _LOG_SOURCE_LABELS[source]
+            logs_dir = logs_browser.resolve_logs_dir(stand, source=source)
             if logs_dir is None:
+                raw = logs_browser.raw_logs_path(stand, source)
+                detail = "путь не задан" if not raw else f"каталог не найден — {raw}"
                 self._send_json(
                     200,
                     {
                         "available": False,
-                        "text": "лог недоступен (стенд запущен вне standkit / logs_path не задан)",
+                        "text": f"лог недоступен (источник «{label}»: {detail})",
                         "file": None,
+                        "source": source,
                     },
                 )
                 return
@@ -400,8 +435,9 @@ def make_handler(
                     200,
                     {
                         "available": False,
-                        "text": "лог недоступен (в logs_path нет файлов)",
+                        "text": f"лог недоступен (источник «{label}»: в каталоге {logs_dir} нет файлов)",
                         "file": None,
+                        "source": source,
                     },
                 )
                 return
@@ -412,22 +448,27 @@ def make_handler(
                     "available": True,
                     "text": "\n".join(lines) if lines else "(лог пуст)",
                     "file": primary.name,
+                    "source": source,
                 },
             )
 
-        def _api_stand_logs_list(self, name: str) -> None:
+        def _api_stand_logs_list(self, name: str, parsed) -> None:
             config = _load_config(config_path)
             registry = _load_registry(config)
             if name not in registry:
                 self._send_json(404, {"error": f"стенд '{name}' не найден"})
                 return
+            source = self._log_source_from_qs(parsed)
+            if source is None:
+                return
             stand = registry.get(name)
-            logs_dir = logs_browser.resolve_logs_dir(stand)
+            logs_dir = logs_browser.resolve_logs_dir(stand, source=source)
             if logs_dir is None:
-                self._send_json(200, {"files": [], "logs_path": stand.extra.get("logs_path") or None})
+                raw = logs_browser.raw_logs_path(stand, source)
+                self._send_json(200, {"files": [], "logs_path": raw, "source": source})
                 return
             files = logs_browser.list_log_files(logs_dir)
-            self._send_json(200, {"files": files, "logs_path": str(logs_dir)})
+            self._send_json(200, {"files": files, "logs_path": str(logs_dir), "source": source})
 
         def _api_stand_logs_file(self, name: str, parsed) -> None:
             config = _load_config(config_path)
@@ -435,10 +476,13 @@ def make_handler(
             if name not in registry:
                 self._send_json(404, {"error": f"стенд '{name}' не найден"})
                 return
+            source = self._log_source_from_qs(parsed)
+            if source is None:
+                return
             stand = registry.get(name)
-            logs_dir = logs_browser.resolve_logs_dir(stand)
+            logs_dir = logs_browser.resolve_logs_dir(stand, source=source)
             if logs_dir is None:
-                self._send_json(404, {"error": "logs_path не задан или недоступен"})
+                self._send_json(404, {"error": "источник логов не задан или недоступен"})
                 return
             qs = parse_qs(parsed.query)
             raw_name = (qs.get("name") or [None])[0]
@@ -456,21 +500,27 @@ def make_handler(
                 self._send_json(400, {"error": "invalid n"})
                 return
             lines = _logs.tail(target, n)
-            self._send_json(200, {"lines": lines, "name": target.name})
+            self._send_json(200, {"lines": lines, "name": target.name, "source": source})
 
-        def _api_stand_logs_open_folder(self, name: str) -> None:
+        def _api_stand_logs_open_folder(self, name: str, parsed) -> None:
             config = _load_config(config_path)
             registry = _load_registry(config)
             if name not in registry:
                 self._send_json(404, {"error": f"стенд '{name}' не найден"})
                 return
+            source = self._log_source_from_qs(parsed)
+            if source is None:
+                return
             stand = registry.get(name)
-            logs_dir = logs_browser.resolve_logs_dir(stand)
+            logs_dir = logs_browser.resolve_logs_dir(stand, source=source)
             if logs_dir is None:
-                self._send_json(400, {"error": "logs_path не задан или недоступен"})
+                self._send_json(400, {"error": "источник логов не задан или недоступен"})
                 return
             result = logs_browser.open_folder(logs_dir)
-            self._send_json(200 if result.ok else 400, {"ok": result.ok, "message": result.message})
+            self._send_json(
+                200 if result.ok else 400,
+                {"ok": result.ok, "message": result.message, "source": source},
+            )
 
         # --- API: MCP / Companion ---
 
@@ -660,7 +710,7 @@ def make_handler(
                     self._send_json(400, {"error": "invalid stand name"})
                     return
                 if m.group("sub") == "list":
-                    self._api_stand_logs_list(m.group("name"))
+                    self._api_stand_logs_list(m.group("name"), parsed)
                     return
                 if m.group("sub") == "file":
                     self._api_stand_logs_file(m.group("name"), parsed)
@@ -692,7 +742,7 @@ def make_handler(
                 if not _security.validate_stand_name(m.group("name")):
                     self._send_json(400, {"error": "invalid stand name"})
                     return
-                self._api_stand_state(m.group("name"))
+                self._api_stand_state(m.group("name"), parsed)
                 return
 
             self._send_json(404, {"error": "not found"})
@@ -747,7 +797,7 @@ def make_handler(
                 if not _security.validate_stand_name(m.group("name")):
                     self._send_json(400, {"error": "invalid stand name"})
                     return
-                self._api_stand_logs_open_folder(m.group("name"))
+                self._api_stand_logs_open_folder(m.group("name"), parsed)
                 return
 
             m = _STAND_ACTION_RE.match(path)

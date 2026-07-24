@@ -1,15 +1,24 @@
 """
-Просмотр лог-файлов стенда со стороны хаба: список файлов в ``logs_path``,
+Просмотр лог-файлов стенда со стороны хаба: список файлов источника логов,
 выбор основного (самого свежего) файла, tail содержимого, открытие папки
 логов в файловом менеджере ОС хоста.
 
-Важно отличать от ``standkit.lifecycle.log_path``/``standkit.logs`` — тот
-лог существует только для стендов, ЗАПУЩЕННЫХ САМИМ standkit
-(``transport=local`` через ``lifecycle.start``). На практике стенды часто
-подняты извне (вручную, IIS/Kestrel-службой, сторонним скриптом) — их
-собственный лог лежит там, где решил сам стенд/деплой, а не в papке
-standkit. Путь к этому "внешнему" логу приходит из реестра BPMkit как
-``Stand.extra["logs_path"]``.
+ДВА ИСТОЧНИКА логов на стенд (``source``, см. ``resolve_logs_dir``):
+
+- ``"stand"`` — логи самого стенда (платформа BPMSoft), пишет их движок,
+  каталог ``<stand.stand_dir>/logs`` (папка ``logs`` в корне стенда). Это
+  ближе всего к тому, что видно в PS-окне/консоли самого стенда — дефолт
+  для панели "Текущее состояние".
+- ``"bpmkit"`` — логи, которые пишет BPMkit MCP (сервер-диспетчер), каталог
+  берётся из реестра BPMkit как ``Stand.extra["logs_path"]``. На практике
+  стенды часто подняты извне (вручную, IIS/Kestrel-службой, сторонним
+  скриптом) — тогда лог самого стенда (``source="stand"``) может быть
+  единственным полезным источником, а ``logs_path`` не задан вовсе.
+
+Важно отличать оба источника от ``standkit.lifecycle.log_path``/
+``standkit.logs`` (см. ``standkit_hub.server._api_stand_logs``) — тот лог
+существует только для стендов, ЗАПУЩЕННЫХ САМИМ standkit
+(``transport=local`` через ``lifecycle.start``), это третий, отдельный канал.
 
 STDLIB-ONLY: ``pathlib``, ``subprocess``, ``sys``.
 """
@@ -24,19 +33,51 @@ from typing import Optional
 
 from standkit.models import Stand
 
+# Допустимые значения ``source`` — единственный источник истины для валидации
+# как здесь, так и в standkit_hub.server (query-параметр ``source``).
+LOG_SOURCES = ("stand", "bpmkit")
 
-def resolve_logs_dir(stand: Stand) -> Optional[Path]:
-    """
-    Резолвит каталог логов стенда из ``extra["logs_path"]``.
+DEFAULT_LOG_SOURCE = "stand"
 
-    Возвращает ``None``, если поле не задано, либо путь не существует, либо
-    указывает не на каталог — вызывающая сторона (хаб) обязана отдать
-    понятное сообщение "лог недоступен", а не падать с исключением.
+
+def raw_logs_path(stand: Stand, source: str = DEFAULT_LOG_SOURCE) -> Optional[str]:
     """
-    raw = stand.extra.get("logs_path")
+    "Сырой" (не проверенный на существование) путь к каталогу логов для
+    выбранного источника — используется только для человекочитаемых сообщений
+    ("каталог не найден — <путь>"), когда ``resolve_logs_dir`` вернул ``None``.
+
+    Бросает ``ValueError`` на неизвестный ``source`` — та же дисциплина, что
+    и у ``resolve_logs_dir``.
+    """
+    if source == "stand":
+        return str(Path(stand.stand_dir) / "logs") if stand.stand_dir else None
+    if source == "bpmkit":
+        raw = stand.extra.get("logs_path")
+        return str(raw) if raw else None
+    raise ValueError(f"неизвестный источник логов: {source!r}")
+
+
+def resolve_logs_dir(stand: Stand, source: str = DEFAULT_LOG_SOURCE) -> Optional[Path]:
+    """
+    Резолвит каталог логов стенда для выбранного источника:
+
+    - ``source="stand"`` (по умолчанию) — ``<stand.stand_dir>/logs``;
+    - ``source="bpmkit"`` — ``stand.extra["logs_path"]``.
+
+    Возвращает ``None``, если путь не задан (для "stand" — пуст сам
+    ``stand_dir``), либо не существует, либо указывает не на каталог —
+    вызывающая сторона (хаб) обязана отдать понятное сообщение "лог
+    недоступен", а не падать с исключением.
+
+    Бросает ``ValueError`` на неизвестный ``source`` — это ошибка вызывающего
+    кода (например, невалидированный query-параметр), а не штатная ситуация
+    "лога нет"; HTTP-слой (``standkit_hub.server``) обязан провалидировать
+    ``source`` ДО вызова и вернуть 400, не давая исключению дойти сюда.
+    """
+    raw = raw_logs_path(stand, source)
     if not raw:
         return None
-    p = Path(str(raw))
+    p = Path(raw)
     if not p.exists() or not p.is_dir():
         return None
     return p

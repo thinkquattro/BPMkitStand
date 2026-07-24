@@ -169,6 +169,10 @@
   // --- стенды ---
 
   let selectedStand = null;
+  // Источник логов для панели "Текущее состояние": "stand" (логи стенда,
+  // <stand_dir>/logs) или "bpmkit" (логи MCP, logs_path) — см.
+  // standkit_hub/logs_browser.py::resolve_logs_dir. Дефолт — "stand".
+  let logSource = "stand";
 
   async function refreshStands() {
     const errorEl = document.getElementById("stands-error");
@@ -245,7 +249,9 @@
     if (!selectedStand) return;
     document.getElementById("state-stand-name").textContent = `(${selectedStand})`;
     try {
-      const data = await apiGet(`/api/stand/${encodeURIComponent(selectedStand)}/state`);
+      const data = await apiGet(
+        `/api/stand/${encodeURIComponent(selectedStand)}/state?source=${encodeURIComponent(logSource)}`
+      );
       document.getElementById("state-output").textContent = data.text || "";
     } catch (e) {
       document.getElementById("state-output").textContent = `Ошибка чтения состояния: ${e.message}`;
@@ -264,7 +270,9 @@
     const previous = select.value;
     select.innerHTML = '<option value="">(основной лог)</option>';
     try {
-      const data = await apiGet(`/api/stand/${encodeURIComponent(selectedStand)}/logs/list`);
+      const data = await apiGet(
+        `/api/stand/${encodeURIComponent(selectedStand)}/logs/list?source=${encodeURIComponent(logSource)}`
+      );
       (data.files || []).forEach((f) => {
         const opt = document.createElement("option");
         opt.value = f.name;
@@ -280,6 +288,14 @@
   }
 
   function setupStatePanel() {
+    document.getElementById("log-source-select").addEventListener("change", (evt) => {
+      logSource = evt.target.value;
+      if (!selectedStand) return;
+      // Список файлов и "текущее состояние" зависят от источника — перезапрашиваем оба.
+      refreshState();
+      refreshLogFilesList();
+    });
+
     document.getElementById("log-file-open-btn").addEventListener("click", async () => {
       if (!selectedStand) return;
       const select = document.getElementById("log-file-select");
@@ -291,7 +307,7 @@
       }
       try {
         const data = await apiGet(
-          `/api/stand/${encodeURIComponent(selectedStand)}/logs/file?name=${encodeURIComponent(name)}&n=500`
+          `/api/stand/${encodeURIComponent(selectedStand)}/logs/file?source=${encodeURIComponent(logSource)}&name=${encodeURIComponent(name)}&n=500`
         );
         out.textContent = (data.lines || []).join("\n") || "(лог пуст)";
       } catch (e) {
@@ -303,7 +319,10 @@
       if (!selectedStand) return;
       const out = document.getElementById("state-output");
       try {
-        const data = await apiSend("POST", `/api/stand/${encodeURIComponent(selectedStand)}/logs/open-folder`);
+        const data = await apiSend(
+          "POST",
+          `/api/stand/${encodeURIComponent(selectedStand)}/logs/open-folder?source=${encodeURIComponent(logSource)}`
+        );
         out.textContent = data.message || (data.ok ? "Папка логов открыта." : "Не удалось открыть папку логов.");
       } catch (e) {
         out.textContent = `Ошибка: ${e.message}`;
