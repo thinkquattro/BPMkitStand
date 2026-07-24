@@ -83,19 +83,66 @@ def get_backend(stand: Stand) -> HostingBackend:
     raise HostingError(f"host_kind={stand.host_kind.value!r} не поддерживается ядром standkit")
 
 
+def _oem_encoding() -> str:
+    """Кодировка вывода консольных утилит Windows (appcmd и т.п. пишут в OEM,
+    не в UTF-8/ANSI). Вне Windows — utf-8."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            return f"cp{ctypes.windll.kernel32.GetOEMCP()}"  # обычно cp866 (RU)
+        except Exception:
+            return "cp866"
+    return "utf-8"
+
+
+def _decode_console(data) -> str:
+    """Декодирует вывод внешней команды. Принимает bytes (реальный запуск) или
+    str (замоканный в тестах — отдаётся как есть). Для bytes перебирает
+    utf-8 → OEM (cp866) → cp1251, чтобы не превращать кириллицу appcmd в
+    кракозябры (баг «остановка IIS: непонятный текст ошибки»)."""
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    for enc in ("utf-8", _oem_encoding(), "cp1251"):
+        try:
+            return data.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def _run(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
-    """Выполняет внешнюю команду, оборачивая ошибки спавна/таймаута в ``HostingError``."""
+    """Выполняет внешнюю команду, оборачивая ошибки спавна/таймаута в ``HostingError``.
+    Захватывает вывод БАЙТАМИ и декодирует (см. ``_decode_console``) — надёжнее,
+    чем ``text=True, encoding='utf-8'``, для консольных утилит в OEM-кодировке."""
     try:
-        return subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         raise HostingError(f"Не удалось выполнить команду {cmd!r}: {exc}") from exc
+    return subprocess.CompletedProcess(
+        cmd, proc.returncode, _decode_console(proc.stdout), _decode_console(proc.stderr)
+    )
+
+
+# Признаки того, что внешняя команда упала из-за НЕХВАТКИ ПРАВ (нужен запуск
+# «от имени администратора»). Для appcmd это типично: чтение config/
+# redirection.config в %windir%\system32\inetsrv требует elevation.
+_ELEVATION_MARKERS = (
+    "redirection.config",
+    "access is denied",
+    "отказано в доступе",
+    "разрешени",       # «…необходимых разрешений»
+    "0x80070005",
+    "(код 1168)",
+    "error ( message:",  # общий appcmd-ERROR при неудачном открытии config
+)
+
+
+def _looks_like_elevation_error(text: str) -> bool:
+    low = text.lower()
+    return any(m in low for m in _ELEVATION_MARKERS)
 
 
 def _run_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
@@ -105,6 +152,22 @@ def _run_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subpro
         detail = (result.stderr or result.stdout or "").strip()
         raise HostingError(f"Команда {cmd!r} завершилась с ошибкой (код {result.returncode}): {detail}")
     return result
+
+
+def _appcmd_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
+    """``_run_checked`` для appcmd: при ошибке нехватки прав добавляет к тексту
+    понятную IIS-подсказку «запустите от имени администратора»."""
+    try:
+        return _run_checked(cmd, timeout=timeout)
+    except HostingError as exc:
+        if _looks_like_elevation_error(str(exc)):
+            raise HostingError(
+                str(exc)
+                + "\n\nПохоже, не хватает прав администратора: управление IIS через appcmd.exe "
+                "требует запуска диспетчера «от имени администратора» (elevated). Запустите "
+                "standkit-hub с правами администратора и повторите операцию."
+            ) from exc
+        raise
 
 
 def _tcp_fallback(stand: Stand) -> bool:
@@ -209,9 +272,9 @@ class IisBackend:
                 f"стенд '{stand.name}': host_kind=iis требует iis_site и/или iis_app_pool"
             )
         if stand.iis_app_pool:
-            _run_checked([appcmd, "start", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
+            _appcmd_checked([appcmd, "start", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
         if stand.iis_site:
-            _run_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"])
+            _appcmd_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"])
         return None
 
     def stop(self, stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
@@ -225,9 +288,9 @@ class IisBackend:
         # положила бы и их (решение Владимира — гасить только стенд). App Pool
         # гасим лишь как единственный хэндл, когда сайт вообще не задан.
         if stand.iis_site:
-            _run_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"])
+            _appcmd_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"])
             return True
-        _run_checked([appcmd, "stop", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
+        _appcmd_checked([appcmd, "stop", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
         return True
 
     def restart(
@@ -238,10 +301,10 @@ class IisBackend:
         # трогаем/не рециклим — он может быть общим (см. stop). Recycle пула —
         # только когда сайт не задан (пул — единственный хэндл стенда).
         if stand.iis_site:
-            _run_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"])
-            _run_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"])
+            _appcmd_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"])
+            _appcmd_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"])
         elif stand.iis_app_pool:
-            _run_checked([appcmd, "recycle", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
+            _appcmd_checked([appcmd, "recycle", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
         else:
             raise HostingError(
                 f"стенд '{stand.name}': host_kind=iis требует iis_site и/или iis_app_pool"
