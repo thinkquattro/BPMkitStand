@@ -511,7 +511,15 @@ def make_handler(
                     },
                 )
                 return
-            primary = logs_browser.pick_primary_log(logs_dir)
+            # «Отрезаем всё старше сегодня»: логи IIS/.NET по дням бывают очень
+            # тяжёлыми — сначала берём самый свежий файл ЗА СЕГОДНЯ. Если сегодня
+            # логов нет (стенд не писал сегодня) — фолбэк на самый свежий вообще,
+            # чтобы всегда показать последнюю сессию.
+            primary = logs_browser.pick_primary_log(
+                logs_dir, since_mtime=logs_browser.start_of_today_ts()
+            )
+            if primary is None:
+                primary = logs_browser.pick_primary_log(logs_dir)
             if primary is None:
                 self._send_json(
                     200,
@@ -528,7 +536,9 @@ def make_handler(
             # до конца файла), даже если она сама по себе длинная — затем
             # extract_current_session() отрезает всё, что относится к прошлым
             # запускам, и уже результат капается до разумного размера для UI.
-            raw_lines = _logs.tail(primary, 4000)
+            # Читаем только хвост файла (до 4 МБ) — даже дневной IIS-лог в сотни
+            # МБ не грузим целиком в память ради последних строк.
+            raw_lines = _logs.tail(primary, 4000, max_bytes=4_000_000)
             raw_text = "\n".join(raw_lines)
             session_text = _logs.extract_current_session(raw_text) if raw_text else ""
             if session_text:

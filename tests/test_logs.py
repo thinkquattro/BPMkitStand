@@ -203,3 +203,18 @@ def test_extract_current_session_start_marker_wins_over_application_starting():
     result = extract_current_session(text)
     assert result.startswith("=== START pid=555")
     assert "старый запуск без маркера START" not in result
+
+
+def test_tail_max_bytes_reads_only_end_and_drops_partial_first_line(tmp_path):
+    # Огромный лог (IIS/.NET) не читаем целиком: с max_bytes берём только хвост,
+    # обрезанную «половинку» первой строки выбрасываем.
+    from standkit.logs import tail
+
+    p = tmp_path / "big.log"
+    lines = [f"line{i:03d}" for i in range(100)]
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    size = p.stat().st_size
+
+    assert tail(p, n=5, max_bytes=size // 2) == lines[-5:]
+    assert tail(p, n=3) == lines[-3:]              # без max_bytes — как раньше
+    assert tail(p, n=2, max_bytes=size * 2) == lines[-2:]  # лимит больше файла

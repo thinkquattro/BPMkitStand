@@ -109,7 +109,7 @@ def _decode_bytes(data: bytes) -> str:
         return data.decode("utf-8", errors="replace")
 
 
-def tail(log_path: Path, n: int = 100) -> list[str]:
+def tail(log_path: Path, n: int = 100, *, max_bytes: Optional[int] = None) -> list[str]:
     """
     Возвращает последние ``n`` строк файла лога (без завершающих переводов строк).
 
@@ -117,14 +117,29 @@ def tail(log_path: Path, n: int = 100) -> list[str]:
     а не бросает исключение: отсутствие лога — обычное состояние свежей записи
     реестра.
 
-    Реализация читает файл целиком (байтами, с "умным" декодом — см.
-    ``_decode_bytes``) — для типичных per-stand логов (десятки МБ) этого
-    достаточно; постраничное чтение с конца файла для очень больших логов
-    (сотни МБ+) — бэклог, см. docs/ARCHITECTURE.md.
+    ``max_bytes`` (опц.) — для ОЧЕНЬ больших логов (IIS/.NET-хосты могут писать
+    сотни МБ в день) читать не весь файл, а только последние ``max_bytes`` байт
+    (с конца, через seek). Первая строка такого хвоста почти наверняка обрезана
+    посередине — она отбрасывается. Без ``max_bytes`` — прежнее поведение (файл
+    целиком).
     """
     p = Path(log_path)
     if not p.exists():
         return []
+    if max_bytes is not None and max_bytes > 0:
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = 0
+        if size > max_bytes:
+            with p.open("rb") as f:
+                f.seek(size - max_bytes)
+                data = f.read()
+            text = _decode_bytes(data)
+            lines = text.splitlines()
+            if lines:
+                lines = lines[1:]  # обрезанная «половинка» первой строки
+            return lines[-n:] if n > 0 else lines
     data = p.read_bytes()
     text = _decode_bytes(data)
     lines = text.splitlines()
