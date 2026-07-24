@@ -78,6 +78,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result.ok else 1
 
     config_path = Path(args.config) if args.config else HubConfig.config_path()
+
+    # Первый запуск: заранее создаём папку реестра проектов (напр.
+    # %APPDATA%\BPMkit), чтобы показываемый путь к projects.json указывал на
+    # реальную папку, а не «в никуда» (иначе открытие пути в проводнике даёт
+    # «Windows не удаётся найти …»). Best-effort — сбой mkdir не должен ронять
+    # запуск диспетчера.
+    try:
+        HubConfig.load(config_path).ensure_registry_dir()
+    except OSError as exc:
+        print(f"[standkit-hub] не удалось подготовить папку реестра: {exc}", file=sys.stderr)
+
     session_token = generate_session_token()
 
     try:

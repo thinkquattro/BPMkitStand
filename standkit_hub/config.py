@@ -135,6 +135,19 @@ class HubConfig:
         text = json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
         p.write_text(text, encoding="utf-8")
 
+    def ensure_registry_dir(self) -> Path:
+        """Создаёт папку файла реестра проектов (``registry_path``), если её ещё
+        нет, и возвращает её.
+
+        Нужно при ПЕРВОМ запуске диспетчера: на свежей машине папки
+        ``%APPDATA%\\BPMkit`` может не существовать, и показываемый в интерфейсе
+        путь к ``projects.json`` указывает «в никуда» — попытка открыть его в
+        проводнике даёт «Windows не удаётся найти …». Ранее папка появлялась
+        только после первой записи (регистрация стенда / сохранение настроек)."""
+        reg_parent = Path(self.registry_path).parent if self.registry_path else default_registry_path().parent
+        reg_parent.mkdir(parents=True, exist_ok=True)
+        return reg_parent
+
     # --- сериализация ---
 
     @classmethod
