@@ -23,7 +23,7 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/thinkquattro/BPMkitStand"
-"Экосистема BPMkit" = "https://github.com/thinkquattro/BPMkit-dev"
+"Экосистема BPMkit" = "https://bpmkit.pro"
 
 [project.optional-dependencies]
 # Опциональный backend хранения секретов (standkit.secrets: set_secret/
