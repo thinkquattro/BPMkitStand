@@ -116,6 +116,19 @@ BPMkitStand использует тот же реестр, что и MCP BPMkit 
 в [SECURITY.md](SECURITY.md). Кратко: fail-closed bind на loopback, TLS 1.2+/mTLS для агента,
 скоупы токена, per-IP lockout, аудит без утечки секретов.
 
+## Документация проекта
+
+- [docs/ROADMAP.md](docs/ROADMAP.md) — дорожная карта приложения (что сделано / ближайшее / бэклог).
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — история изменений по версиям.
+- [docs/BACKLOG.md](docs/BACKLOG.md) — честный список «упомянуто в коде, но не реализовано» (заделы/заглушки) со ссылками на код.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/HOSTING.md](docs/HOSTING.md) · [docs/REMOTE_STANDS.md](docs/REMOTE_STANDS.md) · [SECURITY.md](SECURITY.md)
+- Решения (ADR): [0001 — hosting backends](docs/adr/0001-hosting-backends.md) · [0002 — k8s backend](docs/adr/0002-k8s-backend.md) · [0003 — браузинг логов удалённых стендов (предложено)](docs/adr/0003-remote-log-browsing.md) · [0004 — IIS: жизненный цикл по Site](docs/adr/0004-iis-site-scoped-lifecycle.md)
+
+> Статус: `standkit` — молодой проект (0.5.x). Ядро/агент/хаб работоспособны, но
+> ряд возможностей — это **каркас/заделы** (например, глубокие пробы БД/Redis,
+> транспорты ssh/winrm, живая приёмка Docker/k8s/IIS). Что именно ещё не
+> дописано — прозрачно перечислено в [docs/BACKLOG.md](docs/BACKLOG.md).
+
 ## BPMkitStand и Companion
 
 Бесплатная версия — полноценный диспетчер стендов. **Companion-версия** дополнительно даёт
