@@ -90,6 +90,10 @@ standkit_hub     — MIT, stdlib-only локальный веб-дашборд (
 
 ## Что уже реализовано в каркасе vs TODO
 
+> Полный, поддерживаемый список «упомянуто в коде, но не реализовано» со ссылками
+> на конкретные символы/файлы — [BACKLOG.md](BACKLOG.md). Дорожная карта —
+> [ROADMAP.md](ROADMAP.md).
+
 Рабочая минимальная логика, покрытая тестами: `standkit/models.py`,
 `standkit/registry.py`, `standkit/health.py` (быстрые пробы: `tcp_open`,
 `http_ok`, `process_alive`). Скелетные модули с явными `TODO` в докстрингах:
