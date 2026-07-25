@@ -226,9 +226,10 @@ def test_open_folder_false_when_path_missing(tmp_path):
 
 
 def test_open_folder_does_not_raise_on_existing_dir(tmp_path, monkeypatch):
-    # Подменяем subprocess.Popen, чтобы тест не открывал реальный проводник ОС.
-    # Ветка Windows (os.startfile) не выполняется на этой платформе — покрыта
-    # отдельным тестом ниже (test_open_folder_uses_os_startfile_on_windows).
+    # ВАЖНО: тест не должен открывать реальное окно проводника на машине
+    # разработчика. Раньше подменялся только subprocess.Popen — и на Windows
+    # (где идёт ветка _open_folder_windows) тест честно открывал папку.
+    # Теперь глушим ОБЕ ветки: POSIX-спавн и Windows-launcher.
     import standkit_hub.logs_browser as logs_browser_module
 
     calls = {}
@@ -238,25 +239,29 @@ def test_open_folder_does_not_raise_on_existing_dir(tmp_path, monkeypatch):
             calls["args"] = args
 
     monkeypatch.setattr(logs_browser_module.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(
+        logs_browser_module,
+        "_open_folder_windows",
+        lambda path: calls.__setitem__("args", [str(path)]),
+    )
     result = open_folder(tmp_path)
     assert result.ok is True
     assert calls["args"]
 
 
-def test_open_folder_uses_os_startfile_on_windows(tmp_path, monkeypatch):
-    # На Windows open_folder должен звать os.startfile (надёжнее выводит
-    # окно проводника на передний план, чем subprocess-спавн explorer), а НЕ
-    # subprocess.Popen. os.startfile существует только на реальной Windows —
-    # на прочих платформах подставляем фейк через raising=False.
+def test_open_folder_uses_windows_launcher_on_win32(tmp_path, monkeypatch):
+    # На Windows open_folder должен звать _open_folder_windows (ShellExecuteW +
+    # AllowSetForegroundWindow — иначе окно проводника открывается втихую,
+    # под браузером), а НЕ subprocess.Popen.
     import standkit_hub.logs_browser as logs_browser_module
 
     calls = {}
-
-    def _fake_startfile(path):
-        calls["path"] = path
-
     monkeypatch.setattr(logs_browser_module.sys, "platform", "win32")
-    monkeypatch.setattr(logs_browser_module.os, "startfile", _fake_startfile, raising=False)
+    monkeypatch.setattr(
+        logs_browser_module,
+        "_open_folder_windows",
+        lambda path: calls.__setitem__("path", str(path)),
+    )
 
     def _popen_should_not_be_called(*args, **kwargs):
         raise AssertionError("subprocess.Popen не должен вызываться на Windows-ветке")
@@ -265,6 +270,44 @@ def test_open_folder_uses_os_startfile_on_windows(tmp_path, monkeypatch):
 
     result = open_folder(tmp_path)
     assert result.ok is True
+    assert calls["path"] == str(tmp_path)
+
+
+def test_bring_explorer_to_front_never_raises(tmp_path):
+    # Вытаскивание окна на передний план — best-effort: на не-Windows WinAPI
+    # недоступен, функция обязана тихо вернуться, а не сломать запрос.
+    # timeout_s крошечный: совпадений по заголовку не будет, ждать нечего.
+    import standkit_hub.logs_browser as logs_browser_module
+
+    logs_browser_module._bring_explorer_to_front(tmp_path, timeout_s=0.01)
+
+
+def test_open_folder_windows_falls_back_to_startfile(tmp_path, monkeypatch):
+    # Если WinAPI недоступен (ctypes.windll нет / ShellExecuteW вернул ошибку) —
+    # честный фолбэк на os.startfile, а не отказ открыть папку.
+    import standkit_hub.logs_browser as logs_browser_module
+
+    calls = {}
+
+    def _fake_startfile(path):
+        calls["path"] = path
+
+    monkeypatch.setattr(logs_browser_module.os, "startfile", _fake_startfile, raising=False)
+    # фоновый «поднять окно на передний план» в тесте не нужен
+    monkeypatch.setattr(logs_browser_module, "_bring_explorer_to_front", lambda *a, **kw: None)
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_ctypes(name, *args, **kwargs):
+        if name == "ctypes":
+            raise ImportError("ctypes недоступен")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_ctypes)
+    logs_browser_module._open_folder_windows(tmp_path)
+    monkeypatch.undo()
     assert calls["path"] == str(tmp_path)
 
 

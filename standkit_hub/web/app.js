@@ -338,12 +338,32 @@
   }
 
   // --- область статуса действий (тост над таблицей стендов) ---
+  //
+  // Тост ВСЕГДА гаснет сам: раньше ошибки висели «до следующего действия»
+  // и, будучи position:fixed поверх панели инструментов, перехватывали клики
+  // по кнопке «Обновить» — из-за чего казалось, что кнопка не реагирует.
+  // Теперь: ошибка живёт дольше успеха, но конечное время; есть крестик и
+  // закрытие по Escape; сам блок не ловит мышь (pointer-events см. в CSS),
+  // клики проходят сквозь него к кнопкам под ним.
 
   let actionStatusTimer = null;
+  const ACTION_STATUS_TTL_OK = 6000;
+  const ACTION_STATUS_TTL_ERROR = 20000;
+
+  function hideActionStatus() {
+    const el = document.getElementById("action-status");
+    if (!el) return;
+    el.classList.remove("action-status-visible");
+    if (actionStatusTimer) {
+      clearTimeout(actionStatusTimer);
+      actionStatusTimer = null;
+    }
+  }
 
   function showActionStatus(message, isError) {
     const el = document.getElementById("action-status");
-    el.textContent = message;
+    const textEl = document.getElementById("action-status-text") || el;
+    textEl.textContent = message;
     el.classList.toggle("action-status-error", !!isError);
     el.classList.toggle("action-status-ok", !isError);
     el.classList.add("action-status-visible");
@@ -351,12 +371,18 @@
       clearTimeout(actionStatusTimer);
       actionStatusTimer = null;
     }
-    // Успешные сообщения гаснут сами через паузу, ошибки остаются, пока их не сменит новое действие.
-    if (!isError) {
-      actionStatusTimer = setTimeout(() => {
-        el.classList.remove("action-status-visible");
-      }, 6000);
-    }
+    actionStatusTimer = setTimeout(
+      () => el.classList.remove("action-status-visible"),
+      isError ? ACTION_STATUS_TTL_ERROR : ACTION_STATUS_TTL_OK
+    );
+  }
+
+  function setupActionStatus() {
+    const closeBtn = document.getElementById("action-status-close");
+    if (closeBtn) closeBtn.addEventListener("click", hideActionStatus);
+    document.addEventListener("keydown", (evt) => {
+      if (evt.key === "Escape") hideActionStatus();
+    });
   }
 
   // --- бэйджи статуса ---
@@ -537,6 +563,8 @@
 
   let selectedStand = null;
 
+  // Возвращает true, если данные реально обновились (нужно вызывающему,
+  // чтобы отличить успех от ошибки — см. refreshStandsWithFeedback).
   async function refreshStands() {
     const errorEl = document.getElementById("stands-error");
     errorEl.textContent = "";
@@ -547,9 +575,11 @@
       renderStands(lastStandsData);
       updateLogsMenuState();
       setConnStatus(true);
+      return true;
     } catch (e) {
       errorEl.textContent = `Ошибка обновления: ${e.message}`;
       setConnStatus(false);
+      return false;
     }
   }
 
@@ -557,19 +587,41 @@
   // блокируется и меняет подпись на «Обновление…», по завершении показывается
   // подтверждение со временем (у автообновления по таймеру этого нет, чтобы не
   // мигать постоянно).
+  //
+  // Локальный ответ приходит за десятки миллисекунд, поэтому подпись держим
+  // минимум MIN_BUSY_MS — иначе смена текста незаметна и кнопка выглядит
+  // «мёртвой». Итог показываем ВСЕГДА: успех — подтверждение, ошибку — тост,
+  // а не только запись в мелкий #stands-error, которую легко не заметить.
+  const MIN_BUSY_MS = 350;
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   async function refreshStandsWithFeedback() {
     const btn = document.getElementById("refresh-stands-btn");
-    const orig = btn.textContent;
+    if (btn.disabled) return;
+    const orig = btn.dataset.label || btn.textContent;
+    btn.dataset.label = orig;
+    const startedAt = Date.now();
     btn.disabled = true;
+    btn.classList.add("is-busy");
     btn.textContent = "Обновление…";
+    let ok = false;
     try {
-      await refreshStands();
-      if (!document.getElementById("stands-error").textContent) {
-        showActionStatus(`Список обновлён • ${new Date().toLocaleTimeString()}`, false);
-      }
+      ok = await refreshStands();
     } finally {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < MIN_BUSY_MS) await sleep(MIN_BUSY_MS - elapsed);
       btn.textContent = orig;
+      btn.classList.remove("is-busy");
       btn.disabled = false;
+    }
+    if (ok) {
+      showActionStatus(`Список обновлён • ${new Date().toLocaleTimeString()}`, false);
+    } else {
+      const detail = document.getElementById("stands-error").textContent || "нет связи с хабом";
+      showActionStatus(detail, true);
     }
   }
 
@@ -972,6 +1024,7 @@
     setupAgentTab();
     setupSettingsForm();
     setupStatePanel();
+    setupActionStatus();
     document.getElementById("refresh-stands-btn").addEventListener("click", refreshStandsWithFeedback);
 
     refreshStands();
