@@ -23,7 +23,8 @@
 (``transport=local`` через ``lifecycle.start``), это третий, отдельный канал.
 
 STDLIB-ONLY: ``pathlib``, ``subprocess``, ``sys``, ``os`` (только ``os.startfile``
-на Windows).
+на Windows), ``ctypes``/``threading``/``time`` (только Windows, вывод окна
+проводника на передний план — см. ``_bring_explorer_to_front``).
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -170,14 +173,152 @@ class OpenFolderResult:
     message: str
 
 
+# Классы окон проводника Windows: обычное окно папки и окно с деревом
+# ("Проводник"). Ищем окно именно по классу, а не по заголовку целиком —
+# заголовок зависит от настройки "выводить полный путь в строке заголовка".
+_EXPLORER_WINDOW_CLASSES = ("CabinetWClass", "ExploreWClass")
+
+
+def _bring_explorer_to_front(path: Path, timeout_s: float = 3.0) -> None:
+    """
+    Дожидается появления окна проводника для ``path`` и вытаскивает его
+    на передний план. Вызывается в daemon-потоке: окно рождается не мгновенно,
+    а HTTP-ответ хаба ждать этого не должен.
+
+    Почему просто ``SetForegroundWindow`` не работает: Windows отдаёт фокус
+    только процессу, который сам сейчас на переднем плане (foreground lock).
+    В момент клика активен браузер, а не хаб. Классический легальный обход —
+    ``AttachThreadInput`` к потоку текущего foreground-окна: на время
+    привязки наш поток разделяет с ним очередь ввода и право менять фокус.
+    Синтетические нажатия клавиш (трюк с ALT) сознательно НЕ используем —
+    они прилетают в чужое активное окно.
+
+    Любая ошибка WinAPI гасится: папка уже открыта, недополученный фокус —
+    не повод ронять запрос.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+        # Без явных argtypes/restype 64-битные HWND режутся до int — окно
+        # «находится», а все операции с ним молча ничего не делают.
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+
+        target_full = str(path).rstrip("\\/").lower()
+        target_name = (path.name or str(path)).lower()
+        matches: list[int] = []
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def _enum(hwnd, _lparam):
+            cls_buf = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, cls_buf, 64)
+            if cls_buf.value not in _EXPLORER_WINDOW_CLASSES:
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            title_buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, title_buf, length + 1)
+            title = title_buf.value.strip().lower()
+            if title in (target_full, target_name):
+                matches.append(hwnd)
+                return False  # точное совпадение — дальше не ищем
+            return True
+
+        callback = WNDENUMPROC(_enum)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and not matches:
+            user32.EnumWindows(callback, 0)
+            if matches:
+                break
+            time.sleep(0.15)
+        if not matches:
+            return
+
+        hwnd = matches[0]
+        SW_RESTORE = 9
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+
+        fg = user32.GetForegroundWindow()
+        fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        my_tid = kernel32.GetCurrentThreadId()
+        attached = bool(fg_tid) and fg_tid != my_tid and bool(
+            user32.AttachThreadInput(my_tid, fg_tid, True)
+        )
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(my_tid, fg_tid, False)
+    except Exception:  # noqa: BLE001 — фокус best-effort, ошибки не эскалируем
+        return
+
+
+def _open_folder_windows(path: Path) -> None:
+    """
+    Windows: открыть каталог в проводнике И вывести его окно на передний план.
+
+    Голого ``os.startfile`` мало. Хаб — фоновый процесс (активен браузер или
+    вебвью, не он), а Windows запрещает неактивному процессу и его потомкам
+    звать ``SetForegroundWindow``. Итог — проводник открывается ВТИХУЮ: окно
+    под браузером либо просто мигающая кнопка в таскбаре. Пользователь жмёт
+    «Открыть папку логов» и не видит реакции — ровно тот негативный UX,
+    из-за которого это и написано.
+
+    Два шага лечения:
+
+    1. ``AllowSetForegroundWindow(ASFW_ANY)`` перед запуском — передаёт право
+       на захват фокуса запускаемому процессу (срабатывает не всегда, зависит
+       от того, кто владеет вводом);
+    2. ``_bring_explorer_to_front`` в фоне — дожидается окна и поднимает его
+       через ``AttachThreadInput`` (страховка на случай, когда шага 1 мало).
+
+    Сам запуск — ``ShellExecuteW`` с ``SW_SHOWNORMAL``: та же операция "open",
+    что и у ``os.startfile``, но с явным параметром показа окна, поэтому уже
+    открытое свёрнутое окно той же папки разворачивается, а не остаётся
+    в таскбаре.
+
+    ``ctypes`` — stdlib, инвариант «без сторонних зависимостей» не нарушен.
+    Если WinAPI недоступен — честный фолбэк на ``os.startfile`` (папка
+    откроется, пусть и без гарантии фокуса).
+    """
+    try:
+        import ctypes
+
+        ASFW_ANY = -1
+        SW_SHOWNORMAL = 1
+        ctypes.windll.user32.AllowSetForegroundWindow(ASFW_ANY)  # type: ignore[attr-defined]
+        rc = int(
+            ctypes.windll.shell32.ShellExecuteW(  # type: ignore[attr-defined]
+                None, "open", str(path), None, None, SW_SHOWNORMAL
+            )
+        )
+        # ShellExecuteW: значение > 32 — успех, всё остальное — код ошибки.
+        if rc <= 32:
+            raise OSError(f"ShellExecuteW вернул {rc}")
+    except (ImportError, AttributeError, OSError):
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    threading.Thread(
+        target=_bring_explorer_to_front, args=(path,), name="standkit-focus-explorer", daemon=True
+    ).start()
+
+
 def open_folder(path: Path) -> OpenFolderResult:
     """
-    Открывает каталог в файловом менеджере ОС хоста: Windows — ``os.startfile``
-    (штатный способ ОС попросить проводник открыть путь — надёжнее выводит
-    открытое окно на передний план, чем спавн ``explorer`` через subprocess,
-    который часто просто сворачивает уже открытое окно той же папки в
-    таскбар вместо фокуса); macOS — ``open``, остальное — ``xdg-open`` (оба
-    через ``subprocess.Popen``, не блокируясь на ожидании закрытия окна).
+    Открывает каталог в файловом менеджере ОС хоста: Windows —
+    ``_open_folder_windows`` (ShellExecuteW + передача фокуса, см. там);
+    macOS — ``open -a Finder`` (``-a`` активирует Finder, а не только
+    открывает окно фоном); остальное — ``xdg-open`` (через
+    ``subprocess.Popen``, не блокируясь на ожидании закрытия окна).
 
     Никогда не бросает исключение наружу — при отсутствии DISPLAY, нужной
     утилиты в PATH и т.п. возвращает ``ok=False`` с текстом причины, чтобы
@@ -187,9 +328,9 @@ def open_folder(path: Path) -> OpenFolderResult:
         return OpenFolderResult(False, f"каталог не существует: {path}")
     try:
         if sys.platform == "win32":
-            os.startfile(str(path))  # type: ignore[attr-defined]
+            _open_folder_windows(path)
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(path)])
+            subprocess.Popen(["open", "-a", "Finder", str(path)])
         else:
             subprocess.Popen(["xdg-open", str(path)])
         return OpenFolderResult(True, f"открыто: {path}")

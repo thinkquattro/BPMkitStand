@@ -514,15 +514,44 @@ button:disabled {
   opacity: 0;
   visibility: hidden;
   transform: translateX(-50%) translateY(-10px);
+  /* Тост НИКОГДА не ловит мышь: он лежит поверх панели инструментов, и с
+     pointer-events: auto перехватывал клики по кнопке «Обновить» под собой.
+     Кликабелен только крестик (см. .action-status-close). */
   pointer-events: none;
   transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
 }
 
 .action-status.action-status-visible {
   opacity: 1;
   visibility: visible;
   transform: translateX(-50%) translateY(0);
+}
+
+.action-status-close {
   pointer-events: auto;
+  flex: 0 0 auto;
+  margin: -4px -4px 0 0;
+  padding: 0 4px;
+  min-width: 0;
+  line-height: 1.2;
+  font-size: 18px;
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+}
+
+.action-status-close:hover {
+  opacity: 1;
+  background: none;
+}
+
+#action-status-text {
+  flex: 1 1 auto;
 }
 
 .action-status.action-status-ok {
