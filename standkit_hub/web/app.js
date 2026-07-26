@@ -164,6 +164,48 @@
     });
   }
 
+  // --- режим отображения: полный дашборд / компактное окно-виджет ---
+
+  const VIEWS = ["full", "compact"];
+
+  function currentView() {
+    const value = document.documentElement.getAttribute("data-view");
+    return VIEWS.indexOf(value) >= 0 ? value : "full";
+  }
+
+  /**
+   * Переключает режим перезагрузкой с другим ``?view=``, а не переставляя
+   * атрибут на лету.
+   *
+   * Так режим переживает перезагрузку страницы, попадает в закладку и в
+   * ярлык PWA (shortcut «Компактный режим» в manifest.webmanifest), а сервер
+   * успевает проставить data-view ДО выполнения JS — компактное окно не
+   * мигает полноразмерным дашбордом. Сессионный токен при этом не теряется:
+   * он лежит в HttpOnly-cookie, выставленной при первом заходе.
+   */
+  function setupViewToggle() {
+    const btn = document.getElementById("view-toggle-btn");
+    if (!btn) return;
+
+    const isCompact = currentView() === "compact";
+    btn.textContent = isCompact ? "▣" : "▭";
+    btn.title = isCompact ? "Обычный режим" : "Компактный режим";
+    btn.setAttribute("aria-label", btn.title);
+
+    btn.addEventListener("click", () => {
+      const url = new URL(window.location.href);
+      if (isCompact) {
+        url.searchParams.delete("view");
+      } else {
+        url.searchParams.set("view", "compact");
+      }
+      // Токен из адресной строки не тащим: он уже в cookie, а в истории
+      // браузера ему делать нечего.
+      url.searchParams.delete("t");
+      window.location.assign(url.toString());
+    });
+  }
+
   // --- модалка "О программе" ---
 
   let aboutVersionLoaded = false;
@@ -1272,6 +1314,7 @@
 
   function init() {
     setupTheme();
+    setupViewToggle();
     setupTabs();
     setupAboutModal();
     setupRegisterModal();

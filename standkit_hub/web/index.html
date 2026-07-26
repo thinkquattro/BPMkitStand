@@ -7,13 +7,23 @@
   обрабатывает сам CSS через @media (prefers-color-scheme) — JS для этого
   не нужен. Источник правды — конфиг хаба, localStorage только кэш.
 -->
-<html lang="ru" data-theme="__STANDKIT_THEME__">
+<html lang="ru" data-theme="__STANDKIT_THEME__" data-view="__STANDKIT_VIEW__">
 <head>
   <meta charset="UTF-8" />
   <meta name="standkit-token" content="__STANDKIT_TOKEN__" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>BPMkit Дашборд</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <!--
+    Манифест даёт Chrome/Edge кнопку «Установить приложение»: дашборд получает
+    отдельное окно без адресной строки, свою иконку в панели задач и своё
+    место в Alt+Tab. Ни одной зависимости для этого не нужно — инвариант
+    stdlib-only и «фронтенд без сборки» не затронуты. Требует фиксированного
+    порта хаба (см. DEFAULT_HUB_PORT): scope PWA включает порт.
+  -->
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <meta name="theme-color" content="#1f6feb" />
+  <link rel="apple-touch-icon" href="/static/favicon.png" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -26,6 +36,7 @@
       <button class="tab-btn" data-tab="settings">Настройки</button>
     </nav>
     <button id="about-btn" class="about-btn" type="button" title="О программе">ⓘ</button>
+    <button id="view-toggle-btn" class="view-toggle-btn" type="button" title="Компактный режим">▭</button>
     <button id="theme-toggle-btn" class="theme-toggle-btn" type="button" title="Переключить тему">🌓</button>
     <span id="conn-status" class="conn-status" title="Связь с хабом не проверялась">
       <span id="conn-status-dot" class="conn-status-dot conn-status-dot-pending"></span>

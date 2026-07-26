@@ -154,6 +154,99 @@ body {
   background: var(--bpmkit-bg);
 }
 
+.view-toggle-btn {
+  background: transparent;
+  color: var(--bpmkit-text);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.view-toggle-btn:hover {
+  filter: brightness(1.1);
+  background: var(--bpmkit-bg);
+}
+
+/* --- Компактный режим (?view=compact) ------------------------------------
+   Тот же UI, другой набор правил: узкое окно-виджет шириной ~320 px, только
+   имена стендов, четыре точки состояния и старт/стоп. Новых технологий за
+   этим нет — ни зависимостей, ни отдельной страницы, ни сборки. Атрибут
+   data-view проставляет сервер при отдаче index.html, поэтому полноразмерный
+   дашборд не успевает мигнуть до выполнения JS.
+
+   Вместе с PWA-манифестом (shortcut «Компактный режим») это и есть виджет:
+   отдельное окно поверх остальных, которое видно краем глаза. */
+
+[data-view="compact"] body {
+  min-width: 0;
+}
+
+[data-view="compact"] .topbar h1,
+[data-view="compact"] .topbar .tabs,
+[data-view="compact"] #about-btn,
+[data-view="compact"] .panel-toolbar #register-stand-btn,
+[data-view="compact"] .hint-text,
+[data-view="compact"] .state-panel,
+[data-view="compact"] #tab-agent,
+[data-view="compact"] #tab-settings,
+[data-view="compact"] .stands-table thead,
+/* Колонка «Транспорт» (2-я) — в окне-виджете это шум: у подавляющего
+   большинства пользователей все стенды локальные. */
+[data-view="compact"] .stands-table td:nth-child(2),
+/* Очистка Redis — операция необратимая, ей не место в окне, по которому
+   кликают мимоходом. Остаются старт, стоп и рестарт. */
+[data-view="compact"] .stands-table .icon-btn-redis {
+  display: none;
+}
+
+[data-view="compact"] main,
+[data-view="compact"] .topbar {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+[data-view="compact"] .topbar {
+  gap: 6px;
+}
+
+[data-view="compact"] .stands-table-wrap {
+  border: none;
+  padding: 0;
+}
+
+[data-view="compact"] .stands-table td {
+  padding: 5px 4px;
+  font-size: 12px;
+}
+
+/* Длинные значения (url стенда, имя БД) в узком окне не помещаются — режем
+   многоточием, полный текст остаётся доступен по наведению. */
+[data-view="compact"] .stands-table .value-cell {
+  display: inline-block;
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+[data-view="compact"] .stands-table .row-actions {
+  white-space: nowrap;
+}
+
+[data-view="compact"] .stands-table .icon-btn {
+  padding: 2px 4px;
+}
+
+[data-view="compact"] #view-toggle-btn {
+  margin-left: auto;
+}
+
 /* --- кнопка "О программе" (topbar) — БЕЗ фона, оранжевая иконка (бренд) --- */
 
 .about-btn {

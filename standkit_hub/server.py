@@ -155,6 +155,26 @@ _STATIC_CACHE_CONTROL_CODE = "no-cache"
 _SSE_WAIT_SEC = 15.0
 
 
+# mimetypes ничего не знает про .webmanifest, а браузер обязан получить именно
+# ``application/manifest+json``, иначе кнопка «Установить приложение» не
+# появляется. Регистрируем один раз на импорт модуля.
+mimetypes.add_type("application/manifest+json", ".webmanifest")
+
+# Значения ``?view=`` для корневой страницы. ``full`` — обычный дашборд,
+# ``compact`` — узкое окно-виджет: только имена стендов, точки состояния и
+# старт/стоп (см. CSS-правила [data-view="compact"]). Отдельной технологии за
+# этим нет — тот же UI, другой набор CSS-правил.
+HUB_VIEWS = ("full", "compact")
+_DEFAULT_VIEW = "full"
+
+
+def normalize_view(value: object) -> str:
+    """Приводит ``?view=`` к одному из ``HUB_VIEWS``; мусор молча даёт ``full``."""
+    if isinstance(value, str) and value.strip().lower() in HUB_VIEWS:
+        return value.strip().lower()
+    return _DEFAULT_VIEW
+
+
 def _static_cache_control(target: Path) -> str:
     if target.suffix.lower() in _STATIC_LONG_CACHE_SUFFIXES:
         return _STATIC_CACHE_CONTROL_ASSET
@@ -578,7 +598,12 @@ def make_handler(
 
         # --- статика ---
 
-        def _serve_index(self, inject_token: Optional[str] = None, set_cookie: bool = False) -> None:
+        def _serve_index(
+            self,
+            inject_token: Optional[str] = None,
+            set_cookie: bool = False,
+            view: str = _DEFAULT_VIEW,
+        ) -> None:
             index_path = web_dir / "index.html"
             if not index_path.is_file():
                 self._send_json(500, {"error": "index.html не найден в пакете хаба"})
@@ -597,6 +622,10 @@ def make_handler(
             except OSError:
                 theme = "auto"
             text = text.replace("__STANDKIT_THEME__", theme)
+            # Режим отображения — тем же приёмом, что и тема: атрибут на <html>
+            # проставлен ДО выполнения JS, поэтому компактное окно не успевает
+            # мигнуть полноразмерным дашбордом.
+            text = text.replace("__STANDKIT_VIEW__", normalize_view(view))
             body = text.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -665,14 +694,17 @@ def make_handler(
             authed_query = bool(token and _security.tokens_match(token, session_token))
             cookie_tok = _security.extract_cookie_token(self.headers.get("Cookie", ""))
             authed_cookie = _security.tokens_match(cookie_tok, session_token)
+            view = normalize_view((qs.get("view") or [_DEFAULT_VIEW])[0])
             if authed_query or authed_cookie:
                 # Аутентифицированный запрос: отдаём index с токеном в <meta>, чтобы
                 # JS мог класть X-Standkit-Token в мутации (cookie HttpOnly, JS её не
                 # читает). Cookie ставим, если пришли по ссылке ?t=. Без редиректа —
                 # иначе токен теряется до загрузки JS (был баг 403 на мутациях).
-                self._serve_index(inject_token=session_token, set_cookie=authed_query)
+                self._serve_index(
+                    inject_token=session_token, set_cookie=authed_query, view=view
+                )
             else:
-                self._serve_index()
+                self._serve_index(view=view)
 
         # --- API: стенды ---
 
