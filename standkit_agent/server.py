@@ -7,9 +7,16 @@ HTTP/RPC-сервер агента — STDLIB-ONLY (http.server, ssl), ника�
     GET  /stands                       — список стендов реестра агента (read)
     GET  /stand/{name}/status          — StandStatus.to_dict()             (read)
     POST /stand/{name}/start           — запустить стенд (transport=local) (control)
-    POST /stand/{name}/stop            — остановить стенд                 (control)
-    POST /stand/{name}/restart         — перезапустить стенд              (control)
+    POST /stand/{name}/stop[?force=1]  — остановить стенд                 (control)
+    POST /stand/{name}/restart[?force=1] — перезапустить стенд            (control)
+    POST /stand/{name}/adopt           — взять под управление стенд,
+                                         поднятый вне диспетчера          (control)
     GET  /stand/{name}/logs?n=100      — последние n строк лога            (read)
+
+``?force=1`` на stop/restart — ЯВНОЕ согласие вызывающей стороны на усыновление
+стенда, поднятого мимо диспетчера (см. standkit.lifecycle / standkit.adopt).
+Без него агент возвращает 409 с описанием найденного процесса и НИЧЕГО не
+убивает: молча прибивать процесс, найденный по номеру порта, нельзя.
 
 СЕКЬЮРИТИ-МОДЕЛЬ (см. также standkit_agent/security.py, standkit_agent/audit.py):
   - Транспорт: опциональный TLS (ssl.SSLContext, минимум TLS 1.2), опциональный
@@ -53,7 +60,9 @@ from standkit_agent.security import (
     DEFAULT_SOCKET_TIMEOUT,
 )
 
-_STAND_ACTION_RE = re.compile(r"^/stand/(?P<name>[^/]+)/(?P<action>start|stop|restart|status|logs)$")
+_STAND_ACTION_RE = re.compile(
+    r"^/stand/(?P<name>[^/]+)/(?P<action>start|stop|restart|adopt|status|logs)$"
+)
 
 
 class AgentAuthError(Exception):
@@ -233,8 +242,9 @@ def make_handler(
             self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802 - сигнатура BaseHTTPRequestHandler
-            m = _STAND_ACTION_RE.match(self.path)
-            if not m or m.group("action") not in ("start", "stop", "restart"):
+            parsed = urlparse(self.path)
+            m = _STAND_ACTION_RE.match(parsed.path)
+            if not m or m.group("action") not in ("start", "stop", "restart", "adopt"):
                 self._send_json(404, {"error": "not found"})
                 return
 
@@ -277,17 +287,40 @@ def make_handler(
                 self._audit(identity=scope, action=action, result="error", code=404)
                 return
 
+            # ?force=1 — явное согласие на усыновление стенда, поднятого вне
+            # диспетчера (см. docstring модуля). Любое другое значение = нет.
+            force = (parse_qs(parsed.query).get("force") or ["0"])[0] in ("1", "true", "yes")
+
             try:
                 if action == "start":
                     pid = lifecycle.start(stand, run_dir=run_dir, log_dir=log_dir)
                     self._send_json(200, {"ok": True, "pid": pid})
                 elif action == "stop":
-                    ok = lifecycle.stop(stand, run_dir=run_dir)
+                    ok = lifecycle.stop(stand, run_dir=run_dir, force=force)
                     self._send_json(200, {"ok": ok})
                 elif action == "restart":
-                    pid = lifecycle.restart(stand, run_dir=run_dir, log_dir=log_dir)
+                    pid = lifecycle.restart(stand, run_dir=run_dir, log_dir=log_dir, force=force)
                     self._send_json(200, {"ok": True, "pid": pid})
+                elif action == "adopt":
+                    candidate = lifecycle.adopt(stand, run_dir=run_dir)
+                    self._send_json(200, {"ok": True, "candidate": candidate.to_dict()})
                 self._audit(identity=scope, action=action, result="ok", code=200)
+            except lifecycle.AdoptionRequired as exc:
+                # Кандидат найден, но подтверждения не было — НИЧЕГО не убиваем,
+                # отдаём кандидата вызывающей стороне (409), она обязана
+                # спросить пользователя и повторить с ?force=1.
+                self._send_json(
+                    409,
+                    {
+                        "error": str(exc),
+                        "adopt_required": True,
+                        "candidate": exc.candidate.to_dict(),
+                    },
+                )
+                self._audit(identity=scope, action=action, result="denied", code=409)
+            except lifecycle.AdoptionUnavailable as exc:
+                self._send_json(404, {"error": str(exc)})
+                self._audit(identity=scope, action=action, result="error", code=404)
             except Exception as exc:  # noqa: BLE001 - агент не должен падать на ошибке одного стенда
                 self._send_json(500, {"error": str(exc)})
                 self._audit(identity=scope, action=action, result="error", code=500)

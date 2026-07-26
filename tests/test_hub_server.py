@@ -237,16 +237,27 @@ def test_post_stand_action_dispatches_stop_and_restart(tmp_path, monkeypatch):
     base_url, token, *_ = _start_hub(tmp_path)
 
     calls = []
-    monkeypatch.setattr(hub_client_module.lifecycle, "stop", lambda stand: calls.append(("stop", stand.name)))
-    monkeypatch.setattr(hub_client_module.lifecycle, "restart", lambda stand: calls.append(("restart", stand.name)))
+    # stop/restart принимают force= (усыновление стенда, поднятого вне
+    # диспетчера) — подменяющие лямбды обязаны повторять сигнатуру.
+    monkeypatch.setattr(
+        hub_client_module.lifecycle,
+        "stop",
+        lambda stand, force=False: calls.append(("stop", stand.name, force)),
+    )
+    monkeypatch.setattr(
+        hub_client_module.lifecycle,
+        "restart",
+        lambda stand, force=False: calls.append(("restart", stand.name, force)),
+    )
 
     status1, _, _ = _request(base_url, "/api/stand/demo/stop", token=token, method="POST", origin=base_url)
     status2, _, _ = _request(base_url, "/api/stand/demo/restart", token=token, method="POST", origin=base_url)
 
     assert status1 == 200
     assert status2 == 200
-    assert ("stop", "demo") in calls
-    assert ("restart", "demo") in calls
+    # Без ?force=1 усыновление не запрашивается — force доезжает как False.
+    assert ("stop", "demo", False) in calls
+    assert ("restart", "demo", False) in calls
 
 
 def test_unknown_stand_action_returns_404(tmp_path):
@@ -710,7 +721,7 @@ def test_post_stand_start_returns_pid_in_response(tmp_path, monkeypatch):
 def test_post_stand_restart_returns_pid_in_response(tmp_path, monkeypatch):
     base_url, token, *_ = _start_hub(tmp_path)
 
-    monkeypatch.setattr(hub_client_module.lifecycle, "restart", lambda stand: 4343)
+    monkeypatch.setattr(hub_client_module.lifecycle, "restart", lambda stand, force=False: 4343)
 
     status, body, _ = _request(
         base_url, "/api/stand/demo/restart", token=token, method="POST", origin=base_url

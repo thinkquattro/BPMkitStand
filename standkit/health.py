@@ -140,7 +140,20 @@ def check_stand(
             # и при НЕОПРЕДЕЛЁННОСТИ уже делает собственный TCP-фолбэк. Здесь
             # НЕ добавляем ещё один tcp_open — иначе остановленный IIS-сайт,
             # у которого http.sys держит порт 80, ложно показывался бы «up».
-            is_up = _hosting.get_backend(stand).is_running(stand)
+            backend = _hosting.get_backend(stand)
+            # Если бэкенд умеет объяснять состояние (IIS: «сайт остановлен» /
+            # «пул остановлен» / «порт держит http.sys, 503») — забираем
+            # причину сюда, в details, чтобы UI показал её вместо голого DOWN.
+            # Отдельного вызова is_running при этом НЕ делаем: describe_state
+            # уже содержит вердикт, а лишний appcmd на каждый опрос — дорого.
+            describe = getattr(backend, "describe_state", None)
+            if describe is not None:
+                detailed = describe(stand)
+                is_up = detailed.running
+                if detailed.reason:
+                    status.details["process_reason"] = detailed.reason
+            else:
+                is_up = backend.is_running(stand)
         except Exception:
             # Бэкенд вовсе не смог ответить (нет appcmd/docker/kubectl) —
             # осторожный фолбэк на TCP-порт, чтобы не показать ложный DOWN.

@@ -44,9 +44,10 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from standkit import __version__ as _standkit_version
+from standkit import lifecycle as _lifecycle
 from standkit import logs as _logs
 from standkit.hosting import HostingError
-from standkit.lifecycle import LifecycleError
+from standkit.lifecycle import AdoptionRequired, AdoptionUnavailable, LifecycleError
 from standkit.models import HostKind, Stand, Transport
 from standkit.registry import Registry, RegistryError, default_registry_path
 from standkit.secrets import SecretError, delete_secret, has_secret, set_secret
@@ -59,7 +60,7 @@ from standkit_hub.config import HubConfig
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
 
 _STAND_ACTION_RE = re.compile(
-    r"^/api/stand/(?P<name>[^/]+)/(?P<action>status|logs|start|stop|restart|state|redis-clear)$"
+    r"^/api/stand/(?P<name>[^/]+)/(?P<action>status|logs|start|stop|restart|adopt|state|redis-clear)$"
 )
 # Единственный оставшийся суб-путь "логов" — открытие папки логов в
 # проводнике ОС (POST). Просмотр отдельных файлов лога из UI убран (см.
@@ -73,6 +74,12 @@ _SECRET_RE = re.compile(r"^/api/secret/(?P<ref>[^/]+)$")
 # стенд" на дашборде) — отдельный точный путь, НЕ пересекается с _STAND_ACTION_RE
 # (тот требует .../<action> после имени стенда).
 _STAND_REGISTER_PATH = "/api/stand/register"
+
+# Автоопределение IIS-сайта по каталогу/порту для кнопки «Определить
+# автоматически» в форме регистрации. Работает по ЕЩЁ НЕ зарегистрированному
+# стенду (данные приходят телом запроса), поэтому это отдельный путь, а не
+# суб-действие /api/stand/<name>/*.
+_IIS_DETECT_PATH = "/api/iis/detect"
 
 # Поля формы регистрации, которые сервер готов принять и записать в Stand —
 # белый список (всё, чего нет в этом множестве, в реестр не попадает, даже
@@ -202,6 +209,28 @@ def _redis_number(stand: Stand) -> Optional[int]:
     """
     _, _, db = _redis_connect_params(stand)
     return db
+
+
+def _is_external(stand: Stand, process_state: str) -> bool:
+    """
+    True, если стенд ЖИВ, но поднят вне диспетчера — процесс отвечает (проба
+    ``process`` = ok, она смотрит и на TCP-порт), а живого pidfile у диспетчера
+    нет (см. ``standkit.lifecycle.is_managed``).
+
+    Только для локальных kestrel-стендов: у iis/docker/k8s объект управления
+    глобальный (сайт/контейнер/деплоймент), понятия «поднят не нами» там нет —
+    ``docker stop`` работает независимо от того, кто запускал контейнер.
+    Ошибки чтения pidfile трактуем как «не внешний»: бейдж — подсказка, он не
+    имеет права ронять список стендов.
+    """
+    if stand.transport != Transport.LOCAL or stand.host_kind != HostKind.KESTREL:
+        return False
+    if process_state != "ok":
+        return False
+    try:
+        return not _lifecycle.is_managed(stand)
+    except OSError:
+        return False
 
 
 def _load_config(config_path: Path) -> HubConfig:
@@ -431,6 +460,15 @@ def make_handler(
                             "state": process_state,
                             "transport": stand.transport.value,
                             "logs_path": logs_path,
+                            # Стенд жив, но поднят МИМО диспетчера (нет живого
+                            # pidfile) — Стоп/Рестарт по нему потребуют
+                            # усыновления. Показываем это бейджем ДО того, как
+                            # пользователь нажмёт кнопку и получит отказ.
+                            "external": _is_external(stand, process_state),
+                            # Причина состояния от бэкенда хостинга (IIS:
+                            # «сайт остановлен» / «пул остановлен» / «порт
+                            # держит http.sys, 503»), см. health.check_stand.
+                            "reason": (status.details.get("process_reason") if status else None),
                         },
                         "logs": {"bpmkit_available": bpmkit_logs_available},
                     }
@@ -576,7 +614,16 @@ def make_handler(
                 {"ok": result.ok, "message": result.message, "source": source},
             )
 
-        def _api_stand_action(self, name: str, action: str) -> None:
+        def _force_from_qs(self, parsed) -> bool:
+            """
+            ``?force=1`` на stop/restart — ЯВНОЕ согласие пользователя взять под
+            управление стенд, поднятый вне диспетчера, и остановить его (см.
+            ``standkit.lifecycle._kestrel_stop``). Любое другое значение — нет.
+            """
+            raw = (parse_qs(parsed.query).get("force") or ["0"])[0]
+            return raw in ("1", "true", "yes")
+
+        def _api_stand_action(self, name: str, action: str, *, force: bool = False) -> None:
             config = _load_config(config_path)
             registry = _load_registry(config)
             if name not in registry:
@@ -584,9 +631,28 @@ def make_handler(
                 return
             client = FederatedClient(registry)
             try:
-                result = getattr(client, action)(name)
+                if action in ("stop", "restart"):
+                    result = getattr(client, action)(name, force=force)
+                else:
+                    result = getattr(client, action)(name)
             except (RemoteCallError, SecretError) as exc:
                 self._send_json(502, {"error": str(exc)})
+                return
+            except AdoptionRequired as exc:
+                # Стенд поднят вне диспетчера, найден валидный кандидат — НЕ
+                # убиваем ничего молча: отдаём кандидата фронту (409), тот
+                # показывает подтверждение и повторяет запрос с ?force=1.
+                self._send_json(
+                    409,
+                    {
+                        "error": str(exc),
+                        "adopt_required": True,
+                        "candidate": exc.candidate.to_dict(),
+                    },
+                )
+                return
+            except AdoptionUnavailable as exc:
+                self._send_json(404, {"error": str(exc)})
                 return
             except LifecycleError as exc:
                 # Понятная причина отказа (dotnet не найден в PATH, процесс
@@ -608,6 +674,99 @@ def make_handler(
             if action in ("start", "restart") and isinstance(result, int):
                 payload["pid"] = result
             self._send_json(200, payload)
+
+        def _api_stand_adopt(self, name: str) -> None:
+            """
+            ``POST /api/stand/<name>/adopt`` — взять под управление стенд,
+            поднятый вне диспетчера: найти владельца порта, проверить, что это
+            действительно процесс ЭТОГО стенда, и записать pidfile.
+
+            Процесс НЕ останавливается — это отдельный шаг (кнопки Стоп/Рестарт
+            после усыновления работают обычным путём). Ответы:
+              - 200 ``{"ok": true, "candidate": {...}}`` — усыновлён;
+              - 404 ``{"error"}`` — владельца порта определить не удалось;
+              - 400 ``{"error"}`` — владелец найден, но это не процесс стенда
+                (порт занят чужим процессом) либо host_kind не kestrel.
+            """
+            config = _load_config(config_path)
+            registry = _load_registry(config)
+            if name not in registry:
+                self._send_json(404, {"error": f"стенд '{name}' не найден"})
+                return
+            client = FederatedClient(registry)
+            try:
+                candidate = client.adopt(name)
+            except (RemoteCallError, SecretError) as exc:
+                self._send_json(502, {"error": str(exc)})
+                return
+            except AdoptionUnavailable as exc:
+                self._send_json(404, {"error": str(exc)})
+                return
+            except LifecycleError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            except NotImplementedError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            self._send_json(200, {"ok": True, "candidate": candidate})
+
+        def _api_iis_detect(self) -> None:
+            """
+            ``POST /api/iis/detect`` — автоопределение IIS-сайта/пула стенда по
+            каталогу (physical path) и порту (биндинг) для кнопки «Определить
+            автоматически» формы регистрации.
+
+            Тело: ``{"stand_dir": "...", "stand_port": 5000}``. Ответы:
+              - 200 ``{"ok": true, "match": {...}}`` — сайт найден;
+              - 404 ``{"error"}`` — сопоставить не удалось;
+              - 400 ``{"error", "elevation_required"?}`` — appcmd недоступен /
+                нет прав администратора (диагноз, а не общий текст ошибки).
+            """
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            stand_dir = body.get("stand_dir")
+            if not isinstance(stand_dir, str) or not stand_dir.strip():
+                self._send_json(
+                    400, {"error": "поле 'stand_dir' обязательно", "fields": ["stand_dir"]}
+                )
+                return
+            try:
+                port = int(body.get("stand_port") or 0)
+            except (TypeError, ValueError):
+                self._send_json(
+                    400, {"error": "stand_port должен быть числом", "fields": ["stand_port"]}
+                )
+                return
+
+            from standkit import hosting as _hosting
+
+            probe = Stand(
+                name="__detect__",
+                host_kind=HostKind.IIS,
+                stand_dir=stand_dir.strip(),
+                stand_port=port,
+            )
+            try:
+                match = _hosting.detect_iis_site(probe)
+            except _hosting.IisElevationError as exc:
+                self._send_json(400, {"error": str(exc), "elevation_required": True})
+                return
+            except HostingError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            if match is None:
+                self._send_json(
+                    404,
+                    {
+                        "error": (
+                            "не нашли IIS-сайт с таким каталогом или портом — проверьте "
+                            "stand_dir/stand_port либо укажите iis_site/iis_app_pool вручную"
+                        )
+                    },
+                )
+                return
+            self._send_json(200, {"ok": True, "match": match.to_dict()})
 
         def _api_stand_redis_clear(self, name: str) -> None:
             """
@@ -984,6 +1143,12 @@ def make_handler(
                 self._api_stand_logs_open_folder(m.group("name"), parsed)
                 return
 
+            if path == _IIS_DETECT_PATH:
+                if not self._authorize_mutation():
+                    return
+                self._api_iis_detect()
+                return
+
             m = _STAND_ACTION_RE.match(path)
             if m and m.group("action") in ("start", "stop", "restart"):
                 if not self._authorize_mutation():
@@ -991,7 +1156,20 @@ def make_handler(
                 if not _security.validate_stand_name(m.group("name")):
                     self._send_json(400, {"error": "invalid stand name"})
                     return
-                self._api_stand_action(m.group("name"), m.group("action"))
+                self._api_stand_action(
+                    m.group("name"), m.group("action"), force=self._force_from_qs(parsed)
+                )
+                return
+            if m and m.group("action") == "adopt":
+                # Усыновление — мутация (пишет pidfile и открывает диспетчеру
+                # возможность убить найденный процесс), поэтому та же связка
+                # CSRF-заголовок + локальный Origin, что у stop/restart.
+                if not self._authorize_mutation():
+                    return
+                if not _security.validate_stand_name(m.group("name")):
+                    self._send_json(400, {"error": "invalid stand name"})
+                    return
+                self._api_stand_adopt(m.group("name"))
                 return
             if m and m.group("action") == "redis-clear":
                 if not self._authorize_mutation():

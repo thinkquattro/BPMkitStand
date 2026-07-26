@@ -105,32 +105,70 @@ class FederatedClient:
         """Запускает стенд. Возвращает pid, если транспорт его предоставляет (см. ``_dispatch_action``)."""
         return self._dispatch_action(name, "start")
 
-    def stop(self, name: str) -> Optional[bool]:
-        return self._dispatch_action(name, "stop")
+    def stop(self, name: str, *, force: bool = False) -> Optional[bool]:
+        """
+        Останавливает стенд. ``force=True`` — согласие пользователя на
+        усыновление стенда, поднятого вне диспетчера (см.
+        ``standkit.lifecycle._kestrel_stop``).
+        """
+        return self._dispatch_action(name, "stop", force=force)
 
-    def restart(self, name: str) -> Optional[int]:
+    def restart(self, name: str, *, force: bool = False) -> Optional[int]:
         """Перезапускает стенд. Возвращает pid, если транспорт его предоставляет."""
-        return self._dispatch_action(name, "restart")
+        return self._dispatch_action(name, "restart", force=force)
 
-    def _dispatch_action(self, name: str, action: str):
+    def adopt(self, name: str) -> Optional[dict]:
+        """
+        Берёт стенд, поднятый вне диспетчера, под управление (пишет pidfile) и
+        возвращает описание усыновлённого процесса — см.
+        ``standkit.lifecycle.adopt`` / ``standkit.adopt.AdoptCandidate``.
+
+        Процесс при этом НЕ останавливается: усыновление — отдельный шаг.
+        """
+        stand = self.registry.get(name)
+
+        if stand.transport == Transport.LOCAL:
+            return lifecycle.adopt(stand).to_dict()
+
+        if stand.transport == Transport.AGENT:
+            data = self._agent_action(stand, name, "adopt")
+            candidate = data.get("candidate") if isinstance(data, dict) else None
+            return candidate if isinstance(candidate, dict) else None
+
+        raise NotImplementedError(
+            f"Транспорт {stand.transport.value!r} для стенда '{name}' пока не реализован (TODO)"
+        )
+
+    def _agent_action(self, stand, name: str, action: str, *, query: str = "") -> dict:
+        """POST к агенту стенда с резолвом токена из secretstore (секрет наружу не отдаётся)."""
+        if not stand.agent_url or not stand.agent_secret_ref:
+            raise RemoteCallError(stand.agent_url or "?", "не задан agent_url/agent_secret_ref")
+        token = get_secret(stand.agent_secret_ref)
+        return _agent_request(stand.agent_url, f"/stand/{name}/{action}{query}", token, method="POST")
+
+    def _dispatch_action(self, name: str, action: str, *, force: bool = False):
         """
         Диспетчеризует start/stop/restart по транспорту и ПРОКИДЫВАЕТ результат
         наверх (для "local" — то, что вернул ``standkit.lifecycle`` — pid для
         start/restart, bool для stop; для "agent" — ``pid`` из JSON-ответа
         агента, если есть), чтобы UI хаба мог показать pid успешного старта, а
         не только голое "ok".
+
+        ``force`` имеет смысл только для stop/restart (усыновление) и в
+        транспорте "agent" уезжает query-параметром ``?force=1``.
         """
         stand = self.registry.get(name)
+        supports_force = action in ("stop", "restart")
 
         if stand.transport == Transport.LOCAL:
             fn = getattr(lifecycle, action)
+            if supports_force:
+                return fn(stand, force=force)
             return fn(stand)
 
         if stand.transport == Transport.AGENT:
-            if not stand.agent_url or not stand.agent_secret_ref:
-                raise RemoteCallError(stand.agent_url or "?", "не задан agent_url/agent_secret_ref")
-            token = get_secret(stand.agent_secret_ref)
-            data = _agent_request(stand.agent_url, f"/stand/{name}/{action}", token, method="POST")
+            query = "?force=1" if (supports_force and force) else ""
+            data = self._agent_action(stand, name, action, query=query)
             return data.get("pid") if isinstance(data, dict) else None
 
         raise NotImplementedError(

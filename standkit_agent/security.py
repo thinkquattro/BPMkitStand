@@ -59,7 +59,10 @@ SCOPE_CONTROL = "control"
 SCOPE_READONLY = "readonly"
 
 READ_ACTIONS = frozenset({"stands", "status", "logs"})
-CONTROL_ACTIONS = frozenset({"start", "stop", "restart"})
+# "adopt" — взятие под управление стенда, поднятого вне диспетчера (пишет
+# pidfile по найденному владельцу порта, см. standkit.adopt). Это операция
+# управления процессом, поэтому только control-скоуп.
+CONTROL_ACTIONS = frozenset({"start", "stop", "restart", "adopt"})
 
 
 class InsecureBindError(Exception):
