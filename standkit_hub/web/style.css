@@ -1,11 +1,18 @@
 /* Vanilla CSS дашборда standkit — без внешних ресурсов, без сборки. */
 
 /*
- * Тема (light/dark) — переключается атрибутом data-theme на <html>
- * (см. app.js::setupTheme). Дефолт (без атрибута/light) — переменные ниже.
- * Тёмная тема переопределяет их в блоке [data-theme="dark"] в конце файла.
+ * Тема — атрибут data-theme на <html> с одним из трёх значений:
+ * light | dark | auto. Значение ПОДСТАВЛЯЕТ СЕРВЕР при отдаче index.html из
+ * HubConfig.theme (см. standkit_hub/server.py::_serve_index), поэтому тема
+ * применяется до выполнения JS и «вспышки» светлой темы нет. app.js только
+ * меняет атрибут при переключении и сохраняет выбор в конфиг.
+ *
+ * Дефолт (light) — переменные в :root. Тёмная тема переопределяет их в
+ * [data-theme="dark"]; "auto" получает ту же тёмную палитру, но только когда
+ * система просит тёмное оформление (@media prefers-color-scheme) — см. блок
+ * ниже, значения в нём обязаны совпадать с [data-theme="dark"].
  * Всё остальное CSS-правило файла ссылается ТОЛЬКО на переменные — ни одного
- * захардкоженного цвета вне двух этих блоков, иначе тема "протекает".
+ * захардкоженного цвета вне этих блоков, иначе тема "протекает".
  *
  * БРЕНД BPMkit: акцентный цвет продукта — оранжевый #f9763d (тот же, что в
  * иконке "k" на тёмном фоне) — единый для обеих тем, минималистичный стиль,
@@ -50,6 +57,32 @@
   --bpmkit-row-hover: #333029;
   --bpmkit-row-selected: #3d2c1f;
   --bpmkit-code-bg: #262523;
+}
+
+/* Тема "auto": та же тёмная палитра, что и выше, но только при системной
+   тёмной теме. Значения ОБЯЗАНЫ совпадать с [data-theme="dark"] — правите
+   там, правьте и здесь (в чистом CSS без сборки списка селекторов на
+   media-query не хватает, а вводить сборщик ради этого нельзя — фронт
+   принципиально без билда). */
+@media (prefers-color-scheme: dark) {
+  [data-theme="auto"] {
+    --bpmkit-primary: #f9763d;
+    --bpmkit-primary-contrast: #ffffff;
+    --bpmkit-bg: #1e1e1e;
+    --bpmkit-panel-bg: #2b2b2b;
+    --bpmkit-border: #3a3a3a;
+    --bpmkit-text: #e9e7e4;
+    --bpmkit-muted: #a3a09b;
+    --bpmkit-ok: #3ecb7a;
+    --bpmkit-down: #f06868;
+    --bpmkit-unknown: #d6a63a;
+    --bpmkit-skipped: #8a877f;
+    --bpmkit-console-bg: #141414;
+    --bpmkit-console-text: #d7dee8;
+    --bpmkit-row-hover: #333029;
+    --bpmkit-row-selected: #3d2c1f;
+    --bpmkit-code-bg: #262523;
+  }
 }
 
 * {
@@ -349,6 +382,18 @@ body {
   display: block;
 }
 
+/* Тема "auto" — то же самое при системной тёмной теме (см. блок переменных
+   [data-theme="auto"] в начале файла). */
+@media (prefers-color-scheme: dark) {
+  [data-theme="auto"] .about-modal-logo-light {
+    display: none;
+  }
+
+  [data-theme="auto"] .about-modal-logo-dark {
+    display: block;
+  }
+}
+
 .modal-note {
   margin: 0 0 14px;
   padding: 10px 12px;
@@ -639,6 +684,36 @@ button:disabled {
   background: var(--bpmkit-skipped);
 }
 
+/* "pending" — пробы ЕЩЁ НЕ выполнялись (мгновенный слепок реестра,
+   /api/stands?probe=0 либо первый круг фонового опроса). Это НЕ "unknown"
+   (тот — честный результат выполненной проверки), поэтому и вид другой:
+   бледная плашка с пульсацией «данные едут», а не тревожный жёлтый. */
+.badge-pending {
+  background: transparent;
+  color: var(--bpmkit-muted);
+  border: 1px dashed var(--bpmkit-border);
+  padding: 1px 7px;
+  animation: badge-pending-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes badge-pending-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* Уважаем системную настройку «уменьшить движение» — пульсация чисто
+   декоративная, без неё смысл не теряется. */
+@media (prefers-reduced-motion: reduce) {
+  .badge-pending {
+    animation: none;
+  }
+}
+
 .row-actions button {
   margin-right: 4px;
   padding: 4px 8px;
@@ -688,6 +763,21 @@ button:disabled {
 .value-muted {
   color: var(--bpmkit-muted);
   font-weight: 400;
+}
+
+/* Значение, по которому проба ещё не выполнялась (см. .badge-pending). */
+.value-pending {
+  color: var(--bpmkit-muted);
+  font-weight: 400;
+}
+
+/* Возраст снапшота в панели инструментов — намеренно неприметный: он должен
+   быть заметен, только если данные реально устарели (см.
+   app.js::updateSnapshotAge, который в норме держит элемент пустым). */
+.stands-age {
+  color: var(--bpmkit-muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 /* HTTP-значение как ссылка: цвет наследуется от value-* (состояние пробы),

@@ -90,25 +90,77 @@
     });
   }
 
-  // --- тема (light/dark) ---
+  // --- тема (light/dark/auto) ---
+  //
+  // ИСТОЧНИК ПРАВДЫ — HubConfig.theme на сервере, а не localStorage браузера.
+  // localStorage привязан к origin (включая ПОРТ), и пока хаб стартовал на
+  // эфемерном порту, каждый запуск давал новый origin и пустое хранилище —
+  // отсюда жалоба «тема не запоминается». Теперь выбор уходит в конфиг через
+  // POST /api/settings, а localStorage остался лишь кэшем на случай, если
+  // сервер почему-то не подставил атрибут в <html data-theme>.
+  //
+  // В data-theme лежит РОВНО то, что в конфиге (light|dark|auto). Разрешать
+  // "auto" в конкретную тему здесь НЕЛЬЗЯ: это превратило бы выбор «как в
+  // системе» в зафиксированный light/dark при первом же сохранении. Разрешение
+  // делает CSS через @media (prefers-color-scheme) — см. style.css.
 
   const THEME_STORAGE_KEY = "standkit_theme";
+  // Порядок обхода по клику на переключателе.
+  const THEMES = ["auto", "light", "dark"];
+  const THEME_LABELS = { auto: "как в системе", light: "светлая", dark: "тёмная" };
+
+  function normalizeTheme(value) {
+    return THEMES.indexOf(value) >= 0 ? value : "auto";
+  }
+
+  function readCachedTheme() {
+    try {
+      return localStorage.getItem(THEME_STORAGE_KEY);
+    } catch (e) {
+      // Приватный режим / отключённое хранилище — не повод ломать дашборд.
+      return null;
+    }
+  }
+
+  function currentTheme() {
+    return normalizeTheme(document.documentElement.getAttribute("data-theme"));
+  }
 
   function applyTheme(theme) {
-    document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+    const normalized = normalizeTheme(theme);
+    document.documentElement.setAttribute("data-theme", normalized);
+    const btn = document.getElementById("theme-toggle-btn");
+    if (btn) {
+      btn.title = `Тема: ${THEME_LABELS[normalized]} (клик — следующая)`;
+      btn.setAttribute("aria-label", `Тема: ${THEME_LABELS[normalized]}`);
+    }
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, normalized);
+    } catch (e) {
+      /* см. readCachedTheme */
+    }
+    return normalized;
   }
 
   function setupTheme() {
-    const stored = localStorage.getItem(THEME_STORAGE_KEY);
-    const prefersDark =
-      !stored && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-    applyTheme(stored || (prefersDark ? "dark" : "light"));
+    // Сервер уже подставил тему в <html data-theme> при отдаче index.html —
+    // ничего перерисовывать не нужно, только зафиксировать состояние кнопки.
+    // Плейсхолдер остался незаменённым (страница открыта не через хаб) —
+    // падаем на кэш, затем на "auto".
+    const fromServer = document.documentElement.getAttribute("data-theme");
+    const known = THEMES.indexOf(fromServer) >= 0;
+    applyTheme(known ? fromServer : readCachedTheme() || "auto");
 
-    document.getElementById("theme-toggle-btn").addEventListener("click", () => {
-      const current = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
-      const next = current === "dark" ? "light" : "dark";
+    document.getElementById("theme-toggle-btn").addEventListener("click", async () => {
+      const next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
       applyTheme(next);
-      localStorage.setItem(THEME_STORAGE_KEY, next);
+      try {
+        await apiSend("POST", "/api/settings", { theme: next });
+      } catch (e) {
+        // Тема применена визуально, но не сохранена — честно говорим об этом,
+        // иначе после перезагрузки пользователь молча получит прежнюю.
+        showActionStatus(`Тема применена, но не сохранена: ${e.message}`, true);
+      }
     });
   }
 
@@ -386,6 +438,14 @@
   }
 
   // --- бэйджи статуса ---
+  //
+  // "pending" — пробы ЕЩЁ НЕ выполнялись (ответ на /api/stands?probe=0 либо
+  // первый круг фонового опроса на сервере, см. server.py::PENDING_PROBE_STATE).
+  // Это принципиально НЕ "unknown": "unknown" — честный результат выполненной
+  // проверки («проверять нечем»), а здесь проверки просто ещё не было.
+
+  const PENDING_STATE = "pending";
+  const PENDING_LABEL = "проверяется…";
 
   function badgeClass(state) {
     switch (state) {
@@ -395,17 +455,27 @@
         return "badge badge-down";
       case "skipped":
         return "badge badge-skipped";
+      case PENDING_STATE:
+        return "badge badge-pending";
       default:
         return "badge badge-unknown";
     }
   }
 
   function badge(state) {
-    return `<span class="${badgeClass(state)}">${state || "unknown"}</span>`;
+    const label = state === PENDING_STATE ? PENDING_LABEL : state || "unknown";
+    return `<span class="${badgeClass(state)}">${label}</span>`;
   }
 
   function processBadge(state) {
-    const label = state === "ok" ? "up" : state === "down" ? "down" : state || "unknown";
+    const label =
+      state === "ok"
+        ? "up"
+        : state === "down"
+        ? "down"
+        : state === PENDING_STATE
+        ? PENDING_LABEL
+        : state || "unknown";
     return `<span class="${badgeClass(state)}">${label}</span>`;
   }
 
@@ -417,6 +487,8 @@
         return "value-down";
       case "skipped":
         return "value-skipped";
+      case PENDING_STATE:
+        return "value-pending";
       default:
         return "value-unknown";
     }
@@ -563,6 +635,17 @@
 
   let selectedStand = null;
 
+  // Единая точка применения ответа /api/stands (и SSE-события "stands"):
+  // отрисовка + подхват интервала автообновления + отметка возраста данных.
+  function applyStandsPayload(data) {
+    lastStandsData = (data && data.stands) || [];
+    applyRefreshInterval(data && data.refresh_interval_sec);
+    checkStartingTransitions(lastStandsData);
+    renderStands(lastStandsData);
+    updateLogsMenuState();
+    updateSnapshotAge(data);
+  }
+
   // Возвращает true, если данные реально обновились (нужно вызывающему,
   // чтобы отличить успех от ошибки — см. refreshStandsWithFeedback).
   async function refreshStands() {
@@ -570,10 +653,7 @@
     errorEl.textContent = "";
     try {
       const data = await apiGet("/api/stands");
-      lastStandsData = data.stands || [];
-      checkStartingTransitions(lastStandsData);
-      renderStands(lastStandsData);
-      updateLogsMenuState();
+      applyStandsPayload(data);
       setConnStatus(true);
       return true;
     } catch (e) {
@@ -581,6 +661,24 @@
       setConnStatus(false);
       return false;
     }
+  }
+
+  // ПЕРВАЯ ОТРИСОВКА: ?probe=0 — слепок реестра БЕЗ единой сетевой пробы.
+  // Ответ приходит за десятки миллисекунд, даже если половина стендов сидит
+  // за firewall'ом с DROP, поэтому таблица и индикатор связи появляются сразу
+  // (раньше страница висела серой всё время полного опроса). Все пробы в этом
+  // ответе имеют состояние "pending" — "проверяется…" в таблице. Полные
+  // статусы приезжают вторым запросом либо push'ем через SSE.
+  async function firstPaint() {
+    try {
+      const data = await apiGet("/api/stands?probe=0");
+      applyStandsPayload(data);
+      setConnStatus(true);
+    } catch (e) {
+      document.getElementById("stands-error").textContent = `Ошибка обновления: ${e.message}`;
+      setConnStatus(false);
+    }
+    await refreshStands();
   }
 
   // Ручное обновление по кнопке — с видимой обратной связью: кнопка
@@ -841,6 +939,149 @@
     wrapEl.title = ok ? "Связь с хабом установлена" : "Нет связи с хабом";
   }
 
+  // --- интервал автообновления ---
+  //
+  // Значение приезжает С СЕРВЕРА в каждом ответе /api/stands и в SSE-событии
+  // (HubConfig.refresh_interval_sec). Раньше здесь стояла константа 10000, а
+  // одноимённое поле формы настроек ни на что не влияло. Теперь изменение
+  // применяется без перезагрузки страницы: старый таймер снимается через
+  // clearInterval и заводится новый.
+
+  const DEFAULT_REFRESH_INTERVAL_SEC = 10;
+  // Нижняя граница — зеркало poller.MIN_POLL_INTERVAL_SEC на сервере: чаще
+  // опрашивать всё равно нечего, снапшот обновляется не быстрее.
+  const MIN_REFRESH_INTERVAL_SEC = 2;
+
+  let refreshIntervalMs = DEFAULT_REFRESH_INTERVAL_SEC * 1000;
+  let backgroundTimer = null;
+
+  function backgroundTick() {
+    // Пока жив SSE, список стендов приходит push'ем — дёргать /api/stands
+    // таймером незачем. Остальное (локальный агент, панель состояния) через
+    // SSE не ходит и обновляется по таймеру всегда.
+    if (!sseHealthy) refreshStands();
+    refreshAgentStatus();
+    if (selectedStand) refreshState();
+  }
+
+  function restartBackgroundTimer() {
+    if (backgroundTimer !== null) {
+      clearInterval(backgroundTimer);
+      backgroundTimer = null;
+    }
+    backgroundTimer = setInterval(backgroundTick, refreshIntervalMs);
+  }
+
+  function applyRefreshInterval(seconds) {
+    const parsed = Number(seconds);
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+    const ms = Math.max(MIN_REFRESH_INTERVAL_SEC, parsed) * 1000;
+    if (ms === refreshIntervalMs && backgroundTimer !== null) return;
+    refreshIntervalMs = ms;
+    restartBackgroundTimer();
+  }
+
+  // --- возраст снапшота ---
+  //
+  // Хаб отдаёт не «живой» опрос, а снапшот фонового поллера с отметкой
+  // времени (generated_at/age_sec). Честно показываем возраст — но ТОЛЬКО
+  // когда он о чём-то говорит: пробы ещё не выполнялись либо снапшот старше
+  // двух периодов обновления (значит, фоновый опрос буксует). В норме
+  // элемент пуст и не отвлекает.
+
+  function formatAge(sec) {
+    const whole = Math.round(sec);
+    if (whole < 60) return `${whole} с`;
+    const minutes = Math.round(whole / 60);
+    if (minutes < 60) return `${minutes} мин`;
+    return `${Math.round(minutes / 60)} ч`;
+  }
+
+  function updateSnapshotAge(data) {
+    const el = document.getElementById("stands-age");
+    if (!el) return;
+    if (data && data.probed === false) {
+      el.textContent = "статусы проверяются…";
+      el.title = "Показан слепок реестра, пробы ещё выполняются";
+      return;
+    }
+    const age = data ? Number(data.age_sec) : NaN;
+    if (!Number.isFinite(age) || age <= (refreshIntervalMs / 1000) * 2) {
+      el.textContent = "";
+      el.title = "";
+      return;
+    }
+    el.textContent = `данные от ${formatAge(age)} назад`;
+    el.title = "Фоновый опрос давно не обновлял снапшот состояния стендов";
+  }
+
+  // --- поток обновлений (SSE) ---
+  //
+  // GET /api/events (text/event-stream) — сервер сам присылает новый снапшот,
+  // как только фоновый поллер его собрал. EventSource не умеет слать
+  // кастомные заголовки, поэтому авторизация идёт по той же сессионной
+  // HttpOnly-cookie, что и у обычных GET /api/* — второго механизма токенов
+  // не заводим (см. шапку файла). credentials для same-origin EventSource
+  // отправляются по умолчанию.
+  //
+  // Обрыв — штатная ситуация: браузер переподключается сам (сервер шлёт
+  // "retry: 5000"), а до восстановления список обновляет резервный таймер.
+  // Если поток не поднимается подряд SSE_MAX_FAILURES раз (сервер без
+  // фонового опроса отвечает 503, прокси режет event-stream) — закрываем его
+  // совсем и честно живём на опросе.
+
+  const SSE_MAX_FAILURES = 3;
+
+  let eventSource = null;
+  let sseHealthy = false;
+  let sseFailures = 0;
+
+  function setupEventStream() {
+    if (typeof EventSource === "undefined") return;
+    let source;
+    try {
+      source = new EventSource("/api/events");
+    } catch (e) {
+      return;
+    }
+    eventSource = source;
+
+    source.addEventListener("open", () => {
+      sseFailures = 0;
+      sseHealthy = true;
+    });
+
+    source.addEventListener("stands", (evt) => {
+      let data = null;
+      try {
+        data = JSON.parse(evt.data);
+      } catch (e) {
+        return;
+      }
+      sseFailures = 0;
+      sseHealthy = true;
+      document.getElementById("stands-error").textContent = "";
+      applyStandsPayload(data);
+      setConnStatus(true);
+    });
+
+    source.addEventListener("error", () => {
+      sseHealthy = false;
+      sseFailures += 1;
+      if (sseFailures >= SSE_MAX_FAILURES) {
+        source.close();
+        if (eventSource === source) eventSource = null;
+      }
+    });
+
+    // Уход со страницы освобождает поток ThreadingHTTPServer на сервере, а не
+    // ждёт, пока heartbeat упрётся в закрытый сокет.
+    window.addEventListener("pagehide", () => {
+      source.close();
+      sseHealthy = false;
+    });
+  }
+
   // --- локальный агент ---
 
   async function refreshAgentStatus() {
@@ -930,6 +1171,13 @@
       if (input) input.value = data[field] ?? "";
     });
     form.elements.namedItem("insecure").checked = !!data.insecure;
+    // Тема — из конфига (источник правды). Обычно совпадает с тем, что уже
+    // подставил сервер в <html data-theme>; расхождение возможно, если конфиг
+    // правили снаружи (руками, вторым экземпляром хаба).
+    applyTheme(data.theme);
+    // Интервал автообновления применяем сразу после сохранения настроек —
+    // не дожидаясь следующего ответа /api/stands.
+    applyRefreshInterval(data.refresh_interval_sec);
     currentAgents = (data.agents || []).map((a) => ({ ...a }));
     renderAgentsList();
     await refreshSecretStatuses();
@@ -970,8 +1218,14 @@
       payload.insecure = form.elements.namedItem("insecure").checked;
       payload.agents = currentAgents;
       try {
-        await apiSend("POST", "/api/settings", payload);
+        // Тему в payload сознательно НЕ кладём: её меняет только переключатель
+        // в шапке, а сервер мержит тело поверх текущего конфига — значение
+        // сохранится само.
+        const saved = await apiSend("POST", "/api/settings", payload);
         statusEl.textContent = "Настройки сохранены";
+        // Новый refresh_interval_sec применяем немедленно, без перезагрузки
+        // страницы (старый таймер снимается внутри applyRefreshInterval).
+        applyRefreshInterval(saved && saved.refresh_interval_sec);
         await refreshSecretStatuses();
       } catch (e) {
         statusEl.textContent = `Ошибка сохранения: ${e.message}`;
@@ -1027,18 +1281,18 @@
     setupActionStatus();
     document.getElementById("refresh-stands-btn").addEventListener("click", refreshStandsWithFeedback);
 
-    refreshStands();
+    // Быстрая первая отрисовка (?probe=0) + полный статус вторым запросом.
+    firstPaint();
+    // Push-обновления; при их отсутствии работает резервный таймер ниже.
+    setupEventStream();
     refreshAgentStatus();
     loadSettings().catch((e) => {
       document.getElementById("settings-status").textContent = `Ошибка загрузки настроек: ${e.message}`;
     });
 
-    const intervalMs = 10000;
-    setInterval(() => {
-      refreshStands();
-      refreshAgentStatus();
-      if (selectedStand) refreshState();
-    }, intervalMs);
+    // Стартовый период — дефолтный; реальный refresh_interval_sec приедет с
+    // первым же ответом /api/stands и перезаведёт таймер (applyRefreshInterval).
+    restartBackgroundTimer();
   }
 
   document.addEventListener("DOMContentLoaded", init);

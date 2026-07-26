@@ -1,5 +1,13 @@
 <!DOCTYPE html>
-<html lang="ru">
+<!--
+  data-theme подставляет СЕРВЕР при отдаче index.html (см.
+  standkit_hub/server.py::_serve_index) значением HubConfig.theme —
+  light | dark | auto. Тема применяется ДО загрузки app.js, поэтому у
+  пользователя тёмной темы нет «вспышки» светлой. Значение "auto"
+  обрабатывает сам CSS через @media (prefers-color-scheme) — JS для этого
+  не нужен. Источник правды — конфиг хаба, localStorage только кэш.
+-->
+<html lang="ru" data-theme="__STANDKIT_THEME__">
 <head>
   <meta charset="UTF-8" />
   <meta name="standkit-token" content="__STANDKIT_TOKEN__" />
@@ -208,6 +216,10 @@
         <button id="refresh-stands-btn">Обновить</button>
         <button id="register-stand-btn" class="secondary" type="button">Зарегистрировать стенд</button>
         <span id="stands-error" class="error-text"></span>
+        <!-- Возраст снапшота: показывается ТОЛЬКО когда данные заметно
+             устарели или пробы ещё не выполнялись (см. app.js::updateSnapshotAge).
+             В норме пусто и глаз не отвлекает. -->
+        <span id="stands-age" class="stands-age" role="status" aria-live="polite"></span>
       </div>
       <div id="action-status" class="action-status" role="status" aria-live="polite">
         <span id="action-status-text"></span>

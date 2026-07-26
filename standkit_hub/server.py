@@ -31,16 +31,35 @@ standkit_agent.server: хаб должен разворачиваться без
     (защита от traversal), 400/404 без стектрейсов.
   - Секреты (``POST /api/secret/{ref}``) никогда не логируются и не попадают
     в аудит/ответ — только статус ``has_secret``.
+
+ПРОИЗВОДИТЕЛЬНОСТЬ (почему хаб больше не «прокси в сеть на каждый GET»):
+  - фоновый поток (``standkit_hub.poller.StatusPoller``) опрашивает стенды с
+    периодом ``refresh_interval_sec`` и держит снапшот в памяти; ``GET
+    /api/stands`` отдаёт готовый снапшот с отметкой времени, а не лезет в сеть;
+  - ``GET /api/stands?probe=0`` отдаёт слепок реестра БЕЗ единой пробы —
+    фронт рисует таблицу мгновенно и дорисовывает статусы вторым запросом;
+  - ``GET /api/events`` — тот же снапшот push'ем через SSE (text/event-stream),
+    чтобы не опрашивать хаб таймером;
+  - конфиг и реестр кэшируются в памяти с инвалидацией по mtime файла
+    (раньше оба JSON перечитывались с диска на КАЖДЫЙ запрос);
+  - статика (``/static/*``) отдаётся с ``Cache-Control``/``ETag``/
+    ``Last-Modified`` и умеет отвечать ``304`` — раньше браузер качал
+    style.css/app.js/логотипы заново при каждой загрузке страницы.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import mimetypes
 import re
+import threading
+import time
+from datetime import timezone
+from email.utils import formatdate, parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 from standkit import __version__ as _standkit_version
@@ -56,7 +75,15 @@ from standkit_hub import security as _security
 from standkit_hub.agent_control import AgentControlError, AgentController
 from standkit_hub.client import FederatedClient, RemoteCallError
 from standkit_hub.config import HubConfig
+from standkit_hub.poller import StatusPoller, StatusSnapshot
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
+
+# Порт хаба по умолчанию. ФИКСИРОВАННЫЙ осознанно: раньше хаб стартовал на
+# эфемерном порту, а origin (схема+хост+ПОРТ) — ключ браузерных хранилищ и
+# HTTP-кэша. Каждый запуск давал новый origin: пустой localStorage («тема не
+# запоминается»), холодный кэш статики и протухшая закладка. Если порт занят —
+# см. ``bind_hub_server``: откат на эфемерный с явным сообщением, а не падение.
+DEFAULT_HUB_PORT = 8770
 
 _STAND_ACTION_RE = re.compile(
     r"^/api/stand/(?P<name>[^/]+)/(?P<action>status|logs|start|stop|restart|state|redis-clear)$"
@@ -111,6 +138,73 @@ _REGISTER_FORBIDDEN_FIELDS = {"db_password", "admin_password", "password", "secr
 _LOG_SOURCE_LABELS = {"stand": "Стенд", "bpmkit": "BPMkit"}
 
 _DEFAULT_WEB_DIR = Path(__file__).parent / "web"
+
+# --- HTTP-кэш статики --------------------------------------------------------
+#
+# Логика/стили правятся при каждом обновлении пакета, поэтому им — "no-cache":
+# браузер ХРАНИТ файл, но всегда переспрашивает и в норме получает 304 без
+# тела. Картинки/шрифты меняются редко — им можно короткий max-age.
+# index.html не кэшируется вовсе: в нём сессионный токен (см. _serve_index).
+_STATIC_LONG_CACHE_SUFFIXES = {".svg", ".png", ".ico", ".jpg", ".jpeg", ".gif", ".webp", ".woff", ".woff2"}
+_STATIC_CACHE_CONTROL_ASSET = "public, max-age=3600, must-revalidate"
+_STATIC_CACHE_CONTROL_CODE = "no-cache"
+
+# Максимальное ожидание нового снапшота в SSE-цикле. По его истечении
+# отправляется heartbeat-комментарий — он же единственный способ заметить,
+# что клиент ушёл (write в закрытый сокет упадёт, поток освободится).
+_SSE_WAIT_SEC = 15.0
+
+
+def _static_cache_control(target: Path) -> str:
+    if target.suffix.lower() in _STATIC_LONG_CACHE_SUFFIXES:
+        return _STATIC_CACHE_CONTROL_ASSET
+    return _STATIC_CACHE_CONTROL_CODE
+
+
+def _static_etag(size: int, mtime_ns: int) -> str:
+    """Слабый по смыслу, но синтаксически сильный ETag: размер + mtime файла."""
+    return f'"{size:x}-{mtime_ns:x}"'
+
+
+def _etag_matches(header_value: str, etag: str) -> bool:
+    """Разбирает ``If-None-Match`` (список тегов, возможен ``*`` и префикс ``W/``)."""
+    for raw in header_value.split(","):
+        candidate = raw.strip()
+        if not candidate:
+            continue
+        if candidate == "*":
+            return True
+        if candidate.startswith("W/"):
+            candidate = candidate[2:]
+        if candidate == etag:
+            return True
+    return False
+
+
+def _is_not_modified(headers, *, etag: str, mtime: float) -> bool:
+    """
+    Нужно ли ответить ``304 Not Modified``.
+
+    Приоритет за ``If-None-Match`` (RFC 9110): если клиент предъявил ETag и он
+    не совпал — отдаём тело, ``If-Modified-Since`` в этом случае игнорируется.
+    """
+    inm = headers.get("If-None-Match")
+    if inm:
+        return _etag_matches(inm, etag)
+    ims = headers.get("If-Modified-Since")
+    if not ims:
+        return False
+    try:
+        since = parsedate_to_datetime(ims)
+    except (TypeError, ValueError):
+        return False
+    if since is None:
+        return False
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    # Last-Modified отдаётся с секундной точностью — сравниваем так же,
+    # иначе файл с дробным mtime всегда выглядел бы «изменённым».
+    return int(mtime) <= int(since.timestamp())
 
 
 def _redis_from_registry(stand: Stand) -> Optional[dict]:
@@ -204,13 +298,175 @@ def _redis_number(stand: Stand) -> Optional[int]:
     return db
 
 
+# --- кэш конфига и реестра ---------------------------------------------------
+#
+# Оба JSON'а раньше перечитывались с диска на КАЖДЫЙ запрос (а на дашборде их
+# несколько в секунду). Кэшируем в памяти, инвалидируя по «отпечатку» файла
+# (mtime в наносекундах + размер): файл правят и снаружи — руками, MCP BPMkit,
+# другим экземпляром хаба — поэтому кэш обязан замечать чужие изменения сам, а
+# не только собственные записи.
+
+_CACHE_LOCK = threading.Lock()
+_CONFIG_CACHE: dict[str, tuple[Optional[tuple[int, int]], HubConfig]] = {}
+_REGISTRY_CACHE: dict[str, tuple[Optional[tuple[int, int]], Registry]] = {}
+
+
+def _file_stamp(path: Path) -> Optional[tuple[int, int]]:
+    """Отпечаток файла для инвалидации кэша. ``None`` — файла нет (это норма)."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def invalidate_caches() -> None:
+    """
+    Сбрасывает кэш конфига и реестра.
+
+    Вызывается ПОСЛЕ собственных записей хаба (сохранение настроек,
+    регистрация стенда): на грубом mtime (FAT/сетевые диски) отпечаток файла
+    мог не измениться, и следующий GET отдал бы устаревшие данные.
+    """
+    with _CACHE_LOCK:
+        _CONFIG_CACHE.clear()
+        _REGISTRY_CACHE.clear()
+
+
 def _load_config(config_path: Path) -> HubConfig:
-    return HubConfig.load(config_path)
+    key = str(config_path)
+    stamp = _file_stamp(config_path)
+    with _CACHE_LOCK:
+        cached = _CONFIG_CACHE.get(key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+    config = HubConfig.load(config_path)
+    with _CACHE_LOCK:
+        _CONFIG_CACHE[key] = (stamp, config)
+    return config
 
 
-def _load_registry(config: HubConfig) -> Registry:
-    reg_path = Path(config.registry_path) if config.registry_path else default_registry_path()
-    return Registry.load(reg_path)
+def _registry_path_of(config: HubConfig) -> Path:
+    return Path(config.registry_path) if config.registry_path else default_registry_path()
+
+
+def _load_registry(config: HubConfig, *, fresh: bool = False) -> Registry:
+    """
+    Реестр стендов по пути из конфига — из кэша, если файл не менялся.
+
+    ``fresh=True`` обязателен для путей, которые собираются реестр МЕНЯТЬ
+    (``add_existing``/``save``): ``Registry`` — изменяемый объект, и отдавать
+    один и тот же экземпляр на мутацию и на параллельные чтения нельзя.
+    """
+    reg_path = _registry_path_of(config)
+    key = str(reg_path)
+    stamp = _file_stamp(reg_path)
+    if not fresh:
+        with _CACHE_LOCK:
+            cached = _REGISTRY_CACHE.get(key)
+            if cached is not None and cached[0] == stamp:
+                return cached[1]
+    registry = Registry.load(reg_path)
+    if not fresh:
+        with _CACHE_LOCK:
+            _REGISTRY_CACHE[key] = (stamp, registry)
+    return registry
+
+
+# --- сборка снапшота состояния стендов ---------------------------------------
+
+# Состояние пробы в ответе, когда пробы ЕЩЁ НЕ ВЫПОЛНЯЛИСЬ (ответ на
+# ``?probe=0`` либо первый заход, пока фоновый опрос не завершил круг).
+# Отдельное значение, а не "unknown": "unknown" — это честный результат
+# выполненной проверки («проверить нечем»), а здесь проверки просто не было.
+PENDING_PROBE_STATE = "pending"
+
+
+def _stand_entry(name: str, stand: Stand, status) -> dict:
+    """
+    Одна строка таблицы стендов для ``GET /api/stands``.
+
+    ``status is None`` означает «пробы не выполнялись» — все состояния
+    получают ``PENDING_PROBE_STATE``, а не выдуманный OK/DOWN.
+    """
+    status_dict = status.to_dict() if status else None
+    http_state = status.http.value if status else PENDING_PROBE_STATE
+    db_state = status.db.value if status else PENDING_PROBE_STATE
+    redis_state = status.redis.value if status else PENDING_PROBE_STATE
+    process_state = status.process.value if status else PENDING_PROBE_STATE
+    # Таблица стендов показывает каталог логов BPMkit-ПРОЕКТА
+    # (<extra["docs_folder"]>/logs, scaffold, НЕ extra["logs_path"] — тот
+    # указывает на каталог логов самого стенда) — источник "stand" здесь не
+    # запрашивается ни query-параметром, ни выбором пользователя (тот выбор —
+    # только у панели "Текущее состояние"/сплит-меню ниже).
+    logs_dir = logs_browser.resolve_logs_dir(stand, source="bpmkit")
+    logs_path = str(logs_dir) if logs_dir else (logs_browser.raw_logs_path(stand, "bpmkit") or None)
+    # Флаг для UI: доступен ли источник логов "Логи BPMkit-проекта" у ЭТОГО
+    # стенда — задан extra["docs_folder"] И каталог <docs_folder>/logs реально
+    # существует (см. logs_browser.resolve_logs_dir). Используется, чтобы
+    # дизейблить соответствующий пункт сплит-меню "Открыть папку логов".
+    bpmkit_logs_available = logs_dir is not None
+    http_url = (
+        f"http://{stand.stand_host}:{stand.stand_port}"
+        if stand.stand_host and stand.stand_port
+        else None
+    )
+    return {
+        "name": name,
+        "transport": stand.transport.value,
+        "status": status_dict,
+        "http": {"url": http_url, "state": http_state},
+        "db": {"name": stand.db_name or None, "state": db_state},
+        "redis": {"number": _redis_number(stand), "state": redis_state},
+        "process": {
+            "state": process_state,
+            "transport": stand.transport.value,
+            "logs_path": logs_path,
+        },
+        "logs": {"bpmkit_available": bpmkit_logs_available},
+    }
+
+
+def build_snapshot(config_path: Path, *, probe: bool = True) -> StatusSnapshot:
+    """
+    Собирает снапшот состояния всех стендов.
+
+    ``probe=False`` — БЕЗ единой сетевой пробы: только реестр (мгновенно,
+    сколько бы недоступных стендов в нём ни было). ``probe=True`` — полный
+    параллельный опрос через ``FederatedClient.status_all`` (может быть
+    медленным — вызывается из фонового потока поллера, не из обработчика).
+
+    ``RegistryError`` пробрасывается наружу: вызывающий (обработчик — 500,
+    поллер — снапшот с ``error``) решает, как о нём сообщить.
+    """
+    config = _load_config(config_path)
+    registry = _load_registry(config)
+    statuses = FederatedClient(registry).status_all() if probe else {}
+    stands = [_stand_entry(name, registry.get(name), statuses.get(name)) for name in registry.names()]
+    return StatusSnapshot(
+        stands=stands,
+        default=registry.default,
+        probed=probe,
+        generated_at=time.time(),
+        sources=_snapshot_sources(config_path),
+    )
+
+
+def _snapshot_sources(config_path: Path) -> tuple:
+    """
+    Отпечаток файлов, из которых собран снапшот: конфиг хаба и реестр стендов.
+
+    Сверяется при отдаче кэшированного снапшота (см. ``_api_stands``): если
+    реестр изменился, состав стендов в снапшоте уже неверен, и отдавать его
+    нельзя, каким бы свежим он ни был по времени.
+    """
+    try:
+        config = _load_config(config_path)
+        return (_file_stamp(config_path), _file_stamp(_registry_path_of(config)))
+    except (OSError, RegistryError):
+        # Не смогли снять отпечаток — считаем источники «неизвестными».
+        # Пустой кортеж не совпадёт ни с чем, и снапшот будет пересобран.
+        return ()
 
 
 def make_handler(
@@ -332,9 +588,21 @@ def make_handler(
             # токен не утекает.
             text = index_path.read_text(encoding="utf-8")
             text = text.replace("__STANDKIT_TOKEN__", inject_token or "")
+            # Тема подставляется прямо в data-theme <html> — она применяется
+            # ДО загрузки/выполнения JS, поэтому у пользователя тёмной темы нет
+            # «вспышки» светлой. Источник правды — конфиг хаба, а не
+            # localStorage браузера (см. HubConfig.theme).
+            try:
+                theme = _load_config(config_path).theme
+            except OSError:
+                theme = "auto"
+            text = text.replace("__STANDKIT_THEME__", theme)
             body = text.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # index.html НЕ кэшируем: в нём сессионный токен в <meta> и
+            # подставленная тема — обе величины меняются между запусками.
+            self.send_header("Cache-Control", "no-store")
             if set_cookie:
                 self.send_header(
                     "Set-Cookie",
@@ -348,15 +616,43 @@ def make_handler(
                 pass
 
         def _serve_static(self, rel_path: str) -> None:
+            """
+            Отдаёт файл из ``web/`` с валидаторами кэша (``ETag`` +
+            ``Last-Modified``) и умеет отвечать ``304 Not Modified`` на
+            ``If-None-Match``/``If-Modified-Since``.
+
+            Санитайзинг пути (traversal) — прежний, в ``sanitize_static_path``.
+            """
             target = _security.sanitize_static_path(web_dir, rel_path)
             if target is None:
                 self._send_json(404, {"error": "not found"})
                 return
+            try:
+                st = target.stat()
+            except OSError:
+                self._send_json(404, {"error": "not found"})
+                return
+
+            etag = _static_etag(st.st_size, st.st_mtime_ns)
+            cache_control = _static_cache_control(target)
+            last_modified = formatdate(st.st_mtime, usegmt=True)
+
+            if _is_not_modified(self.headers, etag=etag, mtime=st.st_mtime):
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Last-Modified", last_modified)
+                self.send_header("Cache-Control", cache_control)
+                self.end_headers()
+                return
+
             content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
             body = target.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("ETag", etag)
+            self.send_header("Last-Modified", last_modified)
+            self.send_header("Cache-Control", cache_control)
             self.end_headers()
             try:
                 self.wfile.write(body)
@@ -380,62 +676,119 @@ def make_handler(
 
         # --- API: стенды ---
 
-        def _api_stands(self) -> None:
-            config = _load_config(config_path)
+        def _poller(self) -> Optional[StatusPoller]:
+            """
+            Фоновый поллер сервера, если он есть.
+
+            ``make_handler`` умышленно не требует поллера: класс-обработчик
+            можно поднять и без него (тесты, встраивание) — тогда ``GET
+            /api/stands`` честно опрашивает стенды синхронно, как раньше.
+            """
+            return getattr(self.server, "status_poller", None)
+
+        # Тело ответа /api/stands: снапшот + интервал автообновления, который
+        # фронт обязан применять (настройка refresh_interval_sec долго висела
+        # в форме, ни на что не влияя, — см. app.js).
+        def _stands_payload(self, snapshot: StatusSnapshot) -> dict:
+            payload = snapshot.to_payload()
             try:
-                registry = _load_registry(config)
+                payload["refresh_interval_sec"] = _load_config(config_path).refresh_interval_sec
+            except OSError:
+                pass
+            return payload
+
+        def _api_stands(self, parsed) -> None:
+            qs = parse_qs(parsed.query)
+            raw_probe = (qs.get("probe") or ["1"])[0]
+            if raw_probe not in ("0", "1"):
+                self._send_json(400, {"error": "invalid probe (ожидается 0 или 1)"})
+                return
+            want_probe = raw_probe == "1"
+
+            poller = self._poller()
+            if want_probe:
+                if poller is not None:
+                    snapshot = poller.snapshot()
+                    # Снапшот годится, только если реестр и конфиг с момента
+                    # его сборки не менялись. Иначе состав стендов в нём уже
+                    # неверен (стенд зарегистрировали или удалили — в том
+                    # числе мимо хаба), и отдавать его нельзя: пользователь
+                    # увидел бы старый список до следующего тика поллера.
+                    if snapshot is not None and snapshot.sources == _snapshot_sources(config_path):
+                        self._send_json(200, self._stands_payload(snapshot))
+                        return
+                    if snapshot is not None:
+                        # Источники разошлись — просим поллер пересобраться
+                        # вне очереди, а сейчас отдаём мгновенный слепок с
+                        # актуальным составом и probed=false.
+                        poller.poke()
+                    # Первый круг фонового опроса ещё не завершён — не держим
+                    # браузер, отдаём мгновенный слепок реестра с probed=false.
+                    # Фронт увидит флаг и переспросит.
+                else:
+                    # Поллера нет вовсе — синхронный опрос (прежнее поведение).
+                    try:
+                        self._send_json(200, self._stands_payload(build_snapshot(config_path, probe=True)))
+                    except RegistryError as exc:
+                        self._send_json(500, {"error": str(exc)})
+                    return
+
+            try:
+                self._send_json(200, self._stands_payload(build_snapshot(config_path, probe=False)))
             except RegistryError as exc:
                 self._send_json(500, {"error": str(exc)})
+
+        def _api_events(self) -> None:
+            """
+            SSE-поток обновлений снапшота (``text/event-stream``).
+
+            Заменяет опрос ``GET /api/stands`` таймером: сервер сам присылает
+            новое состояние, как только фоновый поллер его собрал. Соединение
+            держит один поток ``ThreadingHTTPServer`` — при остановке хаба
+            поллер выставляет флаг остановки, и цикл ниже выходит.
+
+            Авторизация — та же, что у прочих ``GET /api/*`` (``EventSource``
+            не умеет слать кастомные заголовки, поэтому проверка проходит по
+            session-cookie; она HttpOnly+SameSite=Strict, cross-origin поток
+            открыть нельзя).
+            """
+            poller = self._poller()
+            if poller is None:
+                self._send_json(
+                    503,
+                    {"error": "фоновый опрос не запущен — используйте периодический GET /api/stands"},
+                )
                 return
-            client = FederatedClient(registry)
-            statuses = client.status_all()
-            stands = []
-            for name in registry.names():
-                stand = registry.get(name)
-                status = statuses.get(name)
-                status_dict = status.to_dict() if status else None
-                http_state = status.http.value if status else "unknown"
-                db_state = status.db.value if status else "unknown"
-                redis_state = status.redis.value if status else "unknown"
-                process_state = status.process.value if status else "unknown"
-                # Таблица стендов показывает каталог логов BPMkit-ПРОЕКТА
-                # (<extra["docs_folder"]>/logs, scaffold, НЕ extra["logs_path"]
-                # — тот указывает на каталог логов самого стенда) — источник
-                # "stand" здесь не запрашивается ни query-параметром, ни
-                # выбором пользователя (тот выбор — только у панели "Текущее
-                # состояние"/сплит-меню ниже).
-                logs_dir = logs_browser.resolve_logs_dir(stand, source="bpmkit")
-                logs_path = str(logs_dir) if logs_dir else (logs_browser.raw_logs_path(stand, "bpmkit") or None)
-                # Флаг для UI: доступен ли источник логов "Логи BPMkit-проекта"
-                # у ЭТОГО стенда — задан extra["docs_folder"] И каталог
-                # <docs_folder>/logs реально существует (см.
-                # logs_browser.resolve_logs_dir). Используется, чтобы
-                # дизейблить соответствующий пункт сплит-меню "Открыть папку
-                # логов" вместо того, чтобы позволять открывать несуществующий
-                # источник (см. CLAUDE.md фидбэк по кнопкам логов).
-                bpmkit_logs_available = logs_dir is not None
-                http_url = (
-                    f"http://{stand.stand_host}:{stand.stand_port}"
-                    if stand.stand_host and stand.stand_port
-                    else None
-                )
-                stands.append(
-                    {
-                        "name": name,
-                        "transport": stand.transport.value,
-                        "status": status_dict,
-                        "http": {"url": http_url, "state": http_state},
-                        "db": {"name": stand.db_name or None, "state": db_state},
-                        "redis": {"number": _redis_number(stand), "state": redis_state},
-                        "process": {
-                            "state": process_state,
-                            "transport": stand.transport.value,
-                            "logs_path": logs_path,
-                        },
-                        "logs": {"bpmkit_available": bpmkit_logs_available},
-                    }
-                )
-            self._send_json(200, {"stands": stands, "default": registry.default})
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            version = 0
+            try:
+                # Рекомендация клиенту переподключаться не чаще, чем раз в
+                # 5 секунд (браузер применяет её сам при обрыве).
+                self.wfile.write(b"retry: 5000\n\n")
+                self.wfile.flush()
+                while not poller.is_stopping():
+                    new_version, snapshot = poller.wait_for_change(version, _SSE_WAIT_SEC)
+                    if poller.is_stopping():
+                        break
+                    if new_version == version or snapshot is None:
+                        # Таймаут ожидания — heartbeat-комментарий: он же
+                        # способ УЗНАТЬ об уходе клиента (write упадёт).
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                        continue
+                    version = new_version
+                    data = json.dumps(self._stands_payload(snapshot), ensure_ascii=False)
+                    self.wfile.write(f"event: stands\ndata: {data}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError, ValueError):
+                # Клиент закрыл вкладку/оборвал соединение — штатный выход.
+                return
 
         def _api_stand_status(self, name: str) -> None:
             config = _load_config(config_path)
@@ -607,6 +960,12 @@ def make_handler(
             payload: dict = {"ok": True}
             if action in ("start", "restart") and isinstance(result, int):
                 payload["pid"] = result
+            # Состояние стенда только что изменилось — просим фоновый поллер
+            # не досыпать интервал. Сам опрос идёт в его потоке, ответ на
+            # мутацию им НЕ задерживается.
+            poller = self._poller()
+            if poller is not None:
+                poller.poke()
             self._send_json(200, payload)
 
         def _api_stand_redis_clear(self, name: str) -> None:
@@ -723,7 +1082,9 @@ def make_handler(
 
             config = _load_config(config_path)
             try:
-                registry = _load_registry(config)
+                # fresh=True — реестр сейчас будут МЕНЯТЬ, кэшированный
+                # экземпляр отдавать на мутацию нельзя (см. _load_registry).
+                registry = _load_registry(config, fresh=True)
             except RegistryError as exc:
                 self._send_json(500, {"error": str(exc)})
                 return
@@ -739,6 +1100,10 @@ def make_handler(
                 self._send_json(400, {"error": str(exc)})
                 return
 
+            invalidate_caches()
+            poller = self._poller()
+            if poller is not None:
+                poller.poke()
             self._send_json(200, {"ok": True, "name": name})
 
         # --- API: версия ---
@@ -765,6 +1130,14 @@ def make_handler(
             data.update(body)
             new_config = HubConfig.from_dict(data)
             new_config.save(config_path)
+            # Сброс кэша сразу после собственной записи — не полагаемся на
+            # разрешение mtime файловой системы (см. invalidate_caches).
+            invalidate_caches()
+            # Мог измениться refresh_interval_sec — пусть поллер перечитает
+            # его немедленно, а не после текущего (возможно, длинного) сна.
+            poller = self._poller()
+            if poller is not None:
+                poller.poke()
             self._send_json(200, new_config.to_dict())
 
         # --- API: секреты ---
@@ -862,7 +1235,17 @@ def make_handler(
             if path == "/api/stands":
                 if not self._authorize_read():
                     return
-                self._api_stands()
+                self._api_stands(parsed)
+                return
+
+            if path == "/api/events":
+                # SSE-поток. EventSource не умеет слать кастомные заголовки —
+                # авторизация проходит по session-cookie (HttpOnly+SameSite=
+                # Strict), т.е. ровно тот же _authorize_read, что и у прочих
+                # GET /api/*, без послаблений.
+                if not self._authorize_read():
+                    return
+                self._api_events()
                 return
 
             if path == "/api/settings":
@@ -1025,6 +1408,57 @@ def make_handler(
     return Handler
 
 
+def poll_interval_of(config_path: Path) -> float:
+    """
+    Желаемый период фонового опроса в секундах — ``refresh_interval_sec`` из
+    конфига хаба.
+
+    Читается ПЕРЕД каждым ожиданием поллера (см. ``StatusPoller``), поэтому
+    правка настройки применяется без перезапуска хаба. Нижняя граница —
+    забота поллера (``MIN_POLL_INTERVAL_SEC``), здесь её не дублируем.
+    Битый/недоступный конфиг не имеет права уронить фоновый поток: в этом
+    случае отдаём дефолт.
+    """
+    try:
+        return float(_load_config(config_path).refresh_interval_sec)
+    except (OSError, TypeError, ValueError):
+        return float(HubConfig().refresh_interval_sec)
+
+
+class HubHTTPServer(ThreadingHTTPServer):
+    """
+    ``ThreadingHTTPServer`` + фоновый опрос стендов.
+
+    Поллер живёт ровно столько же, сколько сам сервер: стартует после
+    успешного bind (если бы bind упал, лишний поток вообще не создавался бы) и
+    останавливается в ``server_close()``. Обработчики достают его через
+    ``self.server.status_poller`` (см. ``Handler._poller``) — атрибут может
+    быть ``None``, если сервер подняли с ``poll=False``.
+    """
+
+    daemon_threads = True
+
+    def __init__(self, server_address, handler_cls, *, config_path: Path, poll: bool = True):
+        super().__init__(server_address, handler_cls)
+        self.config_path = config_path
+        self.status_poller: Optional[StatusPoller] = None
+        if poll:
+            self.status_poller = StatusPoller(
+                build=lambda: build_snapshot(config_path, probe=True),
+                interval=lambda: poll_interval_of(config_path),
+            )
+            self.status_poller.start()
+
+    def server_close(self) -> None:
+        # Сначала гасим фоновый поток, потом закрываем сокет: иначе поллер
+        # мог бы продолжать пробы уже после «остановки» хаба.
+        poller = getattr(self, "status_poller", None)
+        if poller is not None:
+            poller.stop()
+            self.status_poller = None
+        super().server_close()
+
+
 def create_hub_server(
     host: str,
     port: int,
@@ -1033,9 +1467,10 @@ def create_hub_server(
     session_token: str,
     web_dir: Optional[Path] = None,
     insecure: bool = False,
-) -> ThreadingHTTPServer:
+    poll: bool = True,
+) -> HubHTTPServer:
     """
-    Биндит и возвращает готовый ``ThreadingHTTPServer`` (БЕЗ ``serve_forever``)
+    Биндит и возвращает готовый ``HubHTTPServer`` (БЕЗ ``serve_forever``)
     — вынесено отдельно от блокирующего запуска, чтобы вызывающая сторона
     (``standkit_hub.__main__``) могла узнать реальный порт (важно при
     ``port=0`` — эфемерный порт) ДО того, как открыть браузер, и чтобы тесты
@@ -1043,7 +1478,69 @@ def create_hub_server(
 
     Fail-closed bind-проверка (см. standkit_hub.security.validate_bind_security)
     выполняется ДО открытия сокета — как и у headless-агента.
+
+    ``poll=False`` поднимает сервер БЕЗ фонового опроса — тогда ``GET
+    /api/stands`` честно опрашивает стенды синхронно (прежнее поведение), а
+    ``GET /api/events`` отвечает 503.
     """
     _security.validate_bind_security(host, tls_enabled=False, insecure=insecure)
     handler_cls = make_handler(config_path=config_path, session_token=session_token, web_dir=web_dir)
-    return ThreadingHTTPServer((host, port), handler_cls)
+    return HubHTTPServer((host, port), handler_cls, config_path=config_path, poll=poll)
+
+
+# Коды ошибок bind'а, которые означают «порт занят/недоступен» и оправдывают
+# откат на эфемерный порт. EACCES — Windows отдаёт его, когда порт попал в
+# исключённый диапазон (netsh interface portproxy, Hyper-V) — для пользователя
+# это ровно то же «порт занять нельзя».
+_PORT_BUSY_ERRNOS = frozenset({errno.EADDRINUSE, errno.EACCES})
+
+
+def bind_hub_server(
+    host: str,
+    port: int,
+    *,
+    config_path: Path,
+    session_token: str,
+    web_dir: Optional[Path] = None,
+    insecure: bool = False,
+    poll: bool = True,
+    on_fallback: Optional[Callable[[int, OSError], None]] = None,
+) -> HubHTTPServer:
+    """
+    ``create_hub_server`` + откат на эфемерный порт, если запрошенный занят.
+
+    ЗАЧЕМ. Хаб слушает ФИКСИРОВАННЫЙ порт (``DEFAULT_HUB_PORT``), потому что
+    origin (схема+хост+порт) — ключ браузерного localStorage и HTTP-кэша:
+    на эфемерном порту каждый запуск давал новый origin, пустое хранилище и
+    холодный кэш статики. Но фиксированный порт можно и не получить (второй
+    экземпляр хаба, чужой сервис) — падать из-за этого нельзя, поэтому
+    занятый порт — не ошибка, а откат на эфемерный.
+
+    ``on_fallback(requested_port, exc)`` вызывается ПЕРЕД повторным bind'ом,
+    чтобы вызывающий (CLI) мог сообщить пользователю причину. Ошибки, не
+    связанные с занятостью порта, пробрасываются как есть — «честный отказ».
+    """
+    try:
+        return create_hub_server(
+            host,
+            port,
+            config_path=config_path,
+            session_token=session_token,
+            web_dir=web_dir,
+            insecure=insecure,
+            poll=poll,
+        )
+    except OSError as exc:
+        if port == 0 or exc.errno not in _PORT_BUSY_ERRNOS:
+            raise
+        if on_fallback is not None:
+            on_fallback(port, exc)
+        return create_hub_server(
+            host,
+            0,
+            config_path=config_path,
+            session_token=session_token,
+            web_dir=web_dir,
+            insecure=insecure,
+            poll=poll,
+        )

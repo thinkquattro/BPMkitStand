@@ -7,9 +7,13 @@
 ``http.server``. Используется только stdlib (``urllib``) — как и
 standkit_agent.server, без сторонних HTTP-клиентов.
 
-Остаточные пункты следующих итераций (параллельный опрос агентов через
-ThreadPoolExecutor вместо последовательного, кэш/дебаунс частых опросов, TLS-
-проверка сертификата агента) — см. docs/ARCHITECTURE.md и SECURITY.md.
+``status_all`` опрашивает стенды ПАРАЛЛЕЛЬНО (``ThreadPoolExecutor``): раньше
+обход был последовательным, и N недоступных стендов складывались в N × таймаут
+серого экрана. Порядок результатов при этом остаётся порядком РЕЕСТРА, а не
+порядком завершения проб — UI не должен «прыгать» строками между обновлениями.
+
+Остаточные пункты следующих итераций (TLS-проверка сертификата агента) —
+см. docs/ARCHITECTURE.md и SECURITY.md.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
@@ -48,6 +53,14 @@ def _agent_request(agent_url: str, path: str, token: str, *, method: str = "GET"
         raise RemoteCallError(agent_url, f"HTTP {exc.code}") from exc
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise RemoteCallError(agent_url, str(exc)) from exc
+
+
+# Сколько стендов опрашивается одновременно в ``FederatedClient.status_all``.
+# Каждый воркер — один стенд; внутри стенда его четыре пробы параллелятся
+# отдельно (см. standkit.health.PROBE_MAX_WORKERS). Значение подобрано так,
+# чтобы типовой реестр (единицы стендов) опрашивался за один «заход», не
+# устраивая при этом взрыв потоков на реестре в десятки записей.
+STATUS_ALL_MAX_WORKERS = 8
 
 
 class FederatedClient:
@@ -84,22 +97,39 @@ class FederatedClient:
             f"Транспорт {stand.transport.value!r} для стенда '{name}' пока не реализован (TODO)"
         )
 
+    def _status_or_error(self, name: str) -> StandStatus:
+        """
+        ``status(name)``, но ожидаемые отказы (агент недоступен, секрет не
+        задан, транспорт не реализован) превращаются в StandStatus с
+        UNKNOWN-пробами и текстом ошибки в ``details`` — чтобы один
+        недоступный стенд не ронял опрос всего реестра.
+        """
+        try:
+            return self.status(name)
+        except (RemoteCallError, SecretError, NotImplementedError) as exc:
+            return StandStatus(name=name, details={"error": str(exc)})
+
     def status_all(self) -> dict[str, StandStatus]:
         """
-        Опрашивает все стенды реестра. Ошибки отдельных стендов не прерывают
-        общий опрос — недоступный стенд получает StandStatus с UNKNOWN-пробами
-        и текстом ошибки в ``details``.
+        Опрашивает все стенды реестра ПАРАЛЛЕЛЬНО (до
+        ``STATUS_ALL_MAX_WORKERS`` одновременно). Ошибки отдельных стендов не
+        прерывают общий опрос — см. ``_status_or_error``.
 
-        Опрос агентов сейчас последовательный (бэклог — параллелизация,
-        см. докстринг модуля).
+        Порядок ключей результата — порядок РЕЕСТРА (детерминированный), а не
+        порядок завершения проб: futures собираются в том же порядке, в каком
+        были отправлены, и результат складывается в dict уже по нему.
         """
-        result: dict[str, StandStatus] = {}
-        for name in self.registry.names():
-            try:
-                result[name] = self.status(name)
-            except (RemoteCallError, SecretError, NotImplementedError) as exc:
-                result[name] = StandStatus(name=name, details={"error": str(exc)})
-        return result
+        names = self.registry.names()
+        if not names:
+            return {}
+
+        with ThreadPoolExecutor(
+            max_workers=min(STATUS_ALL_MAX_WORKERS, len(names)),
+            thread_name_prefix="standkit-status",
+        ) as pool:
+            futures = [(name, pool.submit(self._status_or_error, name)) for name in names]
+
+        return {name: future.result() for name, future in futures}
 
     def start(self, name: str) -> Optional[int]:
         """Запускает стенд. Возвращает pid, если транспорт его предоставляет (см. ``_dispatch_action``)."""

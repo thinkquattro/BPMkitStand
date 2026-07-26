@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -26,6 +27,56 @@ from standkit.registry import Registry
 from standkit_hub.config import HubConfig
 from standkit_hub.security import InsecureBindError, generate_session_token
 from standkit_hub.server import create_hub_server
+
+
+@pytest.fixture(autouse=True)
+def _close_hub_servers(monkeypatch):
+    """
+    Закрывает все хабы, поднятые тестом.
+
+    Раньше тесты оставляли серверы жить до конца сессии, и это сходило с рук:
+    без фонового опроса «забытый» хаб просто держал сокет. С появлением
+    поллера (standkit_hub/poller.py) он продолжает тикать в своём потоке и
+    дёргать модульные функции — а тесты подменяют их через monkeypatch
+    глобально. В результате чужой поллер вызывал подменённую функцию уже в
+    следующем тесте, и тот падал в зависимости от порядка запуска.
+
+    Порядок уборки важен:
+
+    1. поллеру говорим остановиться с КОРОТКИМ таймаутом — иначе каждый тест
+       платил бы до 2 секунд ожидания потока, застрявшего на сетевой пробе
+       (поток daemon, процесс он не удержит);
+    2. ``shutdown()`` — в отдельном потоке с ограничением: на сервере, где
+       ``serve_forever`` не запускали, он заблокировался бы навсегда;
+    3. ``server_close()`` — закрывает сокет. Если сделать его до shutdown,
+       ``serve_forever`` падает с WinError 10038 «операция на объекте, не
+       являющемся сокетом» и pytest сыплет предупреждениями.
+    """
+    created: list = []
+    original = create_hub_server
+
+    def _tracking(*args, **kwargs):
+        httpd = original(*args, **kwargs)
+        created.append(httpd)
+        return httpd
+
+    monkeypatch.setattr(sys.modules[__name__], "create_hub_server", _tracking)
+    monkeypatch.setattr(server_module, "create_hub_server", _tracking)
+    yield
+    for httpd in created:
+        poller = getattr(httpd, "status_poller", None)
+        if poller is not None:
+            try:
+                poller.stop(timeout=0.2)
+            except Exception:  # noqa: BLE001 - уборка не должна ронять тест
+                pass
+        stopper = threading.Thread(target=httpd.shutdown, daemon=True)
+        stopper.start()
+        stopper.join(timeout=1.0)
+        try:
+            httpd.server_close()
+        except Exception:  # noqa: BLE001 - уборка не должна ронять тест
+            pass
 
 
 def _free_port() -> int:
@@ -919,15 +970,20 @@ def test_api_stands_redis_number_falls_back_to_stand_config(tmp_path, monkeypatc
 
 
 def test_api_stands_redis_number_registry_takes_priority_over_config(tmp_path, monkeypatch):
+    """
+    Реестр в приоритете: если в нём есть ``redis_db``, конфиг стенда читаться
+    не должен вовсе.
+
+    Проверяется прямым вызовом ``_redis_number``, а не через HTTP. Утверждение
+    «функция НЕ вызывалась» плохо уживается с фоновым опросом: monkeypatch
+    подменяет функцию глобально, а поллеры хабов из соседних тестов тикают в
+    своих потоках и дёргают её же — тест падал в зависимости от порядка и
+    тайминга. HTTP-слой для этого поля покрыт соседним тестом
+    (``..._falls_back_to_stand_config``).
+    """
     registry_path = _write_registry_with_extra(tmp_path, extra={"redis_db": 3})
-    config_path = _write_config(tmp_path, registry_path=registry_path)
-    session_token = generate_session_token()
-    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
-    port = httpd.server_address[1]
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    _wait_for_port(port)
-    base_url = f"http://127.0.0.1:{port}"
+    registry = Registry.load(registry_path)
+    stand = registry.get(registry.names()[0])
 
     called = {}
 
@@ -937,10 +993,7 @@ def test_api_stands_redis_number_registry_takes_priority_over_config(tmp_path, m
 
     monkeypatch.setattr(server_module.redis_min, "resolve_redis_from_stand_config", _fake_resolve)
 
-    status, body, _ = _request(base_url, "/api/stands", token=session_token)
-    assert status == 200
-    # Реестр (db=3) в приоритете — конфиг стенда не должен даже вызываться.
-    assert body["stands"][0]["redis"]["number"] == 3
+    assert server_module._redis_number(stand) == 3
     assert "invoked" not in called
 
 

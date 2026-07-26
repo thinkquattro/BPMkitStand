@@ -38,6 +38,27 @@ _DEFAULT_LOCKOUT_MAX_FAILURES = 5
 _DEFAULT_LOCKOUT_WINDOW_SEC = 300.0
 _DEFAULT_REFRESH_INTERVAL_SEC = 10
 
+# Тема оформления дашборда. Источник правды — ИМЕННО конфиг, а не
+# localStorage браузера: localStorage привязан к origin (включая порт), а хаб
+# исторически стартовал на эфемерном порту — каждый запуск давал новый origin
+# и, как следствие, пустое хранилище («тема не запоминается»). localStorage
+# остаётся лишь клиентским кэшем, чтобы тема применилась до ответа /api/settings.
+HUB_THEMES = ("light", "dark", "auto")
+_DEFAULT_THEME = "auto"
+
+
+def normalize_theme(value: object) -> str:
+    """
+    Приводит значение темы к одному из ``HUB_THEMES``.
+
+    Неизвестное/битое значение (в т.ч. из руками правленого конфига) молча
+    откатывается на ``auto`` — тема не тот параметр, ради которого стоит
+    ронять запуск дашборда.
+    """
+    if isinstance(value, str) and value.strip().lower() in HUB_THEMES:
+        return value.strip().lower()
+    return _DEFAULT_THEME
+
 
 @dataclass
 class RemoteAgent:
@@ -79,6 +100,10 @@ class HubConfig:
     run_dir: str = ""
     log_dir: str = ""
     refresh_interval_sec: int = _DEFAULT_REFRESH_INTERVAL_SEC
+    # light | dark | auto (см. normalize_theme). Подставляется сервером прямо
+    # в атрибут data-theme отдаваемого index.html — тема применяется ДО
+    # выполнения JS, без «мигания» светлой темой у любителей тёмной.
+    theme: str = _DEFAULT_THEME
 
     # --- Федерация удалённых агентов ---
     agents: list[RemoteAgent] = field(default_factory=list)
@@ -159,6 +184,8 @@ class HubConfig:
                 continue
             if key == "agents":
                 kwargs[key] = [RemoteAgent.from_dict(a) for a in value]
+            elif key == "theme":
+                kwargs[key] = normalize_theme(value)
             else:
                 kwargs[key] = value
         return cls(**kwargs)
@@ -166,4 +193,8 @@ class HubConfig:
     def to_dict(self) -> dict:
         result = asdict(self)
         result["agents"] = [a.to_dict() for a in self.agents]
+        # Тему нормализуем и на выходе: конфиг мог быть собран напрямую
+        # конструктором (в обход from_dict), а фронт обязан получать только
+        # значение из HUB_THEMES.
+        result["theme"] = normalize_theme(result.get("theme"))
         return result

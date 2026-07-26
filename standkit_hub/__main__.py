@@ -2,8 +2,14 @@
 Точка входа веб-дашборда: ``python -m standkit_hub`` (или консольный скрипт
 ``standkit-gui``/``standkit-hub`` после установки пакета).
 
-По умолчанию хаб слушает ``127.0.0.1`` на эфемерном порту, печатает URL с
-одноразовым сессионным токеном и открывает системный браузер. Флаг
+По умолчанию хаб слушает ``127.0.0.1`` на ФИКСИРОВАННОМ порту
+``DEFAULT_HUB_PORT`` (8770), печатает URL с одноразовым сессионным токеном и
+открывает системный браузер. Фиксированный порт — осознанное решение: origin
+(схема+хост+ПОРТ) является ключом браузерного localStorage и HTTP-кэша, и на
+прежнем эфемерном порту каждый запуск давал новый origin — тема не
+запоминалась, кэш статики был вечно холодным, закладка протухала. Если порт
+занят, хаб не падает, а откатывается на эфемерный и честно об этом пишет
+(``--port 0`` — явная просьба эфемерного порта). Флаг
 ``--desktop`` — опциональная нативная оболочка через ``pywebview`` (extra
 ``standkit[desktop]``); при отсутствии пакета хаб печатает понятное
 сообщение и падает обратно в браузер, а не роняется исключением импорта.
@@ -24,7 +30,7 @@ from pathlib import Path
 
 from standkit_hub.config import HubConfig
 from standkit_hub.security import InsecureBindError, generate_session_token
-from standkit_hub.server import create_hub_server
+from standkit_hub.server import DEFAULT_HUB_PORT, bind_hub_server
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
 
 
@@ -41,8 +47,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--port",
         type=int,
-        default=0,
-        help="порт (по умолчанию 0 — эфемерный свободный порт, выбирается ОС)",
+        default=DEFAULT_HUB_PORT,
+        help=(
+            f"порт (по умолчанию {DEFAULT_HUB_PORT}; если занят — автоматический откат "
+            "на эфемерный. 0 — сразу эфемерный свободный порт, выбирается ОС)"
+        ),
     )
     parser.add_argument(
         "--config",
@@ -91,19 +100,32 @@ def main(argv: list[str] | None = None) -> int:
 
     session_token = generate_session_token()
 
+    def _report_port_busy(requested: int, exc: OSError) -> None:
+        # Печатаем ДО повторного bind'а: пользователь должен понимать, почему
+        # адрес в консоли/закладке вдруг отличается от привычного.
+        print(f"[standkit-hub] порт {requested} занят ({exc.strerror or exc}) — беру свободный", file=sys.stderr)
+
     try:
-        httpd = create_hub_server(
+        httpd = bind_hub_server(
             args.host,
             args.port,
             config_path=config_path,
             session_token=session_token,
             insecure=args.insecure,
+            on_fallback=_report_port_busy,
         )
     except InsecureBindError as exc:
         print(f"[standkit-hub] {exc}", file=sys.stderr)
         return 1
+    except OSError as exc:
+        # Порт не занят, но bind всё равно не удался (нет прав, недоступный
+        # адрес) — честный отказ с понятным текстом вместо трейсбека.
+        print(f"[standkit-hub] не удалось занять {args.host}:{args.port} — {exc}", file=sys.stderr)
+        return 1
 
     actual_port = httpd.server_address[1]
+    if args.port and actual_port != args.port:
+        print(f"[standkit-hub] порт {args.port} занят, слушаю {actual_port}")
     url = f"http://{args.host}:{actual_port}/?t={session_token}"
     print(f"[standkit-hub] дашборд слушает {args.host}:{actual_port}")
     print(f"[standkit-hub] откройте: {url}")
