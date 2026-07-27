@@ -8,7 +8,10 @@
 (схема+хост+ПОРТ) является ключом браузерного localStorage и HTTP-кэша, и на
 прежнем эфемерном порту каждый запуск давал новый origin — тема не
 запоминалась, кэш статики был вечно холодным, закладка протухала. Если порт
-занят, хаб не падает, а откатывается на эфемерный и честно об этом пишет
+занят, хаб не падает: сначала проверяет, не занял ли его НАШ ЖЕ работающий
+экземпляр (single-instance, см. ``server.probe_hub_instance``) — тогда просто
+открывает браузер на нём и выходит, не плодя второй фоновый поллер; если порт
+занял чужой сервис — откатывается на эфемерный и честно об этом пишет
 (``--port 0`` — явная просьба эфемерного порта). Флаг
 ``--desktop`` — опциональная нативная оболочка через ``pywebview`` (extra
 ``standkit[desktop]``); при отсутствии пакета хаб печатает понятное
@@ -30,7 +33,7 @@ from pathlib import Path
 
 from standkit_hub.config import HubConfig
 from standkit_hub.security import InsecureBindError, generate_session_token
-from standkit_hub.server import DEFAULT_HUB_PORT, bind_hub_server
+from standkit_hub.server import DEFAULT_HUB_PORT, HubAlreadyRunning, bind_hub_server
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
 
 
@@ -114,6 +117,22 @@ def main(argv: list[str] | None = None) -> int:
             insecure=args.insecure,
             on_fallback=_report_port_busy,
         )
+    except HubAlreadyRunning as exc:
+        # Второй запуск по ярлыку (обычный сценарий: окно браузера закрыли, а
+        # процесс под pythonw остался жить — idle-shutdown у хаба нет). Второй
+        # сервер здесь не нужен и вреден: два фоновых поллера над одним
+        # реестром плюс разъехавшийся localStorage на другом origin. Просто
+        # открываем браузер на уже работающем экземпляре.
+        #
+        # Токен в URL НЕ подставляем — у нас его нет (он сгенерирован в чужом
+        # процессе). Работающий экземпляр узнает браузер по сессионной cookie,
+        # выданной при первом открытии; если cookie не пережила полное
+        # закрытие браузера, дашборд честно скажет об этом (см. app.js,
+        # разбор 401), и достаточно перезапустить диспетчер.
+        print(f"[standkit-hub] диспетчер уже работает на {exc.host}:{exc.port} — открываю его, второй не запускаю")
+        if not args.no_browser:
+            webbrowser.open(exc.url)
+        return 0
     except InsecureBindError as exc:
         print(f"[standkit-hub] {exc}", file=sys.stderr)
         return 1

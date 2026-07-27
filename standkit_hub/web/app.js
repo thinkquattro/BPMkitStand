@@ -165,7 +165,7 @@
       } catch (e) {
         // Тема применена визуально, но не сохранена — честно говорим об этом,
         // иначе после перезагрузки пользователь молча получит прежнюю.
-        showActionStatus(`Тема применена, но не сохранена: ${e.message}`, true);
+        showActionStatus(`Тема применена, но не сохранена: ${describeApiError(e)}`, true);
       }
     });
   }
@@ -227,7 +227,7 @@
           aboutVersionLoaded = true;
         })
         .catch((e) => {
-          versionEl.textContent = `ошибка: ${e.message}`;
+          versionEl.textContent = `ошибка: ${describeApiError(e)}`;
         });
     }
   }
@@ -371,7 +371,7 @@
       const how = match.matched_by === "binding" ? "по биндингу порта" : "по каталогу сайта";
       statusEl.textContent = `Найден сайт «${match.site || "?"}» (${how}).`;
     } catch (e) {
-      statusEl.textContent = e.message;
+      statusEl.textContent = describeApiError(e);
     } finally {
       btn.disabled = false;
     }
@@ -408,7 +408,7 @@
       } catch (e) {
         // 400/409 остаются внутри модалки (не тост-прыжок) — пользователь
         // правит форму, не теряя введённые данные.
-        showRegisterFormError(e.message);
+        showRegisterFormError(describeApiError(e));
       } finally {
         submitBtn.disabled = false;
       }
@@ -762,8 +762,10 @@
       setConnStatus(true);
       return true;
     } catch (e) {
-      errorEl.textContent = `Ошибка обновления: ${e.message}`;
-      setConnStatus(false);
+      // Сетевой сбой уже подробно описан в баннере — не дублируем длинный
+      // текст ещё и в строке тулбара.
+      errorEl.textContent = isNetworkError(e) ? "" : `Ошибка обновления: ${describeApiError(e)}`;
+      setConnStatus(false, e);
       return false;
     }
   }
@@ -780,8 +782,10 @@
       applyStandsPayload(data);
       setConnStatus(true);
     } catch (e) {
-      document.getElementById("stands-error").textContent = `Ошибка обновления: ${e.message}`;
-      setConnStatus(false);
+      document.getElementById("stands-error").textContent = isNetworkError(e)
+        ? ""
+        : `Ошибка обновления: ${describeApiError(e)}`;
+      setConnStatus(false, e);
     }
     await refreshStands();
   }
@@ -960,8 +964,8 @@
       if (name === selectedStand) refreshState();
     } catch (e) {
       const label = _ACTION_LABELS[action] || action;
-      showActionStatus(`Ошибка (${label} стенда ${name}): ${e.message}`, true);
-      errorEl.textContent = `Ошибка (${name}/${action}): ${e.message}`;
+      showActionStatus(`Ошибка (${label} стенда ${name}): ${describeApiError(e)}`, true);
+      errorEl.textContent = `Ошибка (${name}/${action}): ${describeApiError(e)}`;
     }
   }
 
@@ -974,7 +978,7 @@
       const data = await apiGet(`/api/stand/${encodeURIComponent(selectedStand)}/state?source=stand`);
       document.getElementById("state-output").textContent = data.text || "";
     } catch (e) {
-      document.getElementById("state-output").textContent = `Ошибка чтения состояния: ${e.message}`;
+      document.getElementById("state-output").textContent = `Ошибка чтения состояния: ${describeApiError(e)}`;
     }
   }
 
@@ -1004,7 +1008,7 @@
         !data.ok
       );
     } catch (e) {
-      showActionStatus(`Ошибка открытия папки логов: ${e.message}`, true);
+      showActionStatus(`Ошибка открытия папки логов: ${describeApiError(e)}`, true);
     }
   }
 
@@ -1070,7 +1074,35 @@
     });
   }
 
-  function setConnStatus(ok) {
+  // Человеческий текст вместо браузерного «Failed to fetch».
+  //
+  // fetch отвергается TypeError'ом одинаково и когда процесс диспетчера убит,
+  // и когда он ещё не поднялся — различить нельзя, поэтому формулировка
+  // покрывает оба случая и говорит, что делать. Отдельно разбираем 401: он
+  // означает не «нет связи», а «сессия не подтверждена» — типично после
+  // полного закрытия браузера (сессионная cookie не пережила) или когда
+  // диспетчер перезапустили и он выдал новый токен.
+  const OFFLINE_MESSAGE =
+    "Нет связи с диспетчером — похоже, он остановлен. Данные в таблице устарели. " +
+    "Запустите диспетчер ярлыком на рабочем столе и обновите страницу.";
+  const UNAUTHORIZED_MESSAGE =
+    "Сессия дашборда не подтверждена — эта вкладка открыта от прежнего запуска диспетчера. " +
+    "Запустите диспетчер ярлыком на рабочем столе и откройте дашборд заново.";
+
+  function isNetworkError(e) {
+    // TypeError — то, чем fetch отвергается при недоступном сервере. Статус на
+    // объекте ошибки проставляет только handleResponse, то есть его наличие
+    // означает, что сервер ответил и это не сетевой сбой.
+    return e instanceof TypeError && e.status === undefined;
+  }
+
+  function describeApiError(e) {
+    if (isNetworkError(e)) return OFFLINE_MESSAGE;
+    if (e && e.status === 401) return UNAUTHORIZED_MESSAGE;
+    return e && e.message ? e.message : String(e);
+  }
+
+  function setConnStatus(ok, error) {
     // Понятный индикатор связи с хабом: цветная точка + короткая подпись.
     // Раньше здесь было одинокое "…" — его путали с неактивным "меню из
     // трёх точек". До первого ответа (см. init/index.html) точка серая и
@@ -1082,6 +1114,20 @@
     dotEl.classList.add(ok ? "conn-status-dot-ok" : "conn-status-dot-down");
     labelEl.textContent = ok ? "онлайн" : "нет связи";
     wrapEl.title = ok ? "Связь с хабом установлена" : "Нет связи с хабом";
+
+    // Точки в углу мало: пока связи нет, таблица продолжает показывать
+    // последний успешный снапшот, и «Работает» из кэша неотличимо от свежего.
+    // Поэтому — заметный баннер плюс гашение таблицы через класс на <body>.
+    const banner = document.getElementById("offline-banner");
+    if (banner) {
+      if (ok) {
+        banner.hidden = true;
+      } else {
+        document.getElementById("offline-banner-text").textContent = describeApiError(error);
+        banner.hidden = false;
+      }
+    }
+    document.body.classList.toggle("hub-offline", !ok);
   }
 
   // --- интервал автообновления ---
@@ -1235,7 +1281,7 @@
       const data = await apiGet("/api/agent/status");
       el.textContent = data.running ? "запущен" : "остановлен";
     } catch (e) {
-      el.textContent = `ошибка: ${e.message}`;
+      el.textContent = `ошибка: ${describeApiError(e)}`;
     }
   }
 
@@ -1247,7 +1293,7 @@
         await apiSend("POST", "/api/agent/start");
         await refreshAgentStatus();
       } catch (e) {
-        errorEl.textContent = e.message;
+        errorEl.textContent = describeApiError(e);
       }
     });
     document.getElementById("agent-stop-btn").addEventListener("click", async () => {
@@ -1257,7 +1303,7 @@
         await apiSend("POST", "/api/agent/stop");
         await refreshAgentStatus();
       } catch (e) {
-        errorEl.textContent = e.message;
+        errorEl.textContent = describeApiError(e);
       }
     });
   }
@@ -1493,7 +1539,7 @@
         statusEl.textContent = data.has_secret ? "секрет задан" : "секрет НЕ задан";
         statusEl.style.color = data.has_secret ? "var(--bpmkit-ok)" : "var(--bpmkit-down)";
       } catch (e) {
-        statusEl.textContent = `ошибка: ${e.message}`;
+        statusEl.textContent = `ошибка: ${describeApiError(e)}`;
       }
     }
   }
@@ -1537,7 +1583,7 @@
         applyRefreshInterval(saved && saved.refresh_interval_sec);
         await refreshSecretStatuses();
       } catch (e) {
-        statusEl.textContent = `Ошибка сохранения: ${e.message}`;
+        statusEl.textContent = `Ошибка сохранения: ${describeApiError(e)}`;
       }
     });
 
@@ -1563,7 +1609,7 @@
           await apiSend("POST", `/api/secret/${encodeURIComponent(ref)}`, { value });
           await refreshSecretStatuses();
         } catch (e) {
-          window.alert(`Не удалось задать секрет: ${e.message}`);
+          window.alert(`Не удалось задать секрет: ${describeApiError(e)}`);
         }
       });
     });
@@ -1574,7 +1620,7 @@
         const data = await apiSend("POST", "/api/shortcut/install");
         statusEl.textContent = data.message;
       } catch (e) {
-        statusEl.textContent = `Ошибка: ${e.message}`;
+        statusEl.textContent = `Ошибка: ${describeApiError(e)}`;
       }
     });
   }
@@ -1599,7 +1645,7 @@
     setupEventStream();
     refreshAgentStatus();
     loadSettings().catch((e) => {
-      document.getElementById("settings-status").textContent = `Ошибка загрузки настроек: ${e.message}`;
+      document.getElementById("settings-status").textContent = `Ошибка загрузки настроек: ${describeApiError(e)}`;
     });
 
     // Стартовый период — дефолтный; реальный refresh_interval_sec приедет с

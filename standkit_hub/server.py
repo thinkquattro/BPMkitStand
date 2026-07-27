@@ -86,6 +86,10 @@ from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_sh
 # см. ``bind_hub_server``: откат на эфемерный с явным сообщением, а не падение.
 DEFAULT_HUB_PORT = 8770
 
+# Заголовок-опознаватель хаба, который ставится на КАЖДЫЙ ответ (см.
+# ``Handler.end_headers``) и читается ``probe_hub_instance``.
+HUB_IDENTITY_HEADER = "X-Standkit-Hub"
+
 _STAND_ACTION_RE = re.compile(
     r"^/api/stand/(?P<name>[^/]+)/(?P<action>status|logs|start|stop|restart|adopt|state|redis-clear)$"
 )
@@ -552,6 +556,17 @@ def make_handler(
             # стандартный access-лог http.server в stderr всё равно приглушаем,
             # чтобы не шуметь секретными путями (/api/secret/<ref>) в консоли.
             pass
+
+        def end_headers(self) -> None:
+            # Метка «здесь живой standkit-hub» на КАЖДОМ ответе, включая 401 и
+            # 404. Нужна single-instance проверке (см. probe_hub_instance):
+            # второй запуск по ярлыку должен отличить свой уже работающий
+            # экземпляр от чужого сервиса, занявшего порт, НЕ предъявляя
+            # токена — а значит, судить можно только по неаутентифицированному
+            # ответу. Версия в значении — диагностика, не контракт: сравнивать
+            # её не нужно, важен сам факт заголовка.
+            self.send_header(HUB_IDENTITY_HEADER, _standkit_version)
+            super().end_headers()
 
         def _send_json(self, code: int, payload: dict) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1713,6 +1728,73 @@ def create_hub_server(
 _PORT_BUSY_ERRNOS = frozenset({errno.EADDRINUSE, errno.EACCES})
 
 
+def probe_hub_instance(host: str, port: int, *, timeout: float = 1.5) -> Optional[str]:
+    """
+    Отвечает ли на ``host:port`` уже работающий standkit-hub?
+
+    Возвращает строку версии из заголовка ``X-Standkit-Hub`` либо ``None``,
+    если порт занят чем-то другим (или не отвечает вовремя).
+
+    ЗАЧЕМ. Ярлык на рабочем столе запускает хаб через ``pythonw.exe`` — без
+    консоли. Закрытие окна браузера НЕ останавливает процесс (сервер живёт в
+    ``serve_forever``, idle-shutdown нет), поэтому повторный клик по ярлыку
+    раньше поднимал ВТОРОЙ экземпляр: порт 8770 занят → откат на эфемерный →
+    два фоновых поллера дёргают health-пробы и ``subprocess`` бэкендов
+    хостинга над одним ``projects.json``, а origin у второго окна другой, то
+    есть своя копия localStorage. Сообщение об откате уходило в ``stderr``,
+    которого при ``pythonw`` никто не видит.
+
+    Запрос НАМЕРЕННО неаутентифицированный: сессионного токена работающего
+    экземпляра у нас нет и быть не может. Поэтому опознание идёт по
+    заголовку, который хаб ставит на любой ответ, включая 401 — отдавать
+    токен или иную чувствительную информацию в обмен на «постучались с
+    loopback» нельзя, это был бы обход аутентификации.
+
+    Сетевые ошибки здесь не исключение, а нормальный ответ «не хаб»: чужой
+    сервис может рвать соединение, отвечать мусором или молчать. Любой сбой
+    трактуем консервативно — ``None``, то есть «не наш», и вызывающий уходит
+    в прежний откат на эфемерный порт.
+    """
+    import http.client
+
+    conn = None
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        # HEAD, а не GET: опознавательный заголовок есть и здесь, а тело
+        # (index.html целиком) читать незачем.
+        conn.request("HEAD", "/")
+        resp = conn.getresponse()
+        value = resp.getheader(HUB_IDENTITY_HEADER)
+        return value or None
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+class HubAlreadyRunning(RuntimeError):
+    """
+    На запрошенном порту уже работает standkit-hub.
+
+    Не ошибка в привычном смысле, а сигнал вызывающему (CLI): второй процесс
+    поднимать не нужно, надо открыть браузер на уже работающем экземпляре.
+    """
+
+    def __init__(self, host: str, port: int, version: Optional[str] = None) -> None:
+        self.host = host
+        self.port = port
+        self.version = version
+        super().__init__(f"диспетчер уже работает на {host}:{port}")
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}/"
+
+
 def bind_hub_server(
     host: str,
     port: int,
@@ -1723,6 +1805,7 @@ def bind_hub_server(
     insecure: bool = False,
     poll: bool = True,
     on_fallback: Optional[Callable[[int, OSError], None]] = None,
+    single_instance: bool = True,
 ) -> HubHTTPServer:
     """
     ``create_hub_server`` + откат на эфемерный порт, если запрошенный занят.
@@ -1737,7 +1820,29 @@ def bind_hub_server(
     ``on_fallback(requested_port, exc)`` вызывается ПЕРЕД повторным bind'ом,
     чтобы вызывающий (CLI) мог сообщить пользователю причину. Ошибки, не
     связанные с занятостью порта, пробрасываются как есть — «честный отказ».
+
+    ``single_instance=True`` (по умолчанию): перед bind'ом проверяем, не занял
+    ли порт НАШ ЖЕ работающий хаб (см. ``probe_hub_instance``) — если да,
+    второй экземпляр не поднимается, бросается ``HubAlreadyRunning``, и CLI
+    просто открывает браузер на уже работающем. Откат на эфемерный остаётся
+    для случая «порт занял чужой сервис»: тогда второй хаб действительно нужен.
+    ``single_instance=False`` возвращает прежнее безусловное поведение и
+    нужен тестам, которым надо поднять два хаба подряд.
     """
+    # Проверка ДО bind'а, а не в обработчике OSError — и это принципиально.
+    # ``ThreadingHTTPServer.allow_reuse_address = 1`` (SO_REUSEADDR), а на
+    # Windows SO_REUSEADDR разрешает второму процессу занять УЖЕ слушаемый
+    # порт: bind проходит успешно, EADDRINUSE не возникает, и два хаба
+    # оказываются на одном 8770 — входящие соединения распределяются между
+    # ними непредсказуемо. То есть на Windows отката на эфемерный порт даже не
+    # случалось, было тихое раздвоение (обнаружено тестом
+    # tests/test_hub_single_instance.py). Единственный переносимый способ
+    # узнать правду — постучаться и посмотреть, кто ответит.
+    if single_instance and port != 0:
+        running = probe_hub_instance(host, port)
+        if running is not None:
+            raise HubAlreadyRunning(host, port, running)
+
     try:
         return create_hub_server(
             host,
