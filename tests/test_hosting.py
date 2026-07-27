@@ -119,13 +119,34 @@ def test_kestrel_backend_start_delegates_to_private_kestrel_start(monkeypatch):
 
 def test_kestrel_backend_stop_delegates_to_private_kestrel_stop(monkeypatch):
     calls = {}
-    monkeypatch.setattr(lifecycle, "_kestrel_stop", lambda stand, *, run_dir=None: calls.setdefault("ok", True) or True)
+
+    def _fake(stand, *, run_dir=None, force=False):
+        calls["force"] = force
+        return True
+
+    monkeypatch.setattr(lifecycle, "_kestrel_stop", _fake)
     assert KestrelBackend().stop(_make_stand(), run_dir="RD") is True
-    assert calls["ok"] is True
+    assert calls["force"] is False
+
+
+def test_kestrel_backend_stop_passes_force_through(monkeypatch):
+    # force (согласие на усыновление стенда, поднятого вне диспетчера) обязан
+    # доезжать до kestrel-пути, иначе подтверждение пользователя теряется.
+    calls = {}
+
+    def _fake(stand, *, run_dir=None, force=False):
+        calls["force"] = force
+        return True
+
+    monkeypatch.setattr(lifecycle, "_kestrel_stop", _fake)
+    assert KestrelBackend().stop(_make_stand(), force=True) is True
+    assert calls["force"] is True
 
 
 def test_kestrel_backend_restart_delegates_to_private_kestrel_restart(monkeypatch):
-    monkeypatch.setattr(lifecycle, "_kestrel_restart", lambda stand, *, run_dir=None, log_dir=None: 999)
+    monkeypatch.setattr(
+        lifecycle, "_kestrel_restart", lambda stand, *, run_dir=None, log_dir=None, force=False: 999
+    )
     assert KestrelBackend().restart(_make_stand()) == 999
 
 

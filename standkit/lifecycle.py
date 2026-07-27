@@ -11,9 +11,17 @@ standkit_agent) можно было понять, жив ли стенд и ка
 standkit_agent — этот модуль намеренно не содержит сетевого кода (см.
 standkit_gui.client).
 
+Стенд, поднятый МИМО диспетчера (руками из консоли, скриптом, чужой сессией),
+pidfile не имеет — раньше это означало «остановить нечем». Теперь есть
+усыновление (см. ``standkit.adopt``): ``stop`` ищет владельца порта, валидирует
+его и — ТОЛЬКО с явного согласия вызывающей стороны (``force=True``) — пишет
+pidfile, после чего дальше работает прежний код без изменений. Без согласия
+бросается ``AdoptionRequired`` с найденным кандидатом: молча убивать процесс,
+найденный по порту, нельзя ни при каких условиях.
+
 Остаточные пункты следующих итераций (polling готовности после start,
-блокировка pidfile от гонки, восстановление «потерянного» pidfile) —
-см. docs/ARCHITECTURE.md, раздел «Что уже реализовано в каркасе vs TODO».
+блокировка pidfile от гонки) — см. docs/ARCHITECTURE.md, раздел «Что уже
+реализовано в каркасе vs TODO».
 """
 
 from __future__ import annotations
@@ -39,6 +47,37 @@ _DEFAULT_STARTUP_CHECK_DELAY = 0.6
 
 class LifecycleError(Exception):
     """Ошибки управления жизненным циклом стенда."""
+
+
+class AdoptionUnavailable(LifecycleError):
+    """
+    Усыновить стенд нечем: владелец порта не найден либо не прошёл валидацию
+    (см. ``standkit.adopt.validate_candidate``).
+
+    Отдельный тип нужен вызывающей стороне, чтобы отличить «кандидата нет»
+    (хаб отвечает 404 на ``POST /api/stand/<name>/adopt``) от «кандидат есть,
+    но нужно подтверждение» (``AdoptionRequired``).
+    """
+
+
+class AdoptionRequired(LifecycleError):
+    """
+    Найден валидный кандидат на усыновление — требуется ЯВНОЕ согласие
+    пользователя, прежде чем диспетчер возьмёт процесс под управление и
+    остановит его.
+
+    ``candidate`` (``standkit.adopt.AdoptCandidate``) прокидывается наверх,
+    чтобы UI показал, что именно предлагается убить: pid, образ, каталог.
+    """
+
+    def __init__(self, stand_name: str, candidate):
+        self.stand_name = stand_name
+        self.candidate = candidate
+        super().__init__(
+            f"стенд '{stand_name}' запущен вне диспетчера. Найден процесс "
+            f"{candidate.describe()}. Требуется подтверждение, чтобы взять его "
+            "под управление и остановить."
+        )
 
 
 def pidfile_path(stand: Stand, run_dir: Optional[Path] = None) -> Path:
@@ -131,11 +170,19 @@ def start(
     return backend.start(stand, run_dir=run_dir, log_dir=log_dir)
 
 
-def stop(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
-    """Останавливает стенд, если он запущен. Диспетчер по ``stand.host_kind`` (см. ``start``)."""
+def stop(stand: Stand, *, run_dir: Optional[Path] = None, force: bool = False) -> bool:
+    """
+    Останавливает стенд, если он запущен. Диспетчер по ``stand.host_kind`` (см. ``start``).
+
+    ``force=True`` — согласие пользователя на усыновление стенда, поднятого вне
+    диспетчера (см. ``_kestrel_stop``). Для iis/docker/k8s флаг не нужен и
+    игнорируется: там объект управления глобальный (сайт IIS, контейнер,
+    деплоймент), а не дочерний процесс, и остановка работает независимо от
+    того, кто стенд поднял.
+    """
     _require_local(stand)
     if stand.host_kind == HostKind.KESTREL:
-        return _kestrel_stop(stand, run_dir=run_dir)
+        return _kestrel_stop(stand, run_dir=run_dir, force=force)
     from standkit import hosting as _hosting  # локальный импорт — избегаем цикла
 
     backend = _hosting.get_backend(stand)
@@ -143,16 +190,63 @@ def stop(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
 
 
 def restart(
-    stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None
+    stand: Stand,
+    *,
+    run_dir: Optional[Path] = None,
+    log_dir: Optional[Path] = None,
+    force: bool = False,
 ) -> Optional[int]:
     """Останавливает (если жив) и заново запускает стенд. Диспетчер по ``stand.host_kind``."""
     _require_local(stand)
     if stand.host_kind == HostKind.KESTREL:
-        return _kestrel_restart(stand, run_dir=run_dir, log_dir=log_dir)
+        return _kestrel_restart(stand, run_dir=run_dir, log_dir=log_dir, force=force)
     from standkit import hosting as _hosting  # локальный импорт — избегаем цикла
 
     backend = _hosting.get_backend(stand)
     return backend.restart(stand, run_dir=run_dir, log_dir=log_dir)
+
+
+def adopt(stand: Stand, *, run_dir: Optional[Path] = None):
+    """
+    Берёт под управление стенд, запущенный вне диспетчера: находит владельца
+    порта ``stand.stand_port``, валидирует его (см.
+    ``standkit.adopt.validate_candidate``) и записывает pidfile. Дальше стенд
+    для диспетчера ничем не отличается от запущенного им самим.
+
+    Возвращает усыновлённого ``AdoptCandidate``. Бросает:
+      - ``AdoptionUnavailable`` — владельца порта определить не удалось;
+      - ``LifecycleError`` — владелец найден, но это не процесс этого стенда
+        (внятный текст с pid и путём — см. ``validate_candidate``);
+      - ``LifecycleError`` — стенд не kestrel/не local (усыновлять нечего).
+
+    Процесс при этом НЕ останавливается: усыновление — отдельный шаг,
+    остановка — уже обычный ``stop``.
+    """
+    _require_local(stand)
+    if stand.host_kind != HostKind.KESTREL:
+        raise LifecycleError(
+            f"стенд '{stand.name}': усыновление применимо только к host_kind=kestrel — "
+            f"для {stand.host_kind.value!r} объект управления глобальный "
+            "(сайт IIS/контейнер/деплоймент), pidfile ему не нужен"
+        )
+    candidate = _adoption_candidate(stand)
+    _write_pid(pidfile_path(stand, run_dir), candidate.pid)
+    return candidate
+
+
+def is_managed(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+    """
+    True, если стенд находится ПОД УПРАВЛЕНИЕМ диспетчера — есть живой pidfile.
+
+    Отличается от ``is_running``: стенд может быть жив (порт отвечает), но
+    поднят мимо диспетчера — тогда ``is_running`` (для kestrel по pidfile)
+    и этот флаг оба дадут False, а health-проба покажет OK. Хаб по этой
+    разнице рисует бейдж «вне диспетчера».
+    """
+    if stand.transport != Transport.LOCAL or stand.host_kind != HostKind.KESTREL:
+        return True  # для agent/iis/docker/k8s понятия «pidfile диспетчера» нет
+    pid = _read_pid(pidfile_path(stand, run_dir))
+    return pid is not None and _platform.is_alive(pid)
 
 
 def is_running(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
@@ -224,8 +318,40 @@ def _kestrel_start(
     return pid
 
 
-def _kestrel_stop(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+def _adoption_candidate(stand: Stand):
+    """
+    Находит и валидирует владельца порта стенда. Возвращает
+    ``standkit.adopt.AdoptCandidate`` либо бросает ``LifecycleError`` с
+    понятным текстом.
+
+    Импорт ``standkit.adopt`` локальный: он тянет ``standkit.hosting`` за
+    декодированием вывода внешних команд, а тот — обратно ``lifecycle``.
+    """
+    from standkit import adopt as _adopt  # локальный импорт — избегаем цикла
+
+    candidate = _adopt.find_candidate(stand)
+    if candidate is None:
+        raise AdoptionUnavailable(
+            f"стенд '{stand.name}' запущен вне диспетчера, но определить процесс, "
+            f"который слушает порт {stand.stand_port}, не удалось (нет прав на чужой "
+            "процесс либо в системе нет netstat/ss/lsof). Остановите процесс вручную."
+        )
+    ok, reason = _adopt.validate_candidate(stand, candidate)
+    if not ok:
+        raise LifecycleError(f"стенд '{stand.name}': {reason}")
+    return candidate
+
+
+def _kestrel_stop(stand: Stand, *, run_dir: Optional[Path] = None, force: bool = False) -> bool:
     """Останавливает стенд, если он запущен. Возвращает True при успешной остановке.
+
+    Если pidfile нет (или он «протух» — процесс из него мёртв), а стенд при этом
+    РЕАЛЬНО жив (отвечает TCP-порт), включается усыновление:
+
+      - ищем и валидируем владельца порта (см. ``_adoption_candidate``);
+      - ``force=False`` — бросаем ``AdoptionRequired`` с кандидатом наверх, чтобы
+        пользователь подтвердил. Процесс НЕ трогаем;
+      - ``force=True`` — записываем pidfile и дальше идём обычным путём.
 
     Приватная функция kestrel-пути — см. ``_kestrel_start``.
     """
@@ -233,19 +359,32 @@ def _kestrel_stop(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
 
     pf = pidfile_path(stand, run_dir)
     pid = _read_pid(pf)
+    if pid is not None and not _platform.is_alive(pid):
+        # Протухший pidfile (процесс из него давно мёртв) — не даём ему увести
+        # нас в _platform.stop() по чужому/переиспользованному pid. Удаляем и
+        # действуем так, будто pidfile не было: возможно, стенд перезапустили
+        # руками, и его нужно усыновить заново.
+        try:
+            pf.unlink(missing_ok=True)
+        except OSError:
+            pass
+        pid = None
+
     if pid is None:
-        # Нет pidfile — стенд не запускался диспетчером. Если он при этом
-        # РЕАЛЬНО жив (отвечает TCP-порт), честно отказываем, а не делаем вид,
-        # что остановили: pid чужого процесса нам неизвестен, убить его нечем.
         from standkit import health as _health  # локальный импорт — избегаем цикла
 
-        if stand.stand_host and stand.stand_port and _health.tcp_open(stand.stand_host, stand.stand_port):
-            raise LifecycleError(
-                f"стенд '{stand.name}' запущен не диспетчером (нет pidfile {pf}) — его pid "
-                f"неизвестен, поэтому остановить его я не могу. Остановите процесс вручную "
-                f"либо перезапустите стенд через диспетчер, чтобы он взял процесс под контроль."
-            )
-        return True  # действительно ничего не запущено — останавливать нечего
+        if not (
+            stand.stand_host
+            and stand.stand_port
+            and _health.tcp_open(stand.stand_host, stand.stand_port)
+        ):
+            return True  # действительно ничего не запущено — останавливать нечего
+
+        candidate = _adoption_candidate(stand)
+        if not force:
+            raise AdoptionRequired(stand.name, candidate)
+        _write_pid(pf, candidate.pid)
+        pid = candidate.pid
 
     stopped = _platform.stop(pid)
     if stopped:
@@ -257,13 +396,21 @@ def _kestrel_stop(stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
 
 
 def _kestrel_restart(
-    stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None
+    stand: Stand,
+    *,
+    run_dir: Optional[Path] = None,
+    log_dir: Optional[Path] = None,
+    force: bool = False,
 ) -> int:
     """Останавливает (если жив) и заново запускает стенд. Возвращает новый pid.
 
+    ``force`` прокидывается в ``_kestrel_stop``: рестарт стенда, поднятого вне
+    диспетчера, тоже требует явного согласия на усыновление (иначе рестарт
+    падал бы вместе со stop — ровно тот симптом, ради которого всё затевалось).
+
     Приватная функция kestrel-пути — см. ``_kestrel_start``.
     """
-    _kestrel_stop(stand, run_dir=run_dir)
+    _kestrel_stop(stand, run_dir=run_dir, force=force)
     return _kestrel_start(stand, run_dir=run_dir, log_dir=log_dir)
 
 

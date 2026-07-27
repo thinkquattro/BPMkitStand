@@ -72,7 +72,13 @@
     }
     if (!resp.ok) {
       const message = (data && data.error) || `HTTP ${resp.status}`;
-      throw new Error(message);
+      const error = new Error(message);
+      // Тело ошибки прокидываем на объекте Error: 409 на Стоп/Рестарт несёт
+      // описание найденного процесса (adopt_required/candidate), без которого
+      // нельзя показать осмысленное подтверждение усыновления.
+      error.status = resp.status;
+      error.data = data;
+      throw error;
     }
     return data;
   }
@@ -276,6 +282,7 @@
     const form = document.getElementById("register-form");
     form.reset();
     showRegisterFormError("");
+    document.getElementById("iis-detect-status").textContent = "";
     updateRegisterConditionalFields();
     overlay.hidden = false;
     form.elements.namedItem("name").focus();
@@ -338,9 +345,43 @@
     });
   }
 
+  // Кнопка «Определить автоматически» для host_kind=iis: спрашивает сервер,
+  // какой IIS-сайт соответствует введённым каталогу/порту (POST /api/iis/detect),
+  // и заполняет iis_site/iis_app_pool. Пользователь всегда может исправить
+  // подставленные значения — это подсказка, а не автоматика вместо него.
+  async function detectIisSite(form) {
+    const statusEl = document.getElementById("iis-detect-status");
+    const btn = document.getElementById("iis-detect-btn");
+    const standDir = form.elements.namedItem("stand_dir").value.trim();
+    const standPort = form.elements.namedItem("stand_port").value.trim();
+    if (!standDir) {
+      statusEl.textContent = "Сначала укажите каталог стенда (stand_dir).";
+      return;
+    }
+    btn.disabled = true;
+    statusEl.textContent = "Ищем сайт в IIS…";
+    try {
+      const data = await apiSend("POST", "/api/iis/detect", {
+        stand_dir: standDir,
+        stand_port: standPort ? Number(standPort) : 0,
+      });
+      const match = (data && data.match) || {};
+      if (match.site) form.elements.namedItem("iis_site").value = match.site;
+      if (match.app_pool) form.elements.namedItem("iis_app_pool").value = match.app_pool;
+      const how = match.matched_by === "binding" ? "по биндингу порта" : "по каталогу сайта";
+      statusEl.textContent = `Найден сайт «${match.site || "?"}» (${how}).`;
+    } catch (e) {
+      statusEl.textContent = e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   function setupRegisterModal() {
     const overlay = document.getElementById("register-modal-overlay");
     const form = document.getElementById("register-form");
+
+    document.getElementById("iis-detect-btn").addEventListener("click", () => detectIisSite(form));
 
     document.getElementById("register-stand-btn").addEventListener("click", openRegisterModal);
     document.getElementById("register-modal-close-btn").addEventListener("click", closeRegisterModal);
@@ -647,11 +688,29 @@
     });
   }
 
+  // Бейдж «вне диспетчера»: стенд жив, но поднят мимо диспетчера (нет живого
+  // pidfile), поэтому Стоп/Рестарт по нему потребуют усыновления — см.
+  // /api/stands::process.external и onStandAction. Показываем ДО нажатия
+  // кнопок, чтобы состояние не выяснялось методом получения отказа.
+  const ICON_EXTERNAL_TITLE =
+    "Стенд запущен вне диспетчера: pid неизвестен. Стоп/Рестарт спросят подтверждение, " +
+    "чтобы взять процесс под управление.";
+
   function processCell(s) {
     if (startingStands.has(s.name)) {
       return '<span class="process-starting"><span class="mini-spinner" aria-hidden="true"></span>Запускается…</span>';
     }
-    return processBadge(s.process ? s.process.state : "unknown");
+    const process = s.process || {};
+    let html = processBadge(process.state);
+    if (process.reason) {
+      // Причина от бэкенда хостинга (IIS: сайт/пул остановлен, порт держит
+      // http.sys) — иначе наружу уходил бы один неинформативный "down".
+      html = `<span title="${escapeAttr(process.reason)}">${html}</span>`;
+    }
+    if (process.external) {
+      html += ` <span class="badge badge-external" title="${escapeAttr(ICON_EXTERNAL_TITLE)}">вне диспетчера</span>`;
+    }
+    return html;
   }
 
   function actionButtons(s) {
@@ -817,6 +876,32 @@
 
   const _ACTION_LABELS = { start: "старт", stop: "остановка", restart: "рестарт", "redis-clear": "очистка Redis" };
 
+  // --- усыновление стенда, поднятого вне диспетчера ---
+  //
+  // Сервер на Стоп/Рестарт такого стенда отвечает 409 с описанием найденного
+  // процесса (adopt_required + candidate) и НИЧЕГО не убивает. Пользователь
+  // видит, что именно предлагается остановить (pid, образ, каталог), и только
+  // после явного согласия запрос повторяется с ?force=1. Молчаливого kill нет
+  // ни на одной ветке — это требование безопасности, а не UX-украшение.
+
+  function describeCandidate(candidate) {
+    if (!candidate) return "";
+    const parts = [`PID ${candidate.pid}`];
+    if (candidate.image) parts.push(candidate.image);
+    const where = candidate.cwd || candidate.exe_path || candidate.cmdline;
+    if (where) parts.push(`каталог ${where}`);
+    return parts.join(", ");
+  }
+
+  async function confirmAdoption(name, action, candidate) {
+    const what = action === "restart" ? "перезапустить" : "остановить";
+    return styledConfirm(
+      "Стенд запущен вне диспетчера",
+      `Стенд ${name} поднят не диспетчером. Найден процесс ${describeCandidate(candidate)}. ` +
+        `Взять его под управление и ${what}?`
+    );
+  }
+
   async function onStandAction(name, action) {
     if (action === "stop") {
       const confirmed = await styledConfirm("Остановка стенда", `Остановить стенд ${name}?`);
@@ -844,7 +929,21 @@
     }
 
     try {
-      const data = await apiSend("POST", `/api/stand/${encodeURIComponent(name)}/${action}`);
+      let data;
+      try {
+        data = await apiSend("POST", `/api/stand/${encodeURIComponent(name)}/${action}`);
+      } catch (e) {
+        // 409 «нужно усыновление»: спрашиваем и, если согласились, повторяем
+        // ровно тот же запрос с ?force=1. Отказ — тихий выход без ошибки.
+        const payload = e.data;
+        if (!payload || !payload.adopt_required) throw e;
+        const confirmed = await confirmAdoption(name, action, payload.candidate);
+        if (!confirmed) return;
+        data = await apiSend(
+          "POST",
+          `/api/stand/${encodeURIComponent(name)}/${action}?force=1`
+        );
+      }
       const pidSuffix = data && typeof data.pid === "number" ? ` (pid ${data.pid})` : "";
       if (action === "start") {
         startingStands.set(name, Date.now());

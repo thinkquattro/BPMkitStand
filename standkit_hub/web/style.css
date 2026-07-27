@@ -807,6 +807,26 @@ button:disabled {
   }
 }
 
+/* «вне диспетчера» — стенд жив, но поднят мимо диспетчера (нет pidfile).
+   Не авария (поэтому не красный) и не норма (поэтому не зелёный): контурный
+   предупреждающий бейдж рядом с обычным up/down. */
+.badge-external {
+  background: transparent;
+  color: var(--bpmkit-unknown);
+  border: 1px solid var(--bpmkit-unknown);
+  font-weight: 500;
+  cursor: help;
+}
+
+/* Строка кнопки «Определить автоматически» в форме регистрации (host_kind=iis). */
+.iis-detect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
 .row-actions button {
   margin-right: 4px;
   padding: 4px 8px;

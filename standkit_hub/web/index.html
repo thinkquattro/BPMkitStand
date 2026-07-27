@@ -147,6 +147,11 @@
             </label>
           </div>
 
+          <!-- Стенд, развёрнутый в IIS мимо диспетчера, в реестре не имеет ни
+               iis_site, ни iis_app_pool — руками их искать в консоли IIS
+               неудобно. Кнопка сопоставляет каталог стенда (physical path) и
+               порт (биндинг) с реальными сайтами через appcmd — см.
+               POST /api/iis/detect и standkit.hosting.detect_iis_site. -->
           <div class="register-conditional" data-when-host-kind="iis" hidden>
             <label>IIS-сайт (iis_site)
               <input type="text" name="iis_site" />
@@ -154,6 +159,10 @@
             <label>Пул приложений (iis_app_pool)
               <input type="text" name="iis_app_pool" />
             </label>
+            <div class="iis-detect-row">
+              <button type="button" id="iis-detect-btn" class="secondary">Определить автоматически</button>
+              <span id="iis-detect-status" class="status-text"></span>
+            </div>
           </div>
 
           <div class="register-conditional" data-when-host-kind="docker" hidden>
