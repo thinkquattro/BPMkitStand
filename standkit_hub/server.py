@@ -1151,7 +1151,13 @@ def make_handler(
 
         def _api_settings_get(self) -> None:
             config = _load_config(config_path)
-            self._send_json(200, config.to_dict())
+            payload = config.to_dict()
+            # Отдельным ключом — фактические значения по умолчанию (HubConfig без
+            # аргументов). Форма показывает их в placeholder'ах: пустое поле
+            # само по себе не говорит пользователю, что подставится, если он
+            # так его и оставит.
+            payload["defaults"] = HubConfig().to_dict()
+            self._send_json(200, payload)
 
         def _api_settings_post(self) -> None:
             body = self._read_json_body(max_bytes=max_body_bytes)
@@ -1160,6 +1166,9 @@ def make_handler(
             current = _load_config(config_path)
             data = current.to_dict()
             data.update(body)
+            # ``defaults`` — справочное поле ответа GET (см. _api_settings_get),
+            # не часть конфига. Если форма вернула его назад — молча выбрасываем.
+            data.pop("defaults", None)
             new_config = HubConfig.from_dict(data)
             new_config.save(config_path)
             # Сброс кэша сразу после собственной записи — не полагаемся на

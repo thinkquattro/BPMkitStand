@@ -1118,6 +1118,75 @@ button:disabled {
   color: var(--bpmkit-text);
 }
 
+/* --- Свёрнутые группы настроек (details/summary) ---------------------------
+   Форма склеивала три аудитории на одном экране: параметры хаба (нужны всем),
+   федерацию (только при удалённых стендах) и флаги демона-агента (только
+   администратору удалённого хоста). Редкое прячем, но не удаляем. */
+
+.settings-form .settings-group {
+  background: var(--bpmkit-panel-bg);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  padding: 0 18px;
+  margin-bottom: 16px;
+}
+
+.settings-form .settings-group > summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-weight: 600;
+  color: var(--bpmkit-text);
+  list-style-position: inside;
+}
+
+.settings-form .settings-group[open] > summary {
+  border-bottom: 1px solid var(--bpmkit-border);
+  margin-bottom: 12px;
+}
+
+.settings-form .settings-group > *:last-child {
+  margin-bottom: 14px;
+}
+
+.settings-group-note {
+  font-weight: 400;
+  color: var(--bpmkit-muted);
+}
+
+.settings-group-help {
+  margin: 0 0 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--bpmkit-muted);
+}
+
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--bpmkit-muted);
+}
+
+.field-hint-warn {
+  color: var(--bpmkit-down);
+}
+
+.field-error {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--bpmkit-down);
+}
+
+.settings-form input[aria-invalid="true"] {
+  border-color: var(--bpmkit-down);
+}
+
+.status-text.status-error {
+  color: var(--bpmkit-down);
+}
+
 .checkbox-label {
   display: flex;
   align-items: center;

@@ -343,72 +343,101 @@
     <section id="tab-settings" class="tab-panel">
       <form id="settings-form" class="settings-form">
         <fieldset>
-          <legend>Хаб</legend>
-          <label>Путь к реестру стендов (registry_path)
+          <legend>Основные</legend>
+          <label>Путь к реестру стендов
             <input type="text" name="registry_path" />
+            <small class="field-hint">Файл <code>projects.json</code>, общий с BPMkit.</small>
           </label>
-          <label>Каталог pid-файлов (run_dir)
+          <label>Каталог pid-файлов
             <input type="text" name="run_dir" />
+            <small class="field-hint">Куда диспетчер пишет pid запущенных им стендов.</small>
           </label>
-          <label>Каталог логов (log_dir)
+          <label>Каталог логов
             <input type="text" name="log_dir" />
+            <small class="field-hint">Куда перенаправляется вывод стенда при запуске.</small>
           </label>
-          <label>Интервал автообновления, сек (refresh_interval_sec)
-            <input type="number" name="refresh_interval_sec" min="1" />
+          <label>Интервал автообновления, сек
+            <input type="number" name="refresh_interval_sec" min="1" max="3600" />
+            <small class="field-hint">Как часто дашборд перепроверяет состояние стендов.</small>
           </label>
         </fieldset>
 
-        <fieldset>
-          <legend>Дефолты локального агента</legend>
-          <label>Host (agent_host)
+        <details class="settings-group" id="settings-remote">
+          <summary>Удалённые стенды<span class="settings-group-note" id="remote-agents-count"></span></summary>
+          <p class="settings-group-help">
+            Нужно, только если часть стендов живёт на других хостах под управлением
+            <code>standkit-agent</code>. Для локальных стендов оставьте пустым.
+          </p>
+          <div id="agents-list"></div>
+          <button type="button" id="add-agent-btn">+ Добавить агента</button>
+        </details>
+
+        <details class="settings-group" id="settings-agent-advanced" hidden>
+          <summary>Агент (расширенное)</summary>
+          <p class="settings-group-help">
+            Параметры запуска <strong>локального</strong> <code>standkit-agent</code> — демона,
+            через который к этому хосту обращается диспетчер с другой машины. Блок нужен
+            администратору хоста удалённого стенда; при работе только с локальными стендами
+            трогать его не нужно.
+          </p>
+          <label>Host
             <input type="text" name="agent_host" />
+            <small class="field-hint">Адрес, на котором биндится демон агента. Loopback — безопасный дефолт.</small>
           </label>
-          <label>Port (agent_port)
+          <label>Port
             <input type="number" name="agent_port" min="1" max="65535" />
           </label>
-          <label>Control-токен (token_ref)
+          <label>Control-токен
             <span class="secret-row">
               <input type="text" name="token_ref" />
               <button type="button" class="set-secret-btn" data-ref-field="token_ref">Задать секрет…</button>
               <span class="secret-status" data-ref-status="token_ref"></span>
             </span>
+            <small class="field-hint">
+              Ссылка на секрет (не сам токен) для скоупа управления: старт, стоп, рестарт.
+            </small>
           </label>
-          <label>Readonly-токен (readonly_token_ref)
+          <label>Readonly-токен
             <span class="secret-row">
               <input type="text" name="readonly_token_ref" />
               <button type="button" class="set-secret-btn" data-ref-field="readonly_token_ref">Задать секрет…</button>
               <span class="secret-status" data-ref-status="readonly_token_ref"></span>
             </span>
+            <small class="field-hint">Ссылка на секрет для скоупа «только чтение»: статус и логи.</small>
           </label>
-          <label>TLS-сертификат (tls_cert)
+          <label>TLS-сертификат
             <input type="text" name="tls_cert" />
+            <small class="field-hint">PEM-сертификат: включает HTTPS у агента.</small>
           </label>
-          <label>TLS-ключ (tls_key)
+          <label>TLS-ключ
             <input type="text" name="tls_key" />
           </label>
-          <label>TLS client CA (tls_client_ca)
+          <label>TLS client CA
             <input type="text" name="tls_client_ca" />
+            <small class="field-hint">
+              Включает mTLS: подключиться сможет только клиент с сертификатом от этого CA.
+            </small>
           </label>
           <label class="checkbox-label">
             <input type="checkbox" name="insecure" />
-            insecure (небезопасный bind без TLS на non-loopback)
+            insecure — разрешить bind на non-loopback без TLS
           </label>
-          <label>Аудит-лог (audit_log)
+          <p class="field-hint field-hint-warn">
+            Осознанный обход защиты: без этого флага агент не стартует на внешнем адресе
+            без TLS. Только для разработки, никогда на прод.
+          </p>
+          <label>Аудит-лог
             <input type="text" name="audit_log" />
+            <small class="field-hint">Журнал мутирующих вызовов агента. Токены в него не пишутся.</small>
           </label>
-          <label>Порог блокировки (lockout_max_failures)
-            <input type="number" name="lockout_max_failures" min="1" />
+          <label>Порог блокировки
+            <input type="number" name="lockout_max_failures" min="1" max="1000" />
+            <small class="field-hint">Сколько неудачных попыток с одного адреса включают блокировку.</small>
           </label>
-          <label>Окно блокировки, сек (lockout_window_sec)
-            <input type="number" name="lockout_window_sec" min="1" />
+          <label>Окно блокировки, сек
+            <input type="number" name="lockout_window_sec" min="1" max="86400" />
           </label>
-        </fieldset>
-
-        <fieldset>
-          <legend>Удалённые агенты (федерация)</legend>
-          <div id="agents-list"></div>
-          <button type="button" id="add-agent-btn">+ Добавить агента</button>
-        </fieldset>
+        </details>
 
         <div class="panel-toolbar">
           <button type="submit">Сохранить настройки</button>

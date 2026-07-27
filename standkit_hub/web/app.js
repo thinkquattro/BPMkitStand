@@ -685,6 +685,10 @@
     checkStartingTransitions(lastStandsData);
     renderStands(lastStandsData);
     updateLogsMenuState();
+    // Появился (или исчез) стенд с transport=agent — блок параметров демона
+    // в настройках должен появиться или спрятаться без перезагрузки страницы.
+    // Здесь, а не в refreshStands: применение данных приходит и из SSE.
+    updateAgentBlockVisibility(lastStandsData);
     updateSnapshotAge(data);
   }
 
@@ -1178,7 +1182,141 @@
     "lockout_window_sec",
   ];
 
+  // Поля блока «Агент (расширенное)» — зеркалят флаги CLI standkit-agent и
+  // нужны только администратору хоста удалённого стенда. Список отдельно от
+  // SETTINGS_FIELDS, потому что по нему решается, показывать ли блок вообще.
+  const AGENT_FIELDS = [
+    "agent_host",
+    "agent_port",
+    "token_ref",
+    "readonly_token_ref",
+    "tls_cert",
+    "tls_key",
+    "tls_client_ca",
+    "audit_log",
+    "lockout_max_failures",
+    "lockout_window_sec",
+  ];
+
   let currentAgents = [];
+
+  // Поля, которые имеет смысл валидировать на клиенте до отправки: пользователь
+  // получает ответ мгновенно и рядом с полем, а не общей строкой ошибки снизу.
+  const PORT_FIELDS = ["agent_port"];
+  const POSITIVE_INT_FIELDS = [
+    "refresh_interval_sec",
+    "lockout_max_failures",
+    "lockout_window_sec",
+  ];
+  const PATH_FIELDS = ["registry_path", "run_dir", "log_dir", "tls_cert", "tls_key", "tls_client_ca", "audit_log"];
+
+  // Символы, недопустимые в пути и на Windows, и на Linux. Полноценную проверку
+  // существования делает сервер — здесь отсекаем только заведомый мусор
+  // (например, вставленную из терминала команду вместо пути).
+  const BAD_PATH_CHARS = /[<>"|?*\r\n\t]/;
+
+  function fieldLabel(input) {
+    const label = input.closest("label");
+    if (!label) return input.name;
+    const text = label.childNodes[0] && label.childNodes[0].textContent;
+    return (text || input.name).trim();
+  }
+
+  function setFieldError(input, message) {
+    const label = input.closest("label") || input.parentElement;
+    if (!label) return;
+    let errorEl = label.querySelector(".field-error");
+    if (!message) {
+      if (errorEl) errorEl.remove();
+      input.removeAttribute("aria-invalid");
+      return;
+    }
+    if (!errorEl) {
+      errorEl = document.createElement("small");
+      errorEl.className = "field-error";
+      label.appendChild(errorEl);
+    }
+    errorEl.textContent = message;
+    input.setAttribute("aria-invalid", "true");
+  }
+
+  /**
+   * Проверяет форму настроек на клиенте. Возвращает список сообщений об
+   * ошибках (пустой — всё в порядке) и подсвечивает проблемные поля.
+   *
+   * Это удобство, а не защита: сервер валидирует то же самое независимо —
+   * форма не единственный способ записать конфиг.
+   */
+  function validateSettingsForm(form) {
+    const problems = [];
+    SETTINGS_FIELDS.forEach((field) => {
+      const input = form.elements.namedItem(field);
+      if (!input) return;
+      setFieldError(input, "");
+      const raw = (input.value || "").trim();
+      if (!raw) return; // пустое поле = «взять дефолт», это законно
+
+      if (PORT_FIELDS.includes(field)) {
+        const port = Number(raw);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          const msg = "порт должен быть целым числом от 1 до 65535";
+          setFieldError(input, msg);
+          problems.push(`${fieldLabel(input)}: ${msg}`);
+        }
+        return;
+      }
+
+      if (POSITIVE_INT_FIELDS.includes(field)) {
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value < 1) {
+          const msg = "значение должно быть положительным числом";
+          setFieldError(input, msg);
+          problems.push(`${fieldLabel(input)}: ${msg}`);
+        }
+        return;
+      }
+
+      if (PATH_FIELDS.includes(field) && BAD_PATH_CHARS.test(raw)) {
+        const msg = "путь содержит недопустимые символы";
+        setFieldError(input, msg);
+        problems.push(`${fieldLabel(input)}: ${msg}`);
+      }
+    });
+
+    currentAgents.forEach((agent, idx) => {
+      const hasAny = (agent.name || agent.url || agent.token_ref || "").length > 0;
+      if (!hasAny) return;
+      if (!agent.name) problems.push(`Удалённый агент №${idx + 1}: не указано имя`);
+      if (!agent.url) {
+        problems.push(`Удалённый агент №${idx + 1}: не указан url`);
+      } else if (!/^https?:\/\/.+/i.test(agent.url.trim())) {
+        problems.push(`Удалённый агент №${idx + 1}: url должен начинаться с http:// или https://`);
+      }
+    });
+
+    return problems;
+  }
+
+  /**
+   * Показывает блок «Агент (расширенное)» только тогда, когда он может
+   * понадобиться: в реестре есть хотя бы один стенд с transport=agent, либо
+   * уже настроен удалённый агент, либо какое-то из полей блока непусто
+   * (иначе пользователь не смог бы увидеть то, что сам когда-то ввёл).
+   */
+  function updateAgentBlockVisibility(stands) {
+    const block = document.getElementById("settings-agent-advanced");
+    if (!block) return;
+    const form = document.getElementById("settings-form");
+    const hasAgentStand = (stands || []).some(
+      (s) => s && s.process && s.process.transport === "agent"
+    );
+    const hasRemoteAgents = currentAgents.length > 0;
+    const hasFilledField = AGENT_FIELDS.some((field) => {
+      const input = form && form.elements.namedItem(field);
+      return input && String(input.value || "").trim() !== "";
+    });
+    block.hidden = !(hasAgentStand || hasRemoteAgents || hasFilledField);
+  }
 
   function renderAgentsList() {
     const container = document.getElementById("agents-list");
@@ -1203,14 +1341,29 @@
       });
       container.appendChild(row);
     });
+
+    const counter = document.getElementById("remote-agents-count");
+    if (counter) {
+      counter.textContent = currentAgents.length ? ` — настроено: ${currentAgents.length}` : "";
+    }
   }
 
   async function loadSettings() {
     const data = await apiGet("/api/settings");
     const form = document.getElementById("settings-form");
+    const defaults = data.defaults || {};
     SETTINGS_FIELDS.forEach((field) => {
       const input = form.elements.namedItem(field);
-      if (input) input.value = data[field] ?? "";
+      if (!input) return;
+      input.value = data[field] ?? "";
+      setFieldError(input, "");
+      // Пустое поле означает «взять дефолт» — показываем, какой именно, чтобы
+      // пользователю не приходилось гадать или лезть в --help.
+      const fallback = defaults[field];
+      input.placeholder =
+        fallback === undefined || fallback === null || fallback === ""
+          ? "не задано"
+          : String(fallback);
     });
     form.elements.namedItem("insecure").checked = !!data.insecure;
     // Тема — из конфига (источник правды). Обычно совпадает с тем, что уже
@@ -1222,6 +1375,7 @@
     applyRefreshInterval(data.refresh_interval_sec);
     currentAgents = (data.agents || []).map((a) => ({ ...a }));
     renderAgentsList();
+    updateAgentBlockVisibility(lastStandsData);
     await refreshSecretStatuses();
   }
 
@@ -1251,6 +1405,20 @@
       evt.preventDefault();
       const statusEl = document.getElementById("settings-status");
       statusEl.textContent = "";
+      statusEl.classList.remove("status-error");
+
+      const problems = validateSettingsForm(form);
+      if (problems.length) {
+        statusEl.textContent =
+          problems.length === 1
+            ? `Не сохранено — ${problems[0]}`
+            : `Не сохранено — ошибок: ${problems.length}. ${problems.join("; ")}`;
+        statusEl.classList.add("status-error");
+        const firstBad = form.querySelector('[aria-invalid="true"]');
+        if (firstBad) firstBad.focus();
+        return;
+      }
+
       const payload = {};
       SETTINGS_FIELDS.forEach((field) => {
         const input = form.elements.namedItem(field);
@@ -1277,6 +1445,8 @@
     document.getElementById("add-agent-btn").addEventListener("click", () => {
       currentAgents.push({ name: "", url: "", token_ref: "" });
       renderAgentsList();
+      // Появился удалённый агент — параметры демона стали релевантны.
+      updateAgentBlockVisibility(lastStandsData);
     });
 
     document.querySelectorAll(".set-secret-btn").forEach((btn) => {

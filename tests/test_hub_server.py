@@ -393,6 +393,50 @@ def test_settings_get_and_post_roundtrip(tmp_path):
     assert reloaded.refresh_interval_sec == 42
 
 
+def test_settings_get_includes_defaults_for_placeholders(tmp_path):
+    """
+    GET /api/settings отдаёт справочный блок ``defaults`` — форма показывает
+    эти значения в placeholder'ах, чтобы пустое поле не выглядело как «ничего
+    не подставится».
+    """
+    base_url, token, *_ = _start_hub(tmp_path)
+
+    status, body, _ = _request(base_url, "/api/settings", token=token)
+    assert status == 200
+
+    defaults = body.get("defaults")
+    assert isinstance(defaults, dict)
+    assert defaults["agent_host"] == "127.0.0.1"
+    assert defaults["agent_port"] == 8765
+    assert defaults["refresh_interval_sec"] == 10
+    assert defaults["lockout_max_failures"] == 5
+    # Секретов в дефолтах нет и быть не может — только ссылки на них.
+    assert defaults["token_ref"] == ""
+
+
+def test_settings_post_ignores_defaults_echoed_back(tmp_path):
+    """
+    ``defaults`` — поле ответа, а не конфига. Если форма вернёт его в POST,
+    оно должно быть молча отброшено, а не сохранено и не привести к 500.
+    """
+    base_url, token, config_path, *_ = _start_hub(tmp_path)
+
+    status, body, _ = _request(
+        base_url,
+        "/api/settings",
+        token=token,
+        method="POST",
+        origin=base_url,
+        body={"refresh_interval_sec": 7, "defaults": {"agent_port": 1}},
+    )
+    assert status == 200
+    assert body["refresh_interval_sec"] == 7
+
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "defaults" not in raw
+    assert HubConfig.load(config_path).agent_port == 8765
+
+
 # --- API: версия (для модалки "О программе") ---
 
 
