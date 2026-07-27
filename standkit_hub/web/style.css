@@ -1,11 +1,18 @@
 /* Vanilla CSS дашборда standkit — без внешних ресурсов, без сборки. */
 
 /*
- * Тема (light/dark) — переключается атрибутом data-theme на <html>
- * (см. app.js::setupTheme). Дефолт (без атрибута/light) — переменные ниже.
- * Тёмная тема переопределяет их в блоке [data-theme="dark"] в конце файла.
+ * Тема — атрибут data-theme на <html> с одним из трёх значений:
+ * light | dark | auto. Значение ПОДСТАВЛЯЕТ СЕРВЕР при отдаче index.html из
+ * HubConfig.theme (см. standkit_hub/server.py::_serve_index), поэтому тема
+ * применяется до выполнения JS и «вспышки» светлой темы нет. app.js только
+ * меняет атрибут при переключении и сохраняет выбор в конфиг.
+ *
+ * Дефолт (light) — переменные в :root. Тёмная тема переопределяет их в
+ * [data-theme="dark"]; "auto" получает ту же тёмную палитру, но только когда
+ * система просит тёмное оформление (@media prefers-color-scheme) — см. блок
+ * ниже, значения в нём обязаны совпадать с [data-theme="dark"].
  * Всё остальное CSS-правило файла ссылается ТОЛЬКО на переменные — ни одного
- * захардкоженного цвета вне двух этих блоков, иначе тема "протекает".
+ * захардкоженного цвета вне этих блоков, иначе тема "протекает".
  *
  * БРЕНД BPMkit: акцентный цвет продукта — оранжевый #f9763d (тот же, что в
  * иконке "k" на тёмном фоне) — единый для обеих тем, минималистичный стиль,
@@ -50,6 +57,32 @@
   --bpmkit-row-hover: #333029;
   --bpmkit-row-selected: #3d2c1f;
   --bpmkit-code-bg: #262523;
+}
+
+/* Тема "auto": та же тёмная палитра, что и выше, но только при системной
+   тёмной теме. Значения ОБЯЗАНЫ совпадать с [data-theme="dark"] — правите
+   там, правьте и здесь (в чистом CSS без сборки списка селекторов на
+   media-query не хватает, а вводить сборщик ради этого нельзя — фронт
+   принципиально без билда). */
+@media (prefers-color-scheme: dark) {
+  [data-theme="auto"] {
+    --bpmkit-primary: #f9763d;
+    --bpmkit-primary-contrast: #ffffff;
+    --bpmkit-bg: #1e1e1e;
+    --bpmkit-panel-bg: #2b2b2b;
+    --bpmkit-border: #3a3a3a;
+    --bpmkit-text: #e9e7e4;
+    --bpmkit-muted: #a3a09b;
+    --bpmkit-ok: #3ecb7a;
+    --bpmkit-down: #f06868;
+    --bpmkit-unknown: #d6a63a;
+    --bpmkit-skipped: #8a877f;
+    --bpmkit-console-bg: #141414;
+    --bpmkit-console-text: #d7dee8;
+    --bpmkit-row-hover: #333029;
+    --bpmkit-row-selected: #3d2c1f;
+    --bpmkit-code-bg: #262523;
+  }
 }
 
 * {
@@ -119,6 +152,99 @@ body {
 .theme-toggle-btn:hover {
   filter: brightness(1.1);
   background: var(--bpmkit-bg);
+}
+
+.view-toggle-btn {
+  background: transparent;
+  color: var(--bpmkit-text);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.view-toggle-btn:hover {
+  filter: brightness(1.1);
+  background: var(--bpmkit-bg);
+}
+
+/* --- Компактный режим (?view=compact) ------------------------------------
+   Тот же UI, другой набор правил: узкое окно-виджет шириной ~320 px, только
+   имена стендов, четыре точки состояния и старт/стоп. Новых технологий за
+   этим нет — ни зависимостей, ни отдельной страницы, ни сборки. Атрибут
+   data-view проставляет сервер при отдаче index.html, поэтому полноразмерный
+   дашборд не успевает мигнуть до выполнения JS.
+
+   Вместе с PWA-манифестом (shortcut «Компактный режим») это и есть виджет:
+   отдельное окно поверх остальных, которое видно краем глаза. */
+
+[data-view="compact"] body {
+  min-width: 0;
+}
+
+[data-view="compact"] .topbar h1,
+[data-view="compact"] .topbar .tabs,
+[data-view="compact"] #about-btn,
+[data-view="compact"] .panel-toolbar #register-stand-btn,
+[data-view="compact"] .hint-text,
+[data-view="compact"] .state-panel,
+[data-view="compact"] #tab-agent,
+[data-view="compact"] #tab-settings,
+[data-view="compact"] .stands-table thead,
+/* Колонка «Транспорт» (2-я) — в окне-виджете это шум: у подавляющего
+   большинства пользователей все стенды локальные. */
+[data-view="compact"] .stands-table td:nth-child(2),
+/* Очистка Redis — операция необратимая, ей не место в окне, по которому
+   кликают мимоходом. Остаются старт, стоп и рестарт. */
+[data-view="compact"] .stands-table .icon-btn-redis {
+  display: none;
+}
+
+[data-view="compact"] main,
+[data-view="compact"] .topbar {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+[data-view="compact"] .topbar {
+  gap: 6px;
+}
+
+[data-view="compact"] .stands-table-wrap {
+  border: none;
+  padding: 0;
+}
+
+[data-view="compact"] .stands-table td {
+  padding: 5px 4px;
+  font-size: 12px;
+}
+
+/* Длинные значения (url стенда, имя БД) в узком окне не помещаются — режем
+   многоточием, полный текст остаётся доступен по наведению. */
+[data-view="compact"] .stands-table .value-cell {
+  display: inline-block;
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+[data-view="compact"] .stands-table .row-actions {
+  white-space: nowrap;
+}
+
+[data-view="compact"] .stands-table .icon-btn {
+  padding: 2px 4px;
+}
+
+[data-view="compact"] #view-toggle-btn {
+  margin-left: auto;
 }
 
 /* --- кнопка "О программе" (topbar) — БЕЗ фона, оранжевая иконка (бренд) --- */
@@ -347,6 +473,18 @@ body {
 
 [data-theme="dark"] .about-modal-logo-dark {
   display: block;
+}
+
+/* Тема "auto" — то же самое при системной тёмной теме (см. блок переменных
+   [data-theme="auto"] в начале файла). */
+@media (prefers-color-scheme: dark) {
+  [data-theme="auto"] .about-modal-logo-light {
+    display: none;
+  }
+
+  [data-theme="auto"] .about-modal-logo-dark {
+    display: block;
+  }
 }
 
 .modal-note {
@@ -639,6 +777,56 @@ button:disabled {
   background: var(--bpmkit-skipped);
 }
 
+/* "pending" — пробы ЕЩЁ НЕ выполнялись (мгновенный слепок реестра,
+   /api/stands?probe=0 либо первый круг фонового опроса). Это НЕ "unknown"
+   (тот — честный результат выполненной проверки), поэтому и вид другой:
+   бледная плашка с пульсацией «данные едут», а не тревожный жёлтый. */
+.badge-pending {
+  background: transparent;
+  color: var(--bpmkit-muted);
+  border: 1px dashed var(--bpmkit-border);
+  padding: 1px 7px;
+  animation: badge-pending-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes badge-pending-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* Уважаем системную настройку «уменьшить движение» — пульсация чисто
+   декоративная, без неё смысл не теряется. */
+@media (prefers-reduced-motion: reduce) {
+  .badge-pending {
+    animation: none;
+  }
+}
+
+/* «вне диспетчера» — стенд жив, но поднят мимо диспетчера (нет pidfile).
+   Не авария (поэтому не красный) и не норма (поэтому не зелёный): контурный
+   предупреждающий бейдж рядом с обычным up/down. */
+.badge-external {
+  background: transparent;
+  color: var(--bpmkit-unknown);
+  border: 1px solid var(--bpmkit-unknown);
+  font-weight: 500;
+  cursor: help;
+}
+
+/* Строка кнопки «Определить автоматически» в форме регистрации (host_kind=iis). */
+.iis-detect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
 .row-actions button {
   margin-right: 4px;
   padding: 4px 8px;
@@ -688,6 +876,21 @@ button:disabled {
 .value-muted {
   color: var(--bpmkit-muted);
   font-weight: 400;
+}
+
+/* Значение, по которому проба ещё не выполнялась (см. .badge-pending). */
+.value-pending {
+  color: var(--bpmkit-muted);
+  font-weight: 400;
+}
+
+/* Возраст снапшота в панели инструментов — намеренно неприметный: он должен
+   быть заметен, только если данные реально устарели (см.
+   app.js::updateSnapshotAge, который в норме держит элемент пустым). */
+.stands-age {
+  color: var(--bpmkit-muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 /* HTTP-значение как ссылка: цвет наследуется от value-* (состояние пробы),
@@ -933,6 +1136,75 @@ button:disabled {
   font-size: 13px;
   background: var(--bpmkit-panel-bg);
   color: var(--bpmkit-text);
+}
+
+/* --- Свёрнутые группы настроек (details/summary) ---------------------------
+   Форма склеивала три аудитории на одном экране: параметры хаба (нужны всем),
+   федерацию (только при удалённых стендах) и флаги демона-агента (только
+   администратору удалённого хоста). Редкое прячем, но не удаляем. */
+
+.settings-form .settings-group {
+  background: var(--bpmkit-panel-bg);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  padding: 0 18px;
+  margin-bottom: 16px;
+}
+
+.settings-form .settings-group > summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-weight: 600;
+  color: var(--bpmkit-text);
+  list-style-position: inside;
+}
+
+.settings-form .settings-group[open] > summary {
+  border-bottom: 1px solid var(--bpmkit-border);
+  margin-bottom: 12px;
+}
+
+.settings-form .settings-group > *:last-child {
+  margin-bottom: 14px;
+}
+
+.settings-group-note {
+  font-weight: 400;
+  color: var(--bpmkit-muted);
+}
+
+.settings-group-help {
+  margin: 0 0 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--bpmkit-muted);
+}
+
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--bpmkit-muted);
+}
+
+.field-hint-warn {
+  color: var(--bpmkit-down);
+}
+
+.field-error {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--bpmkit-down);
+}
+
+.settings-form input[aria-invalid="true"] {
+  border-color: var(--bpmkit-down);
+}
+
+.status-text.status-error {
+  color: var(--bpmkit-down);
 }
 
 .checkbox-label {

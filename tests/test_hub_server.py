@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +28,56 @@ from standkit.registry import Registry
 from standkit_hub.config import HubConfig
 from standkit_hub.security import InsecureBindError, generate_session_token
 from standkit_hub.server import create_hub_server
+
+
+@pytest.fixture(autouse=True)
+def _close_hub_servers(monkeypatch):
+    """
+    Закрывает все хабы, поднятые тестом.
+
+    Раньше тесты оставляли серверы жить до конца сессии, и это сходило с рук:
+    без фонового опроса «забытый» хаб просто держал сокет. С появлением
+    поллера (standkit_hub/poller.py) он продолжает тикать в своём потоке и
+    дёргать модульные функции — а тесты подменяют их через monkeypatch
+    глобально. В результате чужой поллер вызывал подменённую функцию уже в
+    следующем тесте, и тот падал в зависимости от порядка запуска.
+
+    Порядок уборки важен:
+
+    1. поллеру говорим остановиться с КОРОТКИМ таймаутом — иначе каждый тест
+       платил бы до 2 секунд ожидания потока, застрявшего на сетевой пробе
+       (поток daemon, процесс он не удержит);
+    2. ``shutdown()`` — в отдельном потоке с ограничением: на сервере, где
+       ``serve_forever`` не запускали, он заблокировался бы навсегда;
+    3. ``server_close()`` — закрывает сокет. Если сделать его до shutdown,
+       ``serve_forever`` падает с WinError 10038 «операция на объекте, не
+       являющемся сокетом» и pytest сыплет предупреждениями.
+    """
+    created: list = []
+    original = create_hub_server
+
+    def _tracking(*args, **kwargs):
+        httpd = original(*args, **kwargs)
+        created.append(httpd)
+        return httpd
+
+    monkeypatch.setattr(sys.modules[__name__], "create_hub_server", _tracking)
+    monkeypatch.setattr(server_module, "create_hub_server", _tracking)
+    yield
+    for httpd in created:
+        poller = getattr(httpd, "status_poller", None)
+        if poller is not None:
+            try:
+                poller.stop(timeout=0.2)
+            except Exception:  # noqa: BLE001 - уборка не должна ронять тест
+                pass
+        stopper = threading.Thread(target=httpd.shutdown, daemon=True)
+        stopper.start()
+        stopper.join(timeout=1.0)
+        try:
+            httpd.server_close()
+        except Exception:  # noqa: BLE001 - уборка не должна ронять тест
+            pass
 
 
 def _free_port() -> int:
@@ -237,16 +289,27 @@ def test_post_stand_action_dispatches_stop_and_restart(tmp_path, monkeypatch):
     base_url, token, *_ = _start_hub(tmp_path)
 
     calls = []
-    monkeypatch.setattr(hub_client_module.lifecycle, "stop", lambda stand: calls.append(("stop", stand.name)))
-    monkeypatch.setattr(hub_client_module.lifecycle, "restart", lambda stand: calls.append(("restart", stand.name)))
+    # stop/restart принимают force= (усыновление стенда, поднятого вне
+    # диспетчера) — подменяющие лямбды обязаны повторять сигнатуру.
+    monkeypatch.setattr(
+        hub_client_module.lifecycle,
+        "stop",
+        lambda stand, force=False: calls.append(("stop", stand.name, force)),
+    )
+    monkeypatch.setattr(
+        hub_client_module.lifecycle,
+        "restart",
+        lambda stand, force=False: calls.append(("restart", stand.name, force)),
+    )
 
     status1, _, _ = _request(base_url, "/api/stand/demo/stop", token=token, method="POST", origin=base_url)
     status2, _, _ = _request(base_url, "/api/stand/demo/restart", token=token, method="POST", origin=base_url)
 
     assert status1 == 200
     assert status2 == 200
-    assert ("stop", "demo") in calls
-    assert ("restart", "demo") in calls
+    # Без ?force=1 усыновление не запрашивается — force доезжает как False.
+    assert ("stop", "demo", False) in calls
+    assert ("restart", "demo", False) in calls
 
 
 def test_unknown_stand_action_returns_404(tmp_path):
@@ -340,6 +403,50 @@ def test_settings_get_and_post_roundtrip(tmp_path):
 
     reloaded = HubConfig.load(config_path)
     assert reloaded.refresh_interval_sec == 42
+
+
+def test_settings_get_includes_defaults_for_placeholders(tmp_path):
+    """
+    GET /api/settings отдаёт справочный блок ``defaults`` — форма показывает
+    эти значения в placeholder'ах, чтобы пустое поле не выглядело как «ничего
+    не подставится».
+    """
+    base_url, token, *_ = _start_hub(tmp_path)
+
+    status, body, _ = _request(base_url, "/api/settings", token=token)
+    assert status == 200
+
+    defaults = body.get("defaults")
+    assert isinstance(defaults, dict)
+    assert defaults["agent_host"] == "127.0.0.1"
+    assert defaults["agent_port"] == 8765
+    assert defaults["refresh_interval_sec"] == 10
+    assert defaults["lockout_max_failures"] == 5
+    # Секретов в дефолтах нет и быть не может — только ссылки на них.
+    assert defaults["token_ref"] == ""
+
+
+def test_settings_post_ignores_defaults_echoed_back(tmp_path):
+    """
+    ``defaults`` — поле ответа, а не конфига. Если форма вернёт его в POST,
+    оно должно быть молча отброшено, а не сохранено и не привести к 500.
+    """
+    base_url, token, config_path, *_ = _start_hub(tmp_path)
+
+    status, body, _ = _request(
+        base_url,
+        "/api/settings",
+        token=token,
+        method="POST",
+        origin=base_url,
+        body={"refresh_interval_sec": 7, "defaults": {"agent_port": 1}},
+    )
+    assert status == 200
+    assert body["refresh_interval_sec"] == 7
+
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "defaults" not in raw
+    assert HubConfig.load(config_path).agent_port == 8765
 
 
 # --- API: версия (для модалки "О программе") ---
@@ -665,7 +772,18 @@ def test_api_stand_logs_open_folder_calls_subprocess(tmp_path, monkeypatch):
 
     import standkit_hub.logs_browser as logs_browser_module
 
-    monkeypatch.setattr(logs_browser_module.subprocess, "Popen", lambda args: None)
+    # ВАЖНО: подменяем именно open_folder, а не subprocess.Popen.
+    # Popen используется только в POSIX-ветке open_folder; на Windows код
+    # идёт через ShellExecuteW/os.startfile (см. _open_folder_windows), и
+    # мок Popen туда не достаёт — тест открывал НАСТОЯЩЕЕ окно Проводника
+    # на машине разработчика, по одному на каждый прогон.
+    opened: list = []
+
+    def _fake_open_folder(path):
+        opened.append(Path(path))
+        return logs_browser_module.OpenFolderResult(ok=True, message="")
+
+    monkeypatch.setattr(server_module.logs_browser, "open_folder", _fake_open_folder)
 
     status, body, _ = _request(
         base_url,
@@ -676,6 +794,8 @@ def test_api_stand_logs_open_folder_calls_subprocess(tmp_path, monkeypatch):
     )
     assert status == 200
     assert body["ok"] is True
+    # Открывали именно каталог логов проекта, а не что-то ещё.
+    assert opened == [logs_dir]
 
 
 def test_api_stand_logs_open_folder_invalid_source_returns_400(tmp_path):
@@ -710,7 +830,7 @@ def test_post_stand_start_returns_pid_in_response(tmp_path, monkeypatch):
 def test_post_stand_restart_returns_pid_in_response(tmp_path, monkeypatch):
     base_url, token, *_ = _start_hub(tmp_path)
 
-    monkeypatch.setattr(hub_client_module.lifecycle, "restart", lambda stand: 4343)
+    monkeypatch.setattr(hub_client_module.lifecycle, "restart", lambda stand, force=False: 4343)
 
     status, body, _ = _request(
         base_url, "/api/stand/demo/restart", token=token, method="POST", origin=base_url
@@ -919,15 +1039,20 @@ def test_api_stands_redis_number_falls_back_to_stand_config(tmp_path, monkeypatc
 
 
 def test_api_stands_redis_number_registry_takes_priority_over_config(tmp_path, monkeypatch):
+    """
+    Реестр в приоритете: если в нём есть ``redis_db``, конфиг стенда читаться
+    не должен вовсе.
+
+    Проверяется прямым вызовом ``_redis_number``, а не через HTTP. Утверждение
+    «функция НЕ вызывалась» плохо уживается с фоновым опросом: monkeypatch
+    подменяет функцию глобально, а поллеры хабов из соседних тестов тикают в
+    своих потоках и дёргают её же — тест падал в зависимости от порядка и
+    тайминга. HTTP-слой для этого поля покрыт соседним тестом
+    (``..._falls_back_to_stand_config``).
+    """
     registry_path = _write_registry_with_extra(tmp_path, extra={"redis_db": 3})
-    config_path = _write_config(tmp_path, registry_path=registry_path)
-    session_token = generate_session_token()
-    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=session_token)
-    port = httpd.server_address[1]
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    _wait_for_port(port)
-    base_url = f"http://127.0.0.1:{port}"
+    registry = Registry.load(registry_path)
+    stand = registry.get(registry.names()[0])
 
     called = {}
 
@@ -937,10 +1062,7 @@ def test_api_stands_redis_number_registry_takes_priority_over_config(tmp_path, m
 
     monkeypatch.setattr(server_module.redis_min, "resolve_redis_from_stand_config", _fake_resolve)
 
-    status, body, _ = _request(base_url, "/api/stands", token=session_token)
-    assert status == 200
-    # Реестр (db=3) в приоритете — конфиг стенда не должен даже вызываться.
-    assert body["stands"][0]["redis"]["number"] == 3
+    assert server_module._redis_number(stand) == 3
     assert "invoked" not in called
 
 

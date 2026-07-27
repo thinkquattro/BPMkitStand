@@ -3,10 +3,16 @@ Health-пробы стенда: жив ли процесс, отвечает л�
 (используется как поверхностная проверка живости БД/Redis).
 
 Все пробы — быстрые и не требуют сторонних зависимостей (только stdlib:
-``socket``, ``urllib``). Глубокие проверки (реальный SQL-запрос к БД, PING к
-Redis по протоколу) — сознательно вынесены в TODO под опциональный флаг,
-чтобы базовый health-чек оставался лёгким и не тянул psycopg2/pyodbc/redis-py
-в обязательные зависимости ядра.
+``socket``, ``urllib``, ``concurrent.futures``). Глубокие проверки (реальный
+SQL-запрос к БД, PING к Redis по протоколу) — сознательно вынесены в TODO под
+опциональный флаг, чтобы базовый health-чек оставался лёгким и не тянул
+psycopg2/pyodbc/redis-py в обязательные зависимости ядра.
+
+ВРЕМЯ ОТВЕТА. ``check_stand`` выполняет четыре пробы (process/http/db/redis)
+ПАРАЛЛЕЛЬНО: последовательно они складывались в сумму таймаутов, и один
+недоступный стенд (firewall с политикой DROP, выключенная ВМ, VPN) держал
+дашборд «серым» несколько секунд. Теперь стоимость проверки одного стенда —
+максимум из таймаутов, а не их сумма.
 """
 
 from __future__ import annotations
@@ -14,10 +20,28 @@ from __future__ import annotations
 import socket
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
 from standkit.models import HostKind, ProbeState, Stand, StandStatus
+
+# --- таймауты проб ---------------------------------------------------------
+#
+# Значения СОЗНАТЕЛЬНО жёсткие: дашборд опрашивает все стенды разом, и каждый
+# недоступный стенд стоит ровно этот таймаут. На localhost таймаут не бьёт
+# вообще (ОС отвечает RST мгновенно), а на стенде за firewall с DROP —
+# упирается в него целиком.
+#
+# Если в вашем контуре стенды отвечают медленнее (перегруженный гипервизор,
+# канал с большим RTT, VPN) — поднимите значения здесь: обе константы
+# используются как default'ы ``http_ok``/``tcp_open`` и нигде не продублированы.
+HTTP_PROBE_TIMEOUT_SEC = 1.5
+TCP_PROBE_TIMEOUT_SEC = 0.7
+
+# Сколько проб ОДНОГО стенда выполняется параллельно. Проб ровно четыре
+# (process/http/db/redis) — больше воркеров смысла не имеет.
+PROBE_MAX_WORKERS = 4
 
 
 def process_alive(pidfile: Path) -> bool:
@@ -60,7 +84,7 @@ def process_running(
     return False
 
 
-def http_ok(url: str, *, timeout: float = 3.0) -> bool:
+def http_ok(url: str, *, timeout: float = HTTP_PROBE_TIMEOUT_SEC) -> bool:
     """
     Проверяет, отвечает ли HTTP(S)-эндпоинт (любой код ответа < 500 считается
     "живым" — стенд может честно отдавать 401/403 до логина, это не авария).
@@ -79,7 +103,7 @@ def http_ok(url: str, *, timeout: float = 3.0) -> bool:
         return False
 
 
-def tcp_open(host: str, port: int, *, timeout: float = 2.0) -> bool:
+def tcp_open(host: str, port: int, *, timeout: float = TCP_PROBE_TIMEOUT_SEC) -> bool:
     """
     Проверяет, открыт ли TCP-порт (используется как поверхностная liveness-проба
     БД/Redis — не подменяет полноценный запрос к сервису).
@@ -123,58 +147,94 @@ def check_stand(
     ``pidfile`` — если не передан, процесс-проба пропускается (UNKNOWN) —
     вызывающая сторона (lifecycle) знает свой путь к pidfile лучше, чем этот
     модуль по умолчанию.
+
+    Четыре пробы выполняются ПАРАЛЛЕЛЬНО (см. докстринг модуля): логика каждой
+    из них — ровно та же, что была при последовательном обходе, включая
+    фолбэки бэкендов хостинга и различение OK/DOWN/UNKNOWN. Исключения проб
+    НЕ глушатся молча — они пробрасываются вызывающему так же, как раньше.
     """
     status = StandStatus(name=stand.name)
 
-    if stand.host_kind in (HostKind.IIS, HostKind.DOCKER, HostKind.K8S):
-        # Проба «процесс» для iis/docker/k8s консультируется с бэкендом хостинга
-        # (состояние App Pool / контейнера / деплоймента), а не с pidfile
-        # standkit — у этих видов хостинга своего pidfile нет (см. ADR-0001).
-        # Сохраняем fallback на TCP-порт: backend.is_running() уже пробует его
-        # сам, но если он бросит исключение (появится в будущем реализация без
-        # внутреннего фолбэка) — подстраховываемся ещё раз здесь.
-        from standkit import hosting as _hosting  # локальный импорт — избегаем цикла
+    def _probe_process() -> ProbeState:
+        if stand.host_kind in (HostKind.IIS, HostKind.DOCKER, HostKind.K8S):
+            # Проба «процесс» для iis/docker/k8s консультируется с бэкендом
+            # хостинга (состояние App Pool / контейнера / деплоймента), а не с
+            # pidfile standkit — у этих видов хостинга своего pidfile нет (см.
+            # ADR-0001). Это единственная проба, которая может уйти в
+            # subprocess (appcmd/docker/kubectl) — именно ради неё
+            # параллелизация и даёт основной выигрыш.
+            from standkit import hosting as _hosting  # локальный импорт — избегаем цикла
 
-        try:
-            # Бэкенд авторитетен: он сам консультируется с appcmd/docker/kubectl
-            # и при НЕОПРЕДЕЛЁННОСТИ уже делает собственный TCP-фолбэк. Здесь
-            # НЕ добавляем ещё один tcp_open — иначе остановленный IIS-сайт,
-            # у которого http.sys держит порт 80, ложно показывался бы «up».
-            is_up = _hosting.get_backend(stand).is_running(stand)
-        except Exception:
-            # Бэкенд вовсе не смог ответить (нет appcmd/docker/kubectl) —
-            # осторожный фолбэк на TCP-порт, чтобы не показать ложный DOWN.
-            is_up = bool(
-                stand.stand_host and stand.stand_port and tcp_open(stand.stand_host, stand.stand_port)
-            )
-        status.process = ProbeState.OK if is_up else ProbeState.DOWN
-    elif pidfile is not None or (stand.stand_host and stand.stand_port):
-        is_up = process_running(pidfile, stand.stand_host, stand.stand_port)
-        status.process = ProbeState.OK if is_up else ProbeState.DOWN
-    else:
-        status.process = ProbeState.UNKNOWN
+            try:
+                # Бэкенд авторитетен: он сам консультируется с appcmd/docker/
+                # kubectl и при НЕОПРЕДЕЛЁННОСТИ уже делает собственный
+                # TCP-фолбэк. Здесь НЕ добавляем ещё один tcp_open — иначе
+                # остановленный IIS-сайт, у которого http.sys держит порт 80,
+                # ложно показывался бы «up».
+                backend = _hosting.get_backend(stand)
+                # Если бэкенд умеет объяснять состояние (IIS: «сайт остановлен»
+                # / «пул остановлен» / «порт держит http.sys, 503») — забираем
+                # причину в details, чтобы UI показал её вместо голого DOWN.
+                # Отдельного вызова is_running при этом НЕ делаем: describe_state
+                # уже содержит вердикт, а лишний appcmd на каждый опрос — дорого.
+                #
+                # Запись в status.details потокобезопасна: проба «процесс»
+                # единственная, кто пишет этот ключ, а сам status собирается
+                # в вызывающем потоке уже после завершения всех проб.
+                describe = getattr(backend, "describe_state", None)
+                if describe is not None:
+                    detailed = describe(stand)
+                    is_up = detailed.running
+                    if detailed.reason:
+                        status.details["process_reason"] = detailed.reason
+                else:
+                    is_up = backend.is_running(stand)
+            except Exception:
+                # Бэкенд вовсе не смог ответить (нет appcmd/docker/kubectl) —
+                # осторожный фолбэк на TCP-порт, чтобы не показать ложный DOWN.
+                is_up = bool(
+                    stand.stand_host
+                    and stand.stand_port
+                    and tcp_open(stand.stand_host, stand.stand_port)
+                )
+            return ProbeState.OK if is_up else ProbeState.DOWN
+        if pidfile is not None or (stand.stand_host and stand.stand_port):
+            is_up = process_running(pidfile, stand.stand_host, stand.stand_port)
+            return ProbeState.OK if is_up else ProbeState.DOWN
+        return ProbeState.UNKNOWN
 
-    if stand.stand_host and stand.stand_port:
+    def _probe_http() -> ProbeState:
+        if not (stand.stand_host and stand.stand_port):
+            return ProbeState.UNKNOWN
         url = f"http://{stand.stand_host}:{stand.stand_port}{http_path}"
-        status.http = ProbeState.OK if http_ok(url) else ProbeState.DOWN
-    else:
-        status.http = ProbeState.UNKNOWN
+        return ProbeState.OK if http_ok(url) else ProbeState.DOWN
 
-    if stand.db_host and stand.db_port:
-        status.db = ProbeState.OK if tcp_open(stand.db_host, stand.db_port) else ProbeState.DOWN
+    def _probe_db() -> ProbeState:
+        if not (stand.db_host and stand.db_port):
+            return ProbeState.UNKNOWN
         if deep_db:
-            status.db = db_deep_check(stand)
-    else:
-        status.db = ProbeState.UNKNOWN
+            return db_deep_check(stand)
+        return ProbeState.OK if tcp_open(stand.db_host, stand.db_port) else ProbeState.DOWN
 
-    redis_host = stand.extra.get("redis_host")
-    redis_port = stand.extra.get("redis_port")
-    if redis_host and redis_port:
-        status.redis = ProbeState.OK if tcp_open(redis_host, int(redis_port)) else ProbeState.DOWN
+    def _probe_redis() -> ProbeState:
+        redis_host = stand.extra.get("redis_host")
+        redis_port = stand.extra.get("redis_port")
+        if not (redis_host and redis_port):
+            return ProbeState.UNKNOWN
         if deep_redis:
-            status.redis = redis_deep_check(stand)
-    else:
-        status.redis = ProbeState.UNKNOWN
+            return redis_deep_check(stand)
+        return ProbeState.OK if tcp_open(redis_host, int(redis_port)) else ProbeState.DOWN
+
+    probes = (
+        ("process", _probe_process),
+        ("http", _probe_http),
+        ("db", _probe_db),
+        ("redis", _probe_redis),
+    )
+    with ThreadPoolExecutor(max_workers=PROBE_MAX_WORKERS, thread_name_prefix="standkit-probe") as pool:
+        futures = [(field, pool.submit(fn)) for field, fn in probes]
+    for field, future in futures:
+        setattr(status, field, future.result())
 
     # last_deploy — задел на будущее, источник данных пока не определён (бэклог,
     # см. docs/ARCHITECTURE.md).

@@ -72,7 +72,13 @@
     }
     if (!resp.ok) {
       const message = (data && data.error) || `HTTP ${resp.status}`;
-      throw new Error(message);
+      const error = new Error(message);
+      // Тело ошибки прокидываем на объекте Error: 409 на Стоп/Рестарт несёт
+      // описание найденного процесса (adopt_required/candidate), без которого
+      // нельзя показать осмысленное подтверждение усыновления.
+      error.status = resp.status;
+      error.data = data;
+      throw error;
     }
     return data;
   }
@@ -90,25 +96,119 @@
     });
   }
 
-  // --- тема (light/dark) ---
+  // --- тема (light/dark/auto) ---
+  //
+  // ИСТОЧНИК ПРАВДЫ — HubConfig.theme на сервере, а не localStorage браузера.
+  // localStorage привязан к origin (включая ПОРТ), и пока хаб стартовал на
+  // эфемерном порту, каждый запуск давал новый origin и пустое хранилище —
+  // отсюда жалоба «тема не запоминается». Теперь выбор уходит в конфиг через
+  // POST /api/settings, а localStorage остался лишь кэшем на случай, если
+  // сервер почему-то не подставил атрибут в <html data-theme>.
+  //
+  // В data-theme лежит РОВНО то, что в конфиге (light|dark|auto). Разрешать
+  // "auto" в конкретную тему здесь НЕЛЬЗЯ: это превратило бы выбор «как в
+  // системе» в зафиксированный light/dark при первом же сохранении. Разрешение
+  // делает CSS через @media (prefers-color-scheme) — см. style.css.
 
   const THEME_STORAGE_KEY = "standkit_theme";
+  // Порядок обхода по клику на переключателе.
+  const THEMES = ["auto", "light", "dark"];
+  const THEME_LABELS = { auto: "как в системе", light: "светлая", dark: "тёмная" };
+
+  function normalizeTheme(value) {
+    return THEMES.indexOf(value) >= 0 ? value : "auto";
+  }
+
+  function readCachedTheme() {
+    try {
+      return localStorage.getItem(THEME_STORAGE_KEY);
+    } catch (e) {
+      // Приватный режим / отключённое хранилище — не повод ломать дашборд.
+      return null;
+    }
+  }
+
+  function currentTheme() {
+    return normalizeTheme(document.documentElement.getAttribute("data-theme"));
+  }
 
   function applyTheme(theme) {
-    document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+    const normalized = normalizeTheme(theme);
+    document.documentElement.setAttribute("data-theme", normalized);
+    const btn = document.getElementById("theme-toggle-btn");
+    if (btn) {
+      btn.title = `Тема: ${THEME_LABELS[normalized]} (клик — следующая)`;
+      btn.setAttribute("aria-label", `Тема: ${THEME_LABELS[normalized]}`);
+    }
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, normalized);
+    } catch (e) {
+      /* см. readCachedTheme */
+    }
+    return normalized;
   }
 
   function setupTheme() {
-    const stored = localStorage.getItem(THEME_STORAGE_KEY);
-    const prefersDark =
-      !stored && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-    applyTheme(stored || (prefersDark ? "dark" : "light"));
+    // Сервер уже подставил тему в <html data-theme> при отдаче index.html —
+    // ничего перерисовывать не нужно, только зафиксировать состояние кнопки.
+    // Плейсхолдер остался незаменённым (страница открыта не через хаб) —
+    // падаем на кэш, затем на "auto".
+    const fromServer = document.documentElement.getAttribute("data-theme");
+    const known = THEMES.indexOf(fromServer) >= 0;
+    applyTheme(known ? fromServer : readCachedTheme() || "auto");
 
-    document.getElementById("theme-toggle-btn").addEventListener("click", () => {
-      const current = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
-      const next = current === "dark" ? "light" : "dark";
+    document.getElementById("theme-toggle-btn").addEventListener("click", async () => {
+      const next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
       applyTheme(next);
-      localStorage.setItem(THEME_STORAGE_KEY, next);
+      try {
+        await apiSend("POST", "/api/settings", { theme: next });
+      } catch (e) {
+        // Тема применена визуально, но не сохранена — честно говорим об этом,
+        // иначе после перезагрузки пользователь молча получит прежнюю.
+        showActionStatus(`Тема применена, но не сохранена: ${e.message}`, true);
+      }
+    });
+  }
+
+  // --- режим отображения: полный дашборд / компактное окно-виджет ---
+
+  const VIEWS = ["full", "compact"];
+
+  function currentView() {
+    const value = document.documentElement.getAttribute("data-view");
+    return VIEWS.indexOf(value) >= 0 ? value : "full";
+  }
+
+  /**
+   * Переключает режим перезагрузкой с другим ``?view=``, а не переставляя
+   * атрибут на лету.
+   *
+   * Так режим переживает перезагрузку страницы, попадает в закладку и в
+   * ярлык PWA (shortcut «Компактный режим» в manifest.webmanifest), а сервер
+   * успевает проставить data-view ДО выполнения JS — компактное окно не
+   * мигает полноразмерным дашбордом. Сессионный токен при этом не теряется:
+   * он лежит в HttpOnly-cookie, выставленной при первом заходе.
+   */
+  function setupViewToggle() {
+    const btn = document.getElementById("view-toggle-btn");
+    if (!btn) return;
+
+    const isCompact = currentView() === "compact";
+    btn.textContent = isCompact ? "▣" : "▭";
+    btn.title = isCompact ? "Обычный режим" : "Компактный режим";
+    btn.setAttribute("aria-label", btn.title);
+
+    btn.addEventListener("click", () => {
+      const url = new URL(window.location.href);
+      if (isCompact) {
+        url.searchParams.delete("view");
+      } else {
+        url.searchParams.set("view", "compact");
+      }
+      // Токен из адресной строки не тащим: он уже в cookie, а в истории
+      // браузера ему делать нечего.
+      url.searchParams.delete("t");
+      window.location.assign(url.toString());
     });
   }
 
@@ -182,6 +282,7 @@
     const form = document.getElementById("register-form");
     form.reset();
     showRegisterFormError("");
+    document.getElementById("iis-detect-status").textContent = "";
     updateRegisterConditionalFields();
     overlay.hidden = false;
     form.elements.namedItem("name").focus();
@@ -244,9 +345,43 @@
     });
   }
 
+  // Кнопка «Определить автоматически» для host_kind=iis: спрашивает сервер,
+  // какой IIS-сайт соответствует введённым каталогу/порту (POST /api/iis/detect),
+  // и заполняет iis_site/iis_app_pool. Пользователь всегда может исправить
+  // подставленные значения — это подсказка, а не автоматика вместо него.
+  async function detectIisSite(form) {
+    const statusEl = document.getElementById("iis-detect-status");
+    const btn = document.getElementById("iis-detect-btn");
+    const standDir = form.elements.namedItem("stand_dir").value.trim();
+    const standPort = form.elements.namedItem("stand_port").value.trim();
+    if (!standDir) {
+      statusEl.textContent = "Сначала укажите каталог стенда (stand_dir).";
+      return;
+    }
+    btn.disabled = true;
+    statusEl.textContent = "Ищем сайт в IIS…";
+    try {
+      const data = await apiSend("POST", "/api/iis/detect", {
+        stand_dir: standDir,
+        stand_port: standPort ? Number(standPort) : 0,
+      });
+      const match = (data && data.match) || {};
+      if (match.site) form.elements.namedItem("iis_site").value = match.site;
+      if (match.app_pool) form.elements.namedItem("iis_app_pool").value = match.app_pool;
+      const how = match.matched_by === "binding" ? "по биндингу порта" : "по каталогу сайта";
+      statusEl.textContent = `Найден сайт «${match.site || "?"}» (${how}).`;
+    } catch (e) {
+      statusEl.textContent = e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   function setupRegisterModal() {
     const overlay = document.getElementById("register-modal-overlay");
     const form = document.getElementById("register-form");
+
+    document.getElementById("iis-detect-btn").addEventListener("click", () => detectIisSite(form));
 
     document.getElementById("register-stand-btn").addEventListener("click", openRegisterModal);
     document.getElementById("register-modal-close-btn").addEventListener("click", closeRegisterModal);
@@ -386,6 +521,14 @@
   }
 
   // --- бэйджи статуса ---
+  //
+  // "pending" — пробы ЕЩЁ НЕ выполнялись (ответ на /api/stands?probe=0 либо
+  // первый круг фонового опроса на сервере, см. server.py::PENDING_PROBE_STATE).
+  // Это принципиально НЕ "unknown": "unknown" — честный результат выполненной
+  // проверки («проверять нечем»), а здесь проверки просто ещё не было.
+
+  const PENDING_STATE = "pending";
+  const PENDING_LABEL = "проверяется…";
 
   function badgeClass(state) {
     switch (state) {
@@ -395,17 +538,27 @@
         return "badge badge-down";
       case "skipped":
         return "badge badge-skipped";
+      case PENDING_STATE:
+        return "badge badge-pending";
       default:
         return "badge badge-unknown";
     }
   }
 
   function badge(state) {
-    return `<span class="${badgeClass(state)}">${state || "unknown"}</span>`;
+    const label = state === PENDING_STATE ? PENDING_LABEL : state || "unknown";
+    return `<span class="${badgeClass(state)}">${label}</span>`;
   }
 
   function processBadge(state) {
-    const label = state === "ok" ? "up" : state === "down" ? "down" : state || "unknown";
+    const label =
+      state === "ok"
+        ? "up"
+        : state === "down"
+        ? "down"
+        : state === PENDING_STATE
+        ? PENDING_LABEL
+        : state || "unknown";
     return `<span class="${badgeClass(state)}">${label}</span>`;
   }
 
@@ -417,6 +570,8 @@
         return "value-down";
       case "skipped":
         return "value-skipped";
+      case PENDING_STATE:
+        return "value-pending";
       default:
         return "value-unknown";
     }
@@ -533,11 +688,29 @@
     });
   }
 
+  // Бейдж «вне диспетчера»: стенд жив, но поднят мимо диспетчера (нет живого
+  // pidfile), поэтому Стоп/Рестарт по нему потребуют усыновления — см.
+  // /api/stands::process.external и onStandAction. Показываем ДО нажатия
+  // кнопок, чтобы состояние не выяснялось методом получения отказа.
+  const ICON_EXTERNAL_TITLE =
+    "Стенд запущен вне диспетчера: pid неизвестен. Стоп/Рестарт спросят подтверждение, " +
+    "чтобы взять процесс под управление.";
+
   function processCell(s) {
     if (startingStands.has(s.name)) {
       return '<span class="process-starting"><span class="mini-spinner" aria-hidden="true"></span>Запускается…</span>';
     }
-    return processBadge(s.process ? s.process.state : "unknown");
+    const process = s.process || {};
+    let html = processBadge(process.state);
+    if (process.reason) {
+      // Причина от бэкенда хостинга (IIS: сайт/пул остановлен, порт держит
+      // http.sys) — иначе наружу уходил бы один неинформативный "down".
+      html = `<span title="${escapeAttr(process.reason)}">${html}</span>`;
+    }
+    if (process.external) {
+      html += ` <span class="badge badge-external" title="${escapeAttr(ICON_EXTERNAL_TITLE)}">вне диспетчера</span>`;
+    }
+    return html;
   }
 
   function actionButtons(s) {
@@ -563,6 +736,21 @@
 
   let selectedStand = null;
 
+  // Единая точка применения ответа /api/stands (и SSE-события "stands"):
+  // отрисовка + подхват интервала автообновления + отметка возраста данных.
+  function applyStandsPayload(data) {
+    lastStandsData = (data && data.stands) || [];
+    applyRefreshInterval(data && data.refresh_interval_sec);
+    checkStartingTransitions(lastStandsData);
+    renderStands(lastStandsData);
+    updateLogsMenuState();
+    // Появился (или исчез) стенд с transport=agent — блок параметров демона
+    // в настройках должен появиться или спрятаться без перезагрузки страницы.
+    // Здесь, а не в refreshStands: применение данных приходит и из SSE.
+    updateAgentBlockVisibility(lastStandsData);
+    updateSnapshotAge(data);
+  }
+
   // Возвращает true, если данные реально обновились (нужно вызывающему,
   // чтобы отличить успех от ошибки — см. refreshStandsWithFeedback).
   async function refreshStands() {
@@ -570,10 +758,7 @@
     errorEl.textContent = "";
     try {
       const data = await apiGet("/api/stands");
-      lastStandsData = data.stands || [];
-      checkStartingTransitions(lastStandsData);
-      renderStands(lastStandsData);
-      updateLogsMenuState();
+      applyStandsPayload(data);
       setConnStatus(true);
       return true;
     } catch (e) {
@@ -581,6 +766,24 @@
       setConnStatus(false);
       return false;
     }
+  }
+
+  // ПЕРВАЯ ОТРИСОВКА: ?probe=0 — слепок реестра БЕЗ единой сетевой пробы.
+  // Ответ приходит за десятки миллисекунд, даже если половина стендов сидит
+  // за firewall'ом с DROP, поэтому таблица и индикатор связи появляются сразу
+  // (раньше страница висела серой всё время полного опроса). Все пробы в этом
+  // ответе имеют состояние "pending" — "проверяется…" в таблице. Полные
+  // статусы приезжают вторым запросом либо push'ем через SSE.
+  async function firstPaint() {
+    try {
+      const data = await apiGet("/api/stands?probe=0");
+      applyStandsPayload(data);
+      setConnStatus(true);
+    } catch (e) {
+      document.getElementById("stands-error").textContent = `Ошибка обновления: ${e.message}`;
+      setConnStatus(false);
+    }
+    await refreshStands();
   }
 
   // Ручное обновление по кнопке — с видимой обратной связью: кнопка
@@ -673,6 +876,32 @@
 
   const _ACTION_LABELS = { start: "старт", stop: "остановка", restart: "рестарт", "redis-clear": "очистка Redis" };
 
+  // --- усыновление стенда, поднятого вне диспетчера ---
+  //
+  // Сервер на Стоп/Рестарт такого стенда отвечает 409 с описанием найденного
+  // процесса (adopt_required + candidate) и НИЧЕГО не убивает. Пользователь
+  // видит, что именно предлагается остановить (pid, образ, каталог), и только
+  // после явного согласия запрос повторяется с ?force=1. Молчаливого kill нет
+  // ни на одной ветке — это требование безопасности, а не UX-украшение.
+
+  function describeCandidate(candidate) {
+    if (!candidate) return "";
+    const parts = [`PID ${candidate.pid}`];
+    if (candidate.image) parts.push(candidate.image);
+    const where = candidate.cwd || candidate.exe_path || candidate.cmdline;
+    if (where) parts.push(`каталог ${where}`);
+    return parts.join(", ");
+  }
+
+  async function confirmAdoption(name, action, candidate) {
+    const what = action === "restart" ? "перезапустить" : "остановить";
+    return styledConfirm(
+      "Стенд запущен вне диспетчера",
+      `Стенд ${name} поднят не диспетчером. Найден процесс ${describeCandidate(candidate)}. ` +
+        `Взять его под управление и ${what}?`
+    );
+  }
+
   async function onStandAction(name, action) {
     if (action === "stop") {
       const confirmed = await styledConfirm("Остановка стенда", `Остановить стенд ${name}?`);
@@ -700,7 +929,21 @@
     }
 
     try {
-      const data = await apiSend("POST", `/api/stand/${encodeURIComponent(name)}/${action}`);
+      let data;
+      try {
+        data = await apiSend("POST", `/api/stand/${encodeURIComponent(name)}/${action}`);
+      } catch (e) {
+        // 409 «нужно усыновление»: спрашиваем и, если согласились, повторяем
+        // ровно тот же запрос с ?force=1. Отказ — тихий выход без ошибки.
+        const payload = e.data;
+        if (!payload || !payload.adopt_required) throw e;
+        const confirmed = await confirmAdoption(name, action, payload.candidate);
+        if (!confirmed) return;
+        data = await apiSend(
+          "POST",
+          `/api/stand/${encodeURIComponent(name)}/${action}?force=1`
+        );
+      }
       const pidSuffix = data && typeof data.pid === "number" ? ` (pid ${data.pid})` : "";
       if (action === "start") {
         startingStands.set(name, Date.now());
@@ -841,6 +1084,149 @@
     wrapEl.title = ok ? "Связь с хабом установлена" : "Нет связи с хабом";
   }
 
+  // --- интервал автообновления ---
+  //
+  // Значение приезжает С СЕРВЕРА в каждом ответе /api/stands и в SSE-событии
+  // (HubConfig.refresh_interval_sec). Раньше здесь стояла константа 10000, а
+  // одноимённое поле формы настроек ни на что не влияло. Теперь изменение
+  // применяется без перезагрузки страницы: старый таймер снимается через
+  // clearInterval и заводится новый.
+
+  const DEFAULT_REFRESH_INTERVAL_SEC = 10;
+  // Нижняя граница — зеркало poller.MIN_POLL_INTERVAL_SEC на сервере: чаще
+  // опрашивать всё равно нечего, снапшот обновляется не быстрее.
+  const MIN_REFRESH_INTERVAL_SEC = 2;
+
+  let refreshIntervalMs = DEFAULT_REFRESH_INTERVAL_SEC * 1000;
+  let backgroundTimer = null;
+
+  function backgroundTick() {
+    // Пока жив SSE, список стендов приходит push'ем — дёргать /api/stands
+    // таймером незачем. Остальное (локальный агент, панель состояния) через
+    // SSE не ходит и обновляется по таймеру всегда.
+    if (!sseHealthy) refreshStands();
+    refreshAgentStatus();
+    if (selectedStand) refreshState();
+  }
+
+  function restartBackgroundTimer() {
+    if (backgroundTimer !== null) {
+      clearInterval(backgroundTimer);
+      backgroundTimer = null;
+    }
+    backgroundTimer = setInterval(backgroundTick, refreshIntervalMs);
+  }
+
+  function applyRefreshInterval(seconds) {
+    const parsed = Number(seconds);
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+    const ms = Math.max(MIN_REFRESH_INTERVAL_SEC, parsed) * 1000;
+    if (ms === refreshIntervalMs && backgroundTimer !== null) return;
+    refreshIntervalMs = ms;
+    restartBackgroundTimer();
+  }
+
+  // --- возраст снапшота ---
+  //
+  // Хаб отдаёт не «живой» опрос, а снапшот фонового поллера с отметкой
+  // времени (generated_at/age_sec). Честно показываем возраст — но ТОЛЬКО
+  // когда он о чём-то говорит: пробы ещё не выполнялись либо снапшот старше
+  // двух периодов обновления (значит, фоновый опрос буксует). В норме
+  // элемент пуст и не отвлекает.
+
+  function formatAge(sec) {
+    const whole = Math.round(sec);
+    if (whole < 60) return `${whole} с`;
+    const minutes = Math.round(whole / 60);
+    if (minutes < 60) return `${minutes} мин`;
+    return `${Math.round(minutes / 60)} ч`;
+  }
+
+  function updateSnapshotAge(data) {
+    const el = document.getElementById("stands-age");
+    if (!el) return;
+    if (data && data.probed === false) {
+      el.textContent = "статусы проверяются…";
+      el.title = "Показан слепок реестра, пробы ещё выполняются";
+      return;
+    }
+    const age = data ? Number(data.age_sec) : NaN;
+    if (!Number.isFinite(age) || age <= (refreshIntervalMs / 1000) * 2) {
+      el.textContent = "";
+      el.title = "";
+      return;
+    }
+    el.textContent = `данные от ${formatAge(age)} назад`;
+    el.title = "Фоновый опрос давно не обновлял снапшот состояния стендов";
+  }
+
+  // --- поток обновлений (SSE) ---
+  //
+  // GET /api/events (text/event-stream) — сервер сам присылает новый снапшот,
+  // как только фоновый поллер его собрал. EventSource не умеет слать
+  // кастомные заголовки, поэтому авторизация идёт по той же сессионной
+  // HttpOnly-cookie, что и у обычных GET /api/* — второго механизма токенов
+  // не заводим (см. шапку файла). credentials для same-origin EventSource
+  // отправляются по умолчанию.
+  //
+  // Обрыв — штатная ситуация: браузер переподключается сам (сервер шлёт
+  // "retry: 5000"), а до восстановления список обновляет резервный таймер.
+  // Если поток не поднимается подряд SSE_MAX_FAILURES раз (сервер без
+  // фонового опроса отвечает 503, прокси режет event-stream) — закрываем его
+  // совсем и честно живём на опросе.
+
+  const SSE_MAX_FAILURES = 3;
+
+  let eventSource = null;
+  let sseHealthy = false;
+  let sseFailures = 0;
+
+  function setupEventStream() {
+    if (typeof EventSource === "undefined") return;
+    let source;
+    try {
+      source = new EventSource("/api/events");
+    } catch (e) {
+      return;
+    }
+    eventSource = source;
+
+    source.addEventListener("open", () => {
+      sseFailures = 0;
+      sseHealthy = true;
+    });
+
+    source.addEventListener("stands", (evt) => {
+      let data = null;
+      try {
+        data = JSON.parse(evt.data);
+      } catch (e) {
+        return;
+      }
+      sseFailures = 0;
+      sseHealthy = true;
+      document.getElementById("stands-error").textContent = "";
+      applyStandsPayload(data);
+      setConnStatus(true);
+    });
+
+    source.addEventListener("error", () => {
+      sseHealthy = false;
+      sseFailures += 1;
+      if (sseFailures >= SSE_MAX_FAILURES) {
+        source.close();
+        if (eventSource === source) eventSource = null;
+      }
+    });
+
+    // Уход со страницы освобождает поток ThreadingHTTPServer на сервере, а не
+    // ждёт, пока heartbeat упрётся в закрытый сокет.
+    window.addEventListener("pagehide", () => {
+      source.close();
+      sseHealthy = false;
+    });
+  }
+
   // --- локальный агент ---
 
   async function refreshAgentStatus() {
@@ -895,7 +1281,141 @@
     "lockout_window_sec",
   ];
 
+  // Поля блока «Агент (расширенное)» — зеркалят флаги CLI standkit-agent и
+  // нужны только администратору хоста удалённого стенда. Список отдельно от
+  // SETTINGS_FIELDS, потому что по нему решается, показывать ли блок вообще.
+  const AGENT_FIELDS = [
+    "agent_host",
+    "agent_port",
+    "token_ref",
+    "readonly_token_ref",
+    "tls_cert",
+    "tls_key",
+    "tls_client_ca",
+    "audit_log",
+    "lockout_max_failures",
+    "lockout_window_sec",
+  ];
+
   let currentAgents = [];
+
+  // Поля, которые имеет смысл валидировать на клиенте до отправки: пользователь
+  // получает ответ мгновенно и рядом с полем, а не общей строкой ошибки снизу.
+  const PORT_FIELDS = ["agent_port"];
+  const POSITIVE_INT_FIELDS = [
+    "refresh_interval_sec",
+    "lockout_max_failures",
+    "lockout_window_sec",
+  ];
+  const PATH_FIELDS = ["registry_path", "run_dir", "log_dir", "tls_cert", "tls_key", "tls_client_ca", "audit_log"];
+
+  // Символы, недопустимые в пути и на Windows, и на Linux. Полноценную проверку
+  // существования делает сервер — здесь отсекаем только заведомый мусор
+  // (например, вставленную из терминала команду вместо пути).
+  const BAD_PATH_CHARS = /[<>"|?*\r\n\t]/;
+
+  function fieldLabel(input) {
+    const label = input.closest("label");
+    if (!label) return input.name;
+    const text = label.childNodes[0] && label.childNodes[0].textContent;
+    return (text || input.name).trim();
+  }
+
+  function setFieldError(input, message) {
+    const label = input.closest("label") || input.parentElement;
+    if (!label) return;
+    let errorEl = label.querySelector(".field-error");
+    if (!message) {
+      if (errorEl) errorEl.remove();
+      input.removeAttribute("aria-invalid");
+      return;
+    }
+    if (!errorEl) {
+      errorEl = document.createElement("small");
+      errorEl.className = "field-error";
+      label.appendChild(errorEl);
+    }
+    errorEl.textContent = message;
+    input.setAttribute("aria-invalid", "true");
+  }
+
+  /**
+   * Проверяет форму настроек на клиенте. Возвращает список сообщений об
+   * ошибках (пустой — всё в порядке) и подсвечивает проблемные поля.
+   *
+   * Это удобство, а не защита: сервер валидирует то же самое независимо —
+   * форма не единственный способ записать конфиг.
+   */
+  function validateSettingsForm(form) {
+    const problems = [];
+    SETTINGS_FIELDS.forEach((field) => {
+      const input = form.elements.namedItem(field);
+      if (!input) return;
+      setFieldError(input, "");
+      const raw = (input.value || "").trim();
+      if (!raw) return; // пустое поле = «взять дефолт», это законно
+
+      if (PORT_FIELDS.includes(field)) {
+        const port = Number(raw);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          const msg = "порт должен быть целым числом от 1 до 65535";
+          setFieldError(input, msg);
+          problems.push(`${fieldLabel(input)}: ${msg}`);
+        }
+        return;
+      }
+
+      if (POSITIVE_INT_FIELDS.includes(field)) {
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value < 1) {
+          const msg = "значение должно быть положительным числом";
+          setFieldError(input, msg);
+          problems.push(`${fieldLabel(input)}: ${msg}`);
+        }
+        return;
+      }
+
+      if (PATH_FIELDS.includes(field) && BAD_PATH_CHARS.test(raw)) {
+        const msg = "путь содержит недопустимые символы";
+        setFieldError(input, msg);
+        problems.push(`${fieldLabel(input)}: ${msg}`);
+      }
+    });
+
+    currentAgents.forEach((agent, idx) => {
+      const hasAny = (agent.name || agent.url || agent.token_ref || "").length > 0;
+      if (!hasAny) return;
+      if (!agent.name) problems.push(`Удалённый агент №${idx + 1}: не указано имя`);
+      if (!agent.url) {
+        problems.push(`Удалённый агент №${idx + 1}: не указан url`);
+      } else if (!/^https?:\/\/.+/i.test(agent.url.trim())) {
+        problems.push(`Удалённый агент №${idx + 1}: url должен начинаться с http:// или https://`);
+      }
+    });
+
+    return problems;
+  }
+
+  /**
+   * Показывает блок «Агент (расширенное)» только тогда, когда он может
+   * понадобиться: в реестре есть хотя бы один стенд с transport=agent, либо
+   * уже настроен удалённый агент, либо какое-то из полей блока непусто
+   * (иначе пользователь не смог бы увидеть то, что сам когда-то ввёл).
+   */
+  function updateAgentBlockVisibility(stands) {
+    const block = document.getElementById("settings-agent-advanced");
+    if (!block) return;
+    const form = document.getElementById("settings-form");
+    const hasAgentStand = (stands || []).some(
+      (s) => s && s.process && s.process.transport === "agent"
+    );
+    const hasRemoteAgents = currentAgents.length > 0;
+    const hasFilledField = AGENT_FIELDS.some((field) => {
+      const input = form && form.elements.namedItem(field);
+      return input && String(input.value || "").trim() !== "";
+    });
+    block.hidden = !(hasAgentStand || hasRemoteAgents || hasFilledField);
+  }
 
   function renderAgentsList() {
     const container = document.getElementById("agents-list");
@@ -920,18 +1440,41 @@
       });
       container.appendChild(row);
     });
+
+    const counter = document.getElementById("remote-agents-count");
+    if (counter) {
+      counter.textContent = currentAgents.length ? ` — настроено: ${currentAgents.length}` : "";
+    }
   }
 
   async function loadSettings() {
     const data = await apiGet("/api/settings");
     const form = document.getElementById("settings-form");
+    const defaults = data.defaults || {};
     SETTINGS_FIELDS.forEach((field) => {
       const input = form.elements.namedItem(field);
-      if (input) input.value = data[field] ?? "";
+      if (!input) return;
+      input.value = data[field] ?? "";
+      setFieldError(input, "");
+      // Пустое поле означает «взять дефолт» — показываем, какой именно, чтобы
+      // пользователю не приходилось гадать или лезть в --help.
+      const fallback = defaults[field];
+      input.placeholder =
+        fallback === undefined || fallback === null || fallback === ""
+          ? "не задано"
+          : String(fallback);
     });
     form.elements.namedItem("insecure").checked = !!data.insecure;
+    // Тема — из конфига (источник правды). Обычно совпадает с тем, что уже
+    // подставил сервер в <html data-theme>; расхождение возможно, если конфиг
+    // правили снаружи (руками, вторым экземпляром хаба).
+    applyTheme(data.theme);
+    // Интервал автообновления применяем сразу после сохранения настроек —
+    // не дожидаясь следующего ответа /api/stands.
+    applyRefreshInterval(data.refresh_interval_sec);
     currentAgents = (data.agents || []).map((a) => ({ ...a }));
     renderAgentsList();
+    updateAgentBlockVisibility(lastStandsData);
     await refreshSecretStatuses();
   }
 
@@ -961,6 +1504,20 @@
       evt.preventDefault();
       const statusEl = document.getElementById("settings-status");
       statusEl.textContent = "";
+      statusEl.classList.remove("status-error");
+
+      const problems = validateSettingsForm(form);
+      if (problems.length) {
+        statusEl.textContent =
+          problems.length === 1
+            ? `Не сохранено — ${problems[0]}`
+            : `Не сохранено — ошибок: ${problems.length}. ${problems.join("; ")}`;
+        statusEl.classList.add("status-error");
+        const firstBad = form.querySelector('[aria-invalid="true"]');
+        if (firstBad) firstBad.focus();
+        return;
+      }
+
       const payload = {};
       SETTINGS_FIELDS.forEach((field) => {
         const input = form.elements.namedItem(field);
@@ -970,8 +1527,14 @@
       payload.insecure = form.elements.namedItem("insecure").checked;
       payload.agents = currentAgents;
       try {
-        await apiSend("POST", "/api/settings", payload);
+        // Тему в payload сознательно НЕ кладём: её меняет только переключатель
+        // в шапке, а сервер мержит тело поверх текущего конфига — значение
+        // сохранится само.
+        const saved = await apiSend("POST", "/api/settings", payload);
         statusEl.textContent = "Настройки сохранены";
+        // Новый refresh_interval_sec применяем немедленно, без перезагрузки
+        // страницы (старый таймер снимается внутри applyRefreshInterval).
+        applyRefreshInterval(saved && saved.refresh_interval_sec);
         await refreshSecretStatuses();
       } catch (e) {
         statusEl.textContent = `Ошибка сохранения: ${e.message}`;
@@ -981,6 +1544,8 @@
     document.getElementById("add-agent-btn").addEventListener("click", () => {
       currentAgents.push({ name: "", url: "", token_ref: "" });
       renderAgentsList();
+      // Появился удалённый агент — параметры демона стали релевантны.
+      updateAgentBlockVisibility(lastStandsData);
     });
 
     document.querySelectorAll(".set-secret-btn").forEach((btn) => {
@@ -1018,6 +1583,7 @@
 
   function init() {
     setupTheme();
+    setupViewToggle();
     setupTabs();
     setupAboutModal();
     setupRegisterModal();
@@ -1027,18 +1593,18 @@
     setupActionStatus();
     document.getElementById("refresh-stands-btn").addEventListener("click", refreshStandsWithFeedback);
 
-    refreshStands();
+    // Быстрая первая отрисовка (?probe=0) + полный статус вторым запросом.
+    firstPaint();
+    // Push-обновления; при их отсутствии работает резервный таймер ниже.
+    setupEventStream();
     refreshAgentStatus();
     loadSettings().catch((e) => {
       document.getElementById("settings-status").textContent = `Ошибка загрузки настроек: ${e.message}`;
     });
 
-    const intervalMs = 10000;
-    setInterval(() => {
-      refreshStands();
-      refreshAgentStatus();
-      if (selectedStand) refreshState();
-    }, intervalMs);
+    // Стартовый период — дефолтный; реальный refresh_interval_sec приедет с
+    // первым же ответом /api/stands и перезаведёт таймер (applyRefreshInterval).
+    restartBackgroundTimer();
   }
 
   document.addEventListener("DOMContentLoaded", init);

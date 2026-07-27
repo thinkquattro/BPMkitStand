@@ -6,9 +6,15 @@ OS-абстракция запуска процессов: скрытый (headl
 как ``pathlib.Path``. Модуль не знает ничего про BPMSoft — только про то, как
 корректно поднять/остановить/проверить произвольный процесс кроссплатформенно.
 
+Остановка — с ЭСКАЛАЦИЕЙ (см. ``stop``): сначала мягкое завершение
+(SIGTERM / CTRL_BREAK + ``taskkill`` без ``/F``), ожидание в пределах таймаута,
+и только затем жёсткое (SIGKILL / ``taskkill /F``). Это существенно с тех пор,
+как диспетчер умеет «усыновлять» стенды, поднятые вне его (см.
+``standkit.adopt``): жёсткое убийство перестало быть редким случаем, а
+BPMSoft-стенду нужно дать закрыть соединения с БД/Redis.
+
 Остаточные пункты следующих итераций (Windows Job Object для остановки дерева
-процессов, полноценный double-fork на Linux, graceful stop с эскалацией
-SIGTERM→таймаут→SIGKILL / CTRL_BREAK_EVENT) — см. docs/ARCHITECTURE.md,
+процессов, полноценный double-fork на Linux) — см. docs/ARCHITECTURE.md,
 раздел «Что уже реализовано в каркасе vs TODO».
 """
 
@@ -18,8 +24,21 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Sequence
+
+# Сколько ждать мягкого завершения процесса, прежде чем эскалировать до
+# жёсткого убийства. Значение с запасом: BPMSoft.WebHost на завершении
+# закрывает пул соединений с БД и сбрасывает кэши, доли секунды ему мало.
+DEFAULT_STOP_TIMEOUT = 10.0
+
+# Шаг опроса «жив ли ещё процесс» в ожидании мягкого завершения.
+DEFAULT_STOP_POLL_INTERVAL = 0.25
+
+# Кап ожидания ПОСЛЕ жёсткого убийства — оно почти мгновенно, ждать столько же,
+# сколько мягкого, бессмысленно.
+_HARD_KILL_WAIT = 5.0
 
 
 class ProcessError(Exception):
@@ -78,23 +97,52 @@ def is_alive(pid: int) -> bool:
     return _is_alive_posix(pid)
 
 
-def stop(pid: int, *, timeout: float = 10.0) -> bool:
+def stop(
+    pid: int,
+    *,
+    timeout: float = DEFAULT_STOP_TIMEOUT,
+    poll_interval: float = DEFAULT_STOP_POLL_INTERVAL,
+) -> bool:
     """
-    Останавливает процесс по pid.
+    Останавливает процесс по pid с эскалацией «мягко → таймаут → жёстко».
 
-    Сейчас — безусловное завершение (SIGTERM/taskkill), без эскалации до SIGKILL
-    по таймауту (параметр ``timeout`` зарезервирован под будущую graceful-эскалацию;
-    бэклог — см. docs/ARCHITECTURE.md).
+    Порядок:
+      1. мягкое завершение — POSIX: ``SIGTERM``; Windows: ``CTRL_BREAK_EVENT``
+         (процесс стенда спавнится в собственной группе, см. ``spawn_hidden``)
+         плюс ``taskkill /T`` БЕЗ ``/F``;
+      2. ожидание до ``timeout`` секунд с опросом раз в ``poll_interval``;
+      3. если не завершился — жёстко: ``SIGKILL`` / ``taskkill /T /F``.
 
-    Возвращает True, если процесс на момент вызова считался остановленным
+    ``timeout=0`` пропускает ожидание и эскалирует сразу (используется в тестах,
+    чтобы не ждать реальное время).
+
+    Возвращает True, если процесс на момент возврата считается остановленным
     (уже не был жив, либо остановлен успешно).
     """
     if not is_alive(pid):
         return True
 
     if sys.platform == "win32":
-        return _stop_windows(pid)
-    return _stop_posix(pid)
+        return _stop_windows(pid, timeout=timeout, poll_interval=poll_interval)
+    return _stop_posix(pid, timeout=timeout, poll_interval=poll_interval)
+
+
+def wait_for_exit(pid: int, timeout: float, poll_interval: float = DEFAULT_STOP_POLL_INTERVAL) -> bool:
+    """
+    Ждёт завершения процесса не дольше ``timeout`` секунд.
+
+    Возвращает True, если процесс завершился. При ``timeout <= 0`` делает ровно
+    одну проверку и не спит вовсе.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    step = max(0.01, poll_interval)
+    while True:
+        if not is_alive(pid):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(step, remaining))
 
 
 # --- Windows-специфика ---
@@ -129,16 +177,54 @@ def _is_alive_windows(pid: int) -> bool:
             return False
 
 
-def _stop_windows(pid: int) -> bool:
+def _send_ctrl_break(pid: int) -> None:
+    """
+    Best-effort мягкий сигнал консольному процессу на Windows
+    (``GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)``).
+
+    Работает только когда вызывающий процесс разделяет консоль с целевым —
+    для хаба/агента это обычно НЕ так, и вызов тихо не проходит. Это осознанно:
+    попытка бесплатная, а следом всё равно идёт ``taskkill``. pid<=0 не
+    передаём никогда — нулевая группа означала бы «сигнал самому себе».
+    """
+    if pid <= 0:
+        return
+    try:
+        import ctypes
+
+        CTRL_BREAK_EVENT = 1
+        ctypes.windll.kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
+def _taskkill(pid: int, *, force: bool) -> None:
+    """``taskkill /PID <pid> /T`` (дерево процессов), с ``/F`` — жёстко."""
+    args = ["taskkill", "/PID", str(pid), "/T"]
+    if force:
+        args.append("/F")
     try:
         subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            args,
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
     except OSError as exc:
         raise ProcessError(f"Не удалось остановить процесс {pid}: {exc}") from exc
+
+
+def _stop_windows(pid: int, *, timeout: float, poll_interval: float) -> bool:
+    # Мягко: CTRL_BREAK (если консоль общая) + taskkill без /F — тот шлёт
+    # WM_CLOSE и даёт процессу отработать штатное завершение.
+    _send_ctrl_break(pid)
+    _taskkill(pid, force=False)
+    if wait_for_exit(pid, timeout, poll_interval):
+        return True
+
+    # Не успел — жёстко.
+    _taskkill(pid, force=True)
+    wait_for_exit(pid, min(timeout, _HARD_KILL_WAIT), poll_interval)
     return not is_alive(pid)
 
 
@@ -155,11 +241,23 @@ def _is_alive_posix(pid: int) -> bool:
         return True
 
 
-def _stop_posix(pid: int) -> bool:
+def _stop_posix(pid: int, *, timeout: float, poll_interval: float) -> bool:
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         return True
     except OSError as exc:
         raise ProcessError(f"Не удалось остановить процесс {pid}: {exc}") from exc
+
+    if wait_for_exit(pid, timeout, poll_interval):
+        return True
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except OSError as exc:
+        raise ProcessError(f"Не удалось принудительно завершить процесс {pid}: {exc}") from exc
+
+    wait_for_exit(pid, min(timeout, _HARD_KILL_WAIT), poll_interval)
     return not is_alive(pid)

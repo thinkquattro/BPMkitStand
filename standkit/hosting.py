@@ -21,9 +21,13 @@ standkit / IIS Application Pool / Docker-контейнер), ортогонал
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
@@ -37,6 +41,17 @@ _DEFAULT_TIMEOUT = 20.0
 
 class HostingError(Exception):
     """Ошибка бэкенда хостинга (внешняя утилита не найдена, команда завершилась с ошибкой и т.п.)."""
+
+
+class IisElevationError(HostingError):
+    """
+    Отдельный тип для самой частой причины отказа IIS-операций: диспетчер
+    запущен БЕЗ прав администратора, а ``appcmd.exe`` без elevation не может
+    даже прочитать ``redirection.config`` в ``%windir%\\system32\\inetsrv``.
+
+    Нужен, чтобы UI показал внятный диагноз «требуются права администратора»
+    вместо общего текста ошибки внешней команды.
+    """
 
 
 @runtime_checkable
@@ -136,7 +151,17 @@ _ELEVATION_MARKERS = (
     "разрешени",       # «…необходимых разрешений»
     "0x80070005",
     "(код 1168)",
+    "requires administrator",
+    "elevated",
     "error ( message:",  # общий appcmd-ERROR при неудачном открытии config
+)
+
+# Подсказка, которая дописывается к любой ошибке appcmd, похожей на нехватку
+# прав — одна формулировка на все места (start/stop/restart/list/wp).
+ELEVATION_HINT = (
+    "\n\nПохоже, не хватает прав администратора: управление IIS через appcmd.exe "
+    "требует запуска диспетчера «от имени администратора» (elevated). Запустите "
+    "standkit-hub с правами администратора и повторите операцию."
 )
 
 
@@ -155,18 +180,15 @@ def _run_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subpro
 
 
 def _appcmd_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
-    """``_run_checked`` для appcmd: при ошибке нехватки прав добавляет к тексту
-    понятную IIS-подсказку «запустите от имени администратора»."""
+    """``_run_checked`` для appcmd: при ошибке нехватки прав бросает
+    ``IisElevationError`` с понятной подсказкой «запустите от имени
+    администратора» (подтип ``HostingError`` — прежние ``except HostingError``
+    продолжают работать, но UI может отличить именно этот случай)."""
     try:
         return _run_checked(cmd, timeout=timeout)
     except HostingError as exc:
         if _looks_like_elevation_error(str(exc)):
-            raise HostingError(
-                str(exc)
-                + "\n\nПохоже, не хватает прав администратора: управление IIS через appcmd.exe "
-                "требует запуска диспетчера «от имени администратора» (elevated). Запустите "
-                "standkit-hub с правами администратора и повторите операцию."
-            ) from exc
+            raise IisElevationError(str(exc) + ELEVATION_HINT) from exc
         raise
 
 
@@ -203,17 +225,22 @@ class KestrelBackend:
 
         return _lifecycle._kestrel_start(stand, run_dir=run_dir, log_dir=log_dir)
 
-    def stop(self, stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+    def stop(self, stand: Stand, *, run_dir: Optional[Path] = None, force: bool = False) -> bool:
         from standkit import lifecycle as _lifecycle
 
-        return _lifecycle._kestrel_stop(stand, run_dir=run_dir)
+        return _lifecycle._kestrel_stop(stand, run_dir=run_dir, force=force)
 
     def restart(
-        self, stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None
+        self,
+        stand: Stand,
+        *,
+        run_dir: Optional[Path] = None,
+        log_dir: Optional[Path] = None,
+        force: bool = False,
     ) -> Optional[int]:
         from standkit import lifecycle as _lifecycle
 
-        return _lifecycle._kestrel_restart(stand, run_dir=run_dir, log_dir=log_dir)
+        return _lifecycle._kestrel_restart(stand, run_dir=run_dir, log_dir=log_dir, force=force)
 
     def is_running(self, stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
         from standkit import lifecycle as _lifecycle
@@ -233,8 +260,6 @@ class KestrelBackend:
 
 def _resolve_appcmd() -> str:
     """Резолвит путь к ``appcmd.exe``. Бросает ``HostingError`` вне Windows либо если файла нет."""
-    import os
-
     if sys.platform != "win32":
         raise HostingError(
             "host_kind=iis поддерживается только на Windows (нужен appcmd.exe) — "
@@ -247,6 +272,198 @@ def _resolve_appcmd() -> str:
             "Tools (Windows Features → Web Management Tools → IIS Management Console/Scripts)"
         )
     return appcmd
+
+
+@dataclass
+class IisSiteMatch:
+    """
+    Результат автоопределения IIS-сайта стенда (см. ``detect_iis_site``) —
+    прямой аналог «поиска pid по порту» для kestrel: у IIS pid'а нет, зато
+    есть сайт с physical path и биндингом.
+    """
+
+    site: Optional[str] = None
+    app_pool: Optional[str] = None
+    physical_path: Optional[str] = None
+    port: Optional[int] = None
+    matched_by: str = ""  # "physical_path" | "binding"
+
+    def to_dict(self) -> dict:
+        return {
+            "site": self.site,
+            "app_pool": self.app_pool,
+            "physical_path": self.physical_path,
+            "port": self.port,
+            "matched_by": self.matched_by,
+        }
+
+
+@dataclass
+class IisState:
+    """
+    Развёрнутое состояние IIS-стенда: наружу (в ``ProbeState``) уходит один
+    ``DOWN``, а причин у него три принципиально разных — «сайт остановлен»,
+    «пул приложений остановлен» и «порт держит http.sys, стенд отдаёт 503».
+    ``reason`` показывается в UI, чтобы не гадать по одному бейджу.
+    """
+
+    running: bool = False
+    site_state: Optional[str] = None
+    pool_state: Optional[str] = None
+    port_open: bool = False
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "running": self.running,
+            "site_state": self.site_state,
+            "pool_state": self.pool_state,
+            "port_open": self.port_open,
+            "reason": self.reason,
+        }
+
+
+# `appcmd list wp` печатает строки вида: WP "6832" (applicationPool:DefaultAppPool)
+_WP_RE = re.compile(r'^\s*WP\s+"?(?P<pid>\d+)"?\s*\(applicationPool:(?P<pool>[^)]*)\)', re.IGNORECASE)
+
+
+def parse_worker_processes(output: str) -> list[dict]:
+    """Разбирает вывод ``appcmd list wp`` → ``[{"pid": int, "app_pool": str}, ...]``."""
+    result: list[dict] = []
+    for line in output.splitlines():
+        m = _WP_RE.match(line)
+        if not m:
+            continue
+        try:
+            pid = int(m.group("pid"))
+        except ValueError:
+            continue
+        result.append({"pid": pid, "app_pool": m.group("pool").strip()})
+    return result
+
+
+def _parse_appcmd_xml(xml_text: str, tag: str) -> list[dict]:
+    """
+    Разбирает XML-вывод ``appcmd list <объекты> /xml`` и возвращает атрибуты
+    элементов ``tag`` (``SITE``/``VDIR``/``APP``) как список словарей.
+
+    Пустой список — вывод пуст или это не XML (например, appcmd напечатал
+    ошибку). Разбор — ``xml.etree.ElementTree`` из stdlib.
+    """
+    if not xml_text or not xml_text.strip():
+        return []
+    try:
+        root = ET.fromstring(xml_text.strip())
+    except ET.ParseError:
+        return []
+    return [dict(el.attrib) for el in root.iter(tag)]
+
+
+def parse_binding_ports(bindings: str) -> list[int]:
+    """
+    Порты HTTP(S)-биндингов из атрибута ``bindings`` элемента ``SITE``
+    (``"http/*:5000:,net.tcp/808:*"``). Не-HTTP протоколы игнорируются — иначе
+    ``net.tcp/808:*`` дал бы ложный «порт 808».
+    """
+    ports: list[int] = []
+    for binding in (bindings or "").split(","):
+        binding = binding.strip()
+        if not binding:
+            continue
+        protocol, _, rest = binding.partition("/")
+        if protocol.lower() not in ("http", "https"):
+            continue
+        parts = rest.split(":")
+        if len(parts) < 2 or not parts[1].isdigit():
+            continue
+        port = int(parts[1])
+        if port not in ports:
+            ports.append(port)
+    return ports
+
+
+def _same_path(left: Optional[str], right: Optional[str]) -> bool:
+    """Сравнение путей IIS и реестра: раскрываем ``%SystemDrive%`` и нормализуем регистр/слэши."""
+    if not left or not right:
+        return False
+    a = os.path.normcase(os.path.normpath(os.path.expandvars(str(left))))
+    b = os.path.normcase(os.path.normpath(os.path.expandvars(str(right))))
+    return a == b
+
+
+def _site_of_vdir(vdir_name: str) -> str:
+    """Имя сайта из ``VDIR.NAME`` вида ``"Default Web Site/"`` → ``"Default Web Site"``."""
+    return (vdir_name or "").split("/", 1)[0]
+
+
+def detect_iis_site(stand: Stand) -> Optional[IisSiteMatch]:
+    """
+    Автоопределение IIS-сайта стенда, развёрнутого мимо диспетчера (в реестре
+    нет ``iis_site``/``iis_app_pool``).
+
+    Сопоставление — по двум признакам, в порядке надёжности:
+      1. physical path виртуального каталога == ``stand.stand_dir``
+         (``appcmd list vdirs /xml``);
+      2. HTTP-биндинг сайта на ``stand.stand_port`` (``appcmd list sites /xml``).
+
+    Пул приложений подтягивается из ``appcmd list apps /xml`` — чтобы кнопка
+    «Определить автоматически» в форме регистрации заполнила оба поля разом.
+
+    ``None`` — сопоставить не удалось. Ошибка прав администратора НЕ глотается
+    (пробрасывается ``IisElevationError``): иначе пользователь видел бы «не
+    нашли сайт» вместо реальной причины.
+    """
+    appcmd = _resolve_appcmd()
+    sites = _parse_appcmd_xml(_appcmd_checked([appcmd, "list", "sites", "/xml"]).stdout, "SITE")
+    vdirs = _parse_appcmd_xml(_appcmd_checked([appcmd, "list", "vdirs", "/xml"]).stdout, "VDIR")
+
+    match: Optional[IisSiteMatch] = None
+
+    for vdir in vdirs:
+        if _same_path(vdir.get("physicalPath"), stand.stand_dir):
+            match = IisSiteMatch(
+                site=_site_of_vdir(vdir.get("VDIR.NAME", "")) or None,
+                physical_path=os.path.expandvars(vdir.get("physicalPath", "")) or None,
+                matched_by="physical_path",
+            )
+            break
+
+    if match is None and stand.stand_port:
+        for site in sites:
+            if int(stand.stand_port) in parse_binding_ports(site.get("bindings", "")):
+                match = IisSiteMatch(
+                    site=site.get("SITE.NAME") or None,
+                    port=int(stand.stand_port),
+                    matched_by="binding",
+                )
+                break
+
+    if match is None:
+        return None
+
+    # Порт из биндинга сайта — даже когда совпали по physical path (полезно
+    # показать пользователю, что найденный сайт действительно на его порту).
+    if match.port is None:
+        for site in sites:
+            if site.get("SITE.NAME") == match.site:
+                ports = parse_binding_ports(site.get("bindings", ""))
+                match.port = ports[0] if ports else None
+                break
+
+    # Physical path — когда совпали по биндингу.
+    if match.physical_path is None:
+        for vdir in vdirs:
+            if _site_of_vdir(vdir.get("VDIR.NAME", "")) == match.site:
+                match.physical_path = os.path.expandvars(vdir.get("physicalPath", "")) or None
+                break
+
+    apps = _parse_appcmd_xml(_appcmd_checked([appcmd, "list", "apps", "/xml"]).stdout, "APP")
+    for app in apps:
+        if _site_of_vdir(app.get("APP.NAME", "")) == match.site:
+            match.app_pool = app.get("applicationPool") or None
+            break
+
+    return match
 
 
 class IisBackend:
@@ -311,25 +528,107 @@ class IisBackend:
             )
         return None
 
-    def is_running(self, stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+    def describe_state(self, stand: Stand, *, run_dir: Optional[Path] = None) -> IisState:
+        """
+        Развёрнутое состояние стенда в IIS — тот же вердикт, что у
+        ``is_running``, плюс ПРИЧИНА (см. ``IisState``). Проба: наружу ничего
+        не бросает.
+
+        Идентичность стенда в IIS — его SITE (см. stop/restart: управляем
+        только сайтом, App Pool не трогаем). Поэтому «работает ли стенд» =
+        состояние САЙТА; пул смотрим дополнительно — остановленный пул
+        означает, что сайт хоть и Started, но запросы не обслуживаются.
+        Когда сайт не задан, пул остаётся единственным хэндлом.
+
+        ВАЖНО: НЕ падать на TCP-фолбэк при определённом ответе appcmd —
+        IIS/http.sys держит порт 80/443 даже у остановленного сайта (503),
+        открытый порт НЕ означает «стенд работает». TCP-фолбэк — только когда
+        appcmd состояния не дал (сайт/пул не найден, ошибка команды, нет прав).
+        """
+        state = IisState()
         try:
             appcmd = _resolve_appcmd()
-        except HostingError:
-            return _tcp_fallback(stand)
+        except HostingError as exc:
+            state.port_open = _tcp_fallback(stand)
+            state.running = state.port_open
+            state.reason = f"состояние IIS не опрошено ({exc}) — вердикт по TCP-порту"
+            return state
 
-        # Идентичность стенда в IIS — его SITE (см. stop/restart: управляем
-        # только сайтом, App Pool не трогаем). Поэтому «работает ли стенд» =
-        # состояние САЙТА; пул смотрим лишь когда сайт не задан (единственный
-        # хэндл). ВАЖНО: НЕ падать на TCP-фолбэк при определённом ответе appcmd —
-        # IIS/http.sys держит порт 80/443 даже у остановленного сайта (503),
-        # открытый порт НЕ означает «стенд работает». TCP-фолбэк — только когда
-        # appcmd состояния не дал (сайт/пул не найден, ошибка команды).
-        target, name = ("site", stand.iis_site) if stand.iis_site else ("apppool", stand.iis_app_pool)
-        if name:
-            state = self._query_state(appcmd, target, name)
-            if state is not None:
-                return state == "Started"
-        return _tcp_fallback(stand)
+        if stand.iis_site:
+            state.site_state = self._query_state(appcmd, "site", stand.iis_site)
+        if stand.iis_app_pool:
+            state.pool_state = self._query_state(appcmd, "apppool", stand.iis_app_pool)
+
+        primary = state.site_state if stand.iis_site else state.pool_state
+        if primary is None:
+            state.port_open = _tcp_fallback(stand)
+            state.running = state.port_open
+            state.reason = (
+                "appcmd не вернул состояние (сайт/пул не найден либо не хватает прав) — "
+                "вердикт по TCP-порту"
+            )
+            return state
+
+        site_ok = (state.site_state == "Started") if stand.iis_site else True
+        pool_ok = (state.pool_state != "Stopped") if stand.iis_app_pool else True
+        state.running = site_ok and pool_ok and primary == "Started"
+
+        if state.running:
+            state.reason = "сайт запущен" if stand.iis_site else "пул приложений запущен"
+            return state
+
+        # Стенд не работает — говорим, ПОЧЕМУ именно.
+        state.port_open = _tcp_fallback(stand)
+        if stand.iis_site and state.site_state != "Started":
+            state.reason = f"сайт остановлен (state={state.site_state})"
+        elif state.pool_state == "Stopped":
+            state.reason = "пул приложений остановлен"
+        else:
+            state.reason = f"состояние: {primary}"
+        if state.port_open:
+            state.reason += " — порт при этом занят http.sys, стенд отдаёт 503"
+        return state
+
+    def is_running(self, stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+        return self.describe_state(stand, run_dir=run_dir).running
+
+    def worker_processes(self, stand: Stand) -> list[dict]:
+        """
+        Worker-процессы (``w3wp.exe``) пула этого стенда — ``appcmd list wp``.
+
+        Если пул стенда известен (``iis_app_pool``), список фильтруется по нему;
+        иначе возвращаются все worker-процессы (пользователь сам решит, что с
+        ними делать — гадать за него нельзя).
+        """
+        appcmd = _resolve_appcmd()
+        result = _appcmd_checked([appcmd, "list", "wp"])
+        wps = parse_worker_processes(result.stdout)
+        if stand.iis_app_pool:
+            return [wp for wp in wps if wp["app_pool"] == stand.iis_app_pool]
+        return wps
+
+    def kill_worker_processes(self, stand: Stand) -> list[int]:
+        """
+        Снимает зависшие worker-процессы стенда по pid (``standkit.platform.stop``
+        с эскалацией мягко→жёстко).
+
+        Закрывает случай «``appcmd stop site`` отработал, а ``w3wp.exe`` висит
+        намертво, и убить его нечем» — той же машинерией, что и усыновление
+        kestrel-стенда. Требует ``iis_app_pool``: снимать ВСЕ worker-процессы
+        машины (в т.ч. чужих приложений) диспетчер не станет.
+        """
+        if not stand.iis_app_pool:
+            raise HostingError(
+                f"стенд '{stand.name}': снятие worker-процессов требует явного iis_app_pool — "
+                "иначе непонятно, какие именно w3wp.exe принадлежат этому стенду"
+            )
+        from standkit import platform as _platform  # локальный импорт — избегаем цикла
+
+        killed: list[int] = []
+        for wp in self.worker_processes(stand):
+            if _platform.stop(wp["pid"]):
+                killed.append(wp["pid"])
+        return killed
 
     def read_logs(
         self, stand: Stand, n: int = 100, *, log_dir: Optional[Path] = None

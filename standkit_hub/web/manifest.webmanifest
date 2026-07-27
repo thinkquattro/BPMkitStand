@@ -1,0 +1,41 @@
+{
+  "name": "BPMkit Дашборд — диспетчер стендов",
+  "short_name": "BPMkit Стенды",
+  "description": "Локальный диспетчер стендов BPMSoft: старт, стоп, рестарт, health-пробы, логи.",
+  "lang": "ru",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#ffffff",
+  "theme_color": "#1f6feb",
+  "icons": [
+    {
+      "src": "/static/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/favicon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/favicon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Компактный режим",
+      "short_name": "Компактный",
+      "description": "Узкое окно со списком стендов, точками состояния и кнопками старт/стоп.",
+      "url": "/?view=compact"
+    }
+  ]
+}
