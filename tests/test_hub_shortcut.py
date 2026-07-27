@@ -13,7 +13,10 @@ macOS: просто убеждаемся, что функции не падаю�
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+import pytest
 
 import standkit_hub.shortcut as shortcut_module
 from standkit_hub.shortcut import (
@@ -48,6 +51,17 @@ def test_uninstall_unsupported_platform_returns_ok_false(monkeypatch):
 # --- Linux ---
 
 
+# Эти два теста проверяют СОДЕРЖИМОЕ .desktop-файла и POSIX-права на него,
+# то есть вещи, которых на Windows не существует: Path("/tmp/icon.png") там
+# превращается в "\tmp\icon.png", а бит исполнения не выставляется в принципе.
+# Раньше они просто падали при каждом прогоне на машине разработчика и
+# приучали не смотреть на красноту.
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32", reason=".desktop-файлы и POSIX-права — только Linux"
+)
+
+
+@posix_only
 def test_build_desktop_entry_contains_required_fields():
     content = build_desktop_entry("standkit-gui", Path("/tmp/icon.png"))
 
@@ -59,6 +73,7 @@ def test_build_desktop_entry_contains_required_fields():
     assert "Terminal=false" in content
 
 
+@posix_only
 def test_install_linux_writes_applications_entry_and_desktop_copy(tmp_path, monkeypatch):
     monkeypatch.setattr(shortcut_module.sys, "platform", "linux")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)

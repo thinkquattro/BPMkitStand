@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -771,7 +772,18 @@ def test_api_stand_logs_open_folder_calls_subprocess(tmp_path, monkeypatch):
 
     import standkit_hub.logs_browser as logs_browser_module
 
-    monkeypatch.setattr(logs_browser_module.subprocess, "Popen", lambda args: None)
+    # ВАЖНО: подменяем именно open_folder, а не subprocess.Popen.
+    # Popen используется только в POSIX-ветке open_folder; на Windows код
+    # идёт через ShellExecuteW/os.startfile (см. _open_folder_windows), и
+    # мок Popen туда не достаёт — тест открывал НАСТОЯЩЕЕ окно Проводника
+    # на машине разработчика, по одному на каждый прогон.
+    opened: list = []
+
+    def _fake_open_folder(path):
+        opened.append(Path(path))
+        return logs_browser_module.OpenFolderResult(ok=True, message="")
+
+    monkeypatch.setattr(server_module.logs_browser, "open_folder", _fake_open_folder)
 
     status, body, _ = _request(
         base_url,
@@ -782,6 +794,8 @@ def test_api_stand_logs_open_folder_calls_subprocess(tmp_path, monkeypatch):
     )
     assert status == 200
     assert body["ok"] is True
+    # Открывали именно каталог логов проекта, а не что-то ещё.
+    assert opened == [logs_dir]
 
 
 def test_api_stand_logs_open_folder_invalid_source_returns_400(tmp_path):
