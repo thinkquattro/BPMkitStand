@@ -618,6 +618,31 @@ button:disabled {
   font-size: 13px;
 }
 
+/* Баннер «нет связи с диспетчером» — см. index.html и app.js::setConnStatus.
+   Полоса во всю ширину под шапкой: индикатор-точку в углу легко не заметить,
+   а последствие (таблица показывает протухшие статусы) молчаливое. */
+.offline-banner {
+  padding: 10px 16px;
+  background: color-mix(in srgb, var(--bpmkit-down) 12%, transparent);
+  border-bottom: 1px solid var(--bpmkit-down);
+  color: var(--bpmkit-down);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.offline-banner[hidden] {
+  display: none;
+}
+
+/* Пока связи нет, таблица показывает ПОСЛЕДНИЙ успешный снапшот — данные в
+   ней уже не соответствуют реальности. Гасим её, чтобы «Работает» из кэша не
+   читался как свежий статус. Кнопки при этом остаются кликабельными: попытка
+   действия даст понятную ошибку, и это лучше, чем мёртвый интерфейс. */
+body.hub-offline .stands-table-wrap {
+  opacity: 0.45;
+  filter: grayscale(0.7);
+}
+
 .status-text {
   color: var(--bpmkit-muted);
   font-size: 13px;

@@ -44,6 +44,15 @@
     </span>
   </header>
 
+  <!-- Баннер «нет связи»: диспетчер живёт отдельным процессом (pythonw, без
+       консоли) и может быть остановлен или пережить перезагрузку — вкладка об
+       этом узнаёт только по упавшему запросу. Раньше единственным признаком
+       была красная точка в углу и мелкий #stands-error, а таблица продолжала
+       показывать последний снапшот как живой. Скрыт, пока связь есть. -->
+  <div id="offline-banner" class="offline-banner" role="alert" hidden>
+    <span id="offline-banner-text"></span>
+  </div>
+
   <div id="about-modal-overlay" class="modal-overlay" hidden>
     <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="about-modal-title">
       <div class="modal-header">
