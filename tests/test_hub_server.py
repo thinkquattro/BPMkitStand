@@ -497,6 +497,26 @@ def test_static_known_file_is_served(tmp_path):
     assert "text/css" in headers.get("Content-Type", "")
 
 
+def test_cookbook_is_served_as_static_and_self_contained(tmp_path):
+    """
+    Кукбук (`/static/cookbook.html`) — точка входа кнопки «Справка» в шапке
+    дашборда и ссылки в модалке «О программе». Тест держит три вещи:
+    файл вообще доехал до пакета (package-data `web/*`), отдаётся как HTML и
+    остаётся самодостаточным — без внешних ссылок на CDN и без обращений к
+    `/static/*`, чтобы его можно было открыть с диска при остановленном хабе.
+    """
+    base_url, *_ = _start_hub(tmp_path)
+    status, _, headers = _request(base_url, "/static/cookbook.html")
+    assert status == 200
+    assert "text/html" in headers.get("Content-Type", "")
+
+    # _request отдаёт тело только для JSON — содержимое читаем с диска.
+    text = (Path(server_module.__file__).parent / "web" / "cookbook.html").read_text("utf-8")
+    assert "BPMkitStand" in text
+    for forbidden in ('src="/static/', 'href="/static/', "<script src=", "<link rel=\"stylesheet\""):
+        assert forbidden not in text, f"кукбук перестал быть самодостаточным: {forbidden}"
+
+
 def test_static_missing_file_is_404(tmp_path):
     base_url, *_ = _start_hub(tmp_path)
     status, _, _ = _request(base_url, "/static/does-not-exist.js")
