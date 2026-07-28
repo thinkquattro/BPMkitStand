@@ -46,8 +46,7 @@ kbd{background:var(--bg-soft);border:1px solid var(--line);border-bottom-width:2
 /* ── шапка ───────────────────────────────────────────────────────── */
 header.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;
   padding:10px 20px;background:var(--bg);border-bottom:1px solid var(--line);flex-wrap:wrap}
-.logo{width:28px;height:28px;border-radius:7px;background:var(--accent);color:#fff;
-  display:grid;place-items:center;font-weight:700}
+.logo{width:28px;height:28px;display:block}
 header.top h1{font-size:17px;margin:0;font-weight:650}
 header.top .ver{color:var(--fg-dim);font-size:13px}
 header.top .spacer{flex:1}
@@ -90,7 +89,9 @@ body[data-aud="a"] [data-only="d"],body[data-aud="d"] [data-only="a"]{display:no
 .note.info{border-left-color:var(--link);background:var(--info-bg)}
 .note.warn{border-left-color:var(--warn);background:var(--warn-bg)}
 .note.danger{border-left-color:var(--danger);background:var(--danger-bg)}
-.note b{display:block;margin-bottom:2px}
+/* Заголовок плашки — только ПЕРВЫЙ <b>; остальные <b> внутри текста должны
+   оставаться строчными, иначе рвут абзац на части. */
+.note>b:first-child{display:block;margin-bottom:2px}
 .card{border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;background:var(--bg-soft);margin:12px 0}
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
 
@@ -137,6 +138,27 @@ figcaption{color:var(--fg-dim);font-size:13px;margin-top:6px}
 #lightbox.on{display:grid}
 #lightbox img{max-width:100%;max-height:100%;border-radius:8px}
 
+/* ── бейджи и кнопки 1:1 с дашбордом ──────────────────────────────
+   Значения цветов — те же переменные, что в standkit_hub/web/style.css
+   (--bpmkit-ok / --bpmkit-down / --bpmkit-unknown / --bpmkit-primary /
+   --bpmkit-muted), продублированы здесь, потому что файл самодостаточный. */
+:root{--k-ok:#1f9d55;--k-down:#d84040;--k-unknown:#b98900;--k-muted:#6b7280}
+html[data-theme="dark"]{--k-ok:#3ecb7a;--k-down:#f06868;--k-unknown:#d6a63a;--k-muted:#8b949e}
+@media (prefers-color-scheme:dark){html[data-theme="auto"]{
+  --k-ok:#3ecb7a;--k-down:#f06868;--k-unknown:#d6a63a;--k-muted:#8b949e}}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:#fff}
+.badge-ok{background:var(--k-ok)}
+.badge-down{background:var(--k-down)}
+.badge-external{background:transparent;color:var(--k-unknown);border:1px solid var(--k-unknown);font-weight:500}
+.val-ok{color:var(--k-ok);font-weight:600}
+.val-down{color:var(--k-down);font-weight:600}
+.ib{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;
+  border:0;border-radius:6px;color:#fff;vertical-align:middle;margin-right:4px}
+.ib-play{background:var(--k-ok)}
+.ib-stop{background:var(--k-down)}
+.ib-restart{background:var(--accent)}
+.ib-redis{background:var(--k-muted);margin-right:0}
+
 mark{background:var(--accent);color:#fff;border-radius:3px}
 .hidden-by-search{display:none!important}
 footer{border-top:1px solid var(--line);padding:18px 20px;color:var(--fg-dim);font-size:13px;text-align:center}
@@ -146,7 +168,12 @@ footer{border-top:1px solid var(--line);padding:18px 20px;color:var(--fg-dim);fo
 <body data-aud="all">
 
 <header class="top">
-  <div class="logo">k</div>
+  <!-- Логотип — тот же favicon.svg дашборда, инлайном (файл самодостаточный). -->
+  <svg class="logo" viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg" aria-label="BPMkit">
+    <rect x="4" y="4" width="88" height="88" rx="20" fill="#2b2b2b"/>
+    <text x="48" y="77" font-family="Inter, Arial, sans-serif" font-size="66" font-weight="600"
+          fill="#f9763d" text-anchor="middle">k</text>
+  </svg>
   <h1>BPMkitStand — кукбук</h1>
   <span class="ver" id="ver">v0.6.1</span>
   <span class="spacer"></span>
@@ -241,10 +268,31 @@ standkit-hub --desktop</code></pre>
     <b>не</b> поднимает второй диспетчер: если он уже работает, просто откроется браузер
     на нём (исправлено в 0.6.1).</p>
   </div>
-  <div class="note info"><b>PWA</b>
+  <div class="note info"><b>PWA и компактный режим</b>
     Chrome и Edge предложат «Установить приложение» — дашборд получит своё окно без
-    адресной строки и иконку в панели задач. Есть и компактный режим-виджет:
-    <code>http://127.0.0.1:8770/?view=compact</code>.</div>
+    адресной строки и иконку в панели задач. Компактный режим-виджет включается
+    кнопкой <b>▭</b> в шапке (или адресом <code>?view=compact</code>): остаются только
+    имена стендов, состояние и старт/стоп — очистка Redis и колонка «Транспорт»
+    намеренно скрыты, по такому окну кликают мимоходом.</div>
+
+  <h3 id="stop-hub">Как остановить диспетчер</h3>
+  <p>Отдельной команды «стоп» у хаба нет — и не будет: это обычный процесс, а не служба.</p>
+  <ul>
+    <li><b>Запущен из консоли</b> — <kbd>Ctrl</kbd>+<kbd>C</kbd> в том же окне.
+      Диспетчер печатает <code>[standkit-hub] остановлено (Ctrl+C)</code> — это штатный выход,
+      а не падение.</li>
+    <li><b>Запущен ярлыком</b> — окна нет, процесс живёт под <code>pythonw.exe</code>.
+      Закрыть вкладку браузера <b>недостаточно</b>: idle-shutdown у хаба нет, он продолжит
+      работать. Снимите процесс через диспетчер задач или:
+      <pre><code>« Windows »
+taskkill /IM pythonw.exe /F
+
+« Linux »
+pkill -f standkit_hub</code></pre></li>
+    <li><b>Режим <code>--desktop</code></b> — закрытие нативного окна останавливает и сервер.</li>
+  </ul>
+  <div class="note info">Остановка диспетчера <b>не трогает сами стенды</b> — они продолжают
+  работать. И наоборот: пока диспетчер выключен, открытая вкладка покажет баннер «нет связи».</div>
 </section>
 
 <!-- ══════════════════════════════════════════════════════════════ -->
@@ -256,11 +304,30 @@ standkit-hub --desktop</code></pre>
     <tr><th>Колонка</th><th>Что означает</th></tr>
     <tr><td><b>Стенд</b></td><td>Имя из реестра. Клик по строке выбирает стенд — панель «Текущее состояние» ниже показывает его лог.</td></tr>
     <tr><td><b>Транспорт</b></td><td><code>local</code> — стендом управляет сам диспетчер; <code>agent</code> — через <a href="#remote">удалённого агента</a>.</td></tr>
-    <tr><td><b>Процесс</b></td><td><span style="color:var(--ok)">up</span> / <span style="color:var(--danger)">down</span>. Бейдж <b>«вне диспетчера»</b> — см. <a href="#adopt">усыновление</a>.</td></tr>
-    <tr><td><b>HTTP</b></td><td>Адрес стенда. Зелёный — web-хост отвечает, красный — нет. Ссылка кликабельна.</td></tr>
-    <tr><td><b>БД</b></td><td>Имя базы; цветом — доступен ли порт СУБД.</td></tr>
-    <tr><td><b>Redis</b></td><td>Номер БД Redis этого стенда.</td></tr>
-    <tr><td><b>Действия</b></td><td>▶ старт · ■ стоп · ⟳ рестарт · 🗑 очистить Redis.</td></tr>
+    <tr><td><b>Процесс</b></td>
+      <td><span class="badge badge-ok">up</span> процесс стенда жив ·
+        <span class="badge badge-down">down</span> не запущен.
+        Рядом может стоять <span class="badge badge-external">вне диспетчера</span> —
+        см. <a href="#adopt">усыновление</a>.</td></tr>
+    <tr><td><b>HTTP</b></td>
+      <td>Адрес стенда, ссылка кликабельна.
+        <span class="val-ok">http://127.0.0.1:5030</span> — web-хост отвечает;
+        <span class="val-down">http://127.0.0.1:5005</span> — не отвечает.</td></tr>
+    <tr><td><b>БД</b></td>
+      <td>Имя базы тем же цветом: <span class="val-ok">demo9</span> — порт СУБД доступен,
+        <span class="val-down">demo9</span> — нет.</td></tr>
+    <tr><td><b>Redis</b></td>
+      <td>Номер БД Redis этого стенда — <span class="val-ok">1</span> / <span class="val-down">1</span>
+        по тому же правилу.</td></tr>
+    <tr><td><b>Действия</b></td>
+      <td>
+        <span class="ib ib-play"><svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M4 2.5v11l9-5.5-9-5.5z"/></svg></span> запустить ·
+        <span class="ib ib-stop"><svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/></svg></span> остановить ·
+        <span class="ib ib-restart"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8A5.2 5.2 0 1 1 10.9 3.6"/><path d="M13.4 2.6v3.4h-3.4"/></svg></span> перезапустить ·
+        <span class="ib ib-redis"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.2h10"/><path d="M6.4 4.2V2.9c0-.4.3-.7.7-.7h1.8c.4 0 .7.3.7.7v1.3"/><path d="M4.6 4.2l.6 8.2c.05.7.6 1.2 1.3 1.2h3c.7 0 1.25-.5 1.3-1.2l.6-8.2"/><path d="M6.7 6.6v4.3M9.3 6.6v4.3"/></svg></span> очистить Redis.
+        <br />Неприменимое действие показано блёклым и не нажимается: у остановленного
+        стенда это стоп и рестарт, у запущенного — старт.
+      </td></tr>
   </table>
 
   <div class="note info"><b>Старт честный</b>
@@ -472,8 +539,11 @@ python -m standkit.secrets set standkit:demo9:db</code></pre>
   <h3>Установка агента — на каждом хосте стенда</h3>
   <ol class="steps">
     <li><h4>Поставить пакет</h4>
-      <pre><code>pip install "git+https://github.com/thinkquattro/BPMkitStand.git"</code></pre>
-      <p>Нужен Python 3.10+ и <code>dotnet</code> для запуска самих стендов.</p></li>
+      <pre><code>pip install standkit</code></pre>
+      <p>Тот же пакет, что и у оператора: <code>standkit_agent</code> едет внутри, отдельной
+      установки не требует. Нужен Python 3.10+ и <code>dotnet</code> для запуска самих стендов.
+      Ставить с GitHub (<code>pip install "git+https://…"</code>) имеет смысл, только если нужен
+      ещё не выпущенный <code>main</code>.</p></li>
 
     <li><h4>Положить реестр стендов этого хоста</h4>
       <p>Тот же формат, что у дашборда. Важно: <b>на стороне агента стенд остаётся

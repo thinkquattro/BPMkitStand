@@ -87,10 +87,13 @@ BPMkitStand управляет удалёнными стендами через 
 ### 1. Поставить пакет
 
 ```bash
-pip install "git+https://github.com/thinkquattro/BPMkitStand.git"
+pip install standkit
 ```
 
-Нужен Python 3.10+ и установленный `dotnet` (для запуска стендов BPMSoft).
+Тот же пакет, что и у оператора — `standkit_agent` едет внутри, отдельно ставить нечего.
+Нужен Python 3.10+ и установленный `dotnet` (для запуска стендов BPMSoft). Ставить с
+GitHub (`pip install "git+https://github.com/thinkquattro/BPMkitStand.git"`) имеет смысл,
+только если нужен ещё не выпущенный `main`.
 
 ### 2. Подготовить реестр на хосте агента
 
