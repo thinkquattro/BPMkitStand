@@ -492,19 +492,58 @@ def test_docker_backend_stop_and_restart_single_container(monkeypatch):
 
 
 def test_docker_backend_is_running_single_container_true(monkeypatch):
+    # Спрашивается .State.Status (не .State.Running) — см. следующий тест.
     import shutil as _shutil
 
     monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/docker")
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="true\n"))
+    calls = []
+
+    def _fake_run(cmd, **kw):
+        calls.append(cmd)
+        return _completed(cmd, returncode=0, stdout="running\n")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
     stand = _make_stand(host_kind=HostKind.DOCKER, docker_container="c1")
     assert DockerBackend().is_running(stand) is True
+    assert calls[-1] == ["/usr/bin/docker", "inspect", "-f", "{{.State.Status}}", "c1"]
 
 
-def test_docker_backend_is_running_single_container_false_falls_back_to_tcp(monkeypatch):
+def test_docker_backend_is_running_trusts_stopped_state_over_open_port(monkeypatch):
+    # docker дал ОПРЕДЕЛЁННЫЙ ответ "exited" — доверяем ему и НЕ маскируем
+    # открытым TCP-портом (его может держать посторонний процесс). Прежняя
+    # версия теста ожидала здесь True через TCP-фолбэк; поведение изменено
+    # осознанно после живой приёмки 17.08.2026 — тот же принцип, что уже
+    # действует для IIS (см. test_iis_backend_is_running_trusts_appcmd_stopped_*).
     import shutil as _shutil
 
     monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/docker")
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="false\n"))
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="exited\n"))
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+    stand = _make_stand(host_kind=HostKind.DOCKER, docker_container="c1")
+    assert DockerBackend().is_running(stand) is False
+
+
+def test_docker_backend_is_running_paused_container_is_not_running(monkeypatch):
+    # docker pause: .State.Running=true, но контейнер не обслуживает запросы.
+    # Поэтому и спрашивается .State.Status ("paused").
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="paused\n"))
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+    stand = _make_stand(host_kind=HostKind.DOCKER, docker_container="c1")
+    assert DockerBackend().is_running(stand) is False
+
+
+def test_docker_backend_is_running_missing_container_falls_back_to_tcp(monkeypatch):
+    # rc!=0 (контейнера нет / демон недоступен) — состояние НЕ определено,
+    # только здесь уместен TCP-фолбэк.
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=1, stderr="No such container")
+    )
     monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
     stand = _make_stand(host_kind=HostKind.DOCKER, docker_container="c1")
     assert DockerBackend().is_running(stand) is True
@@ -515,11 +554,65 @@ def test_docker_backend_is_running_compose_parses_ps_output(monkeypatch):
 
     monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/docker")
     ps_output = "NAME       IMAGE   SERVICE   STATUS\nproj-webhost-1  img   webhost   Up 2 hours\n"
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout=ps_output))
+
+    def _fake_run(cmd, **kw):
+        # json-формат не поддержан этой (условной) версией compose → табличный путь
+        if "--format" in cmd:
+            return _completed(cmd, returncode=1, stderr="unknown flag: --format")
+        return _completed(cmd, returncode=0, stdout=ps_output)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
     stand = _make_stand(
         host_kind=HostKind.DOCKER, docker_compose_file="/opt/x/docker-compose.yml", docker_compose_service="webhost"
     )
     assert DockerBackend().is_running(stand) is True
+
+
+def test_docker_backend_is_running_compose_json_matches_service_exactly(monkeypatch):
+    # Живая приёмка 17.08.2026: поднят ТОЛЬКО сервис webhook, спрашиваем про web.
+    # Через json имя сервиса приходит отдельным полем — сравнение точное.
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/docker")
+    ndjson = (
+        '{"Name":"proj-webhook-1","Service":"webhook","State":"running"}\n'
+    )
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout=ndjson))
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: False)
+    stand = _make_stand(
+        host_kind=HostKind.DOCKER, docker_compose_file="/opt/x/docker-compose.yml", docker_compose_service="web"
+    )
+    assert DockerBackend().is_running(stand) is False
+
+    stand_hook = _make_stand(
+        host_kind=HostKind.DOCKER, docker_compose_file="/opt/x/docker-compose.yml", docker_compose_service="webhook"
+    )
+    assert DockerBackend().is_running(stand_hook) is True
+
+
+def test_docker_backend_is_running_compose_json_array_form(monkeypatch):
+    # Часть версий docker compose печатает JSON-массив, а не NDJSON.
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/docker")
+    payload = '[{"Name":"proj-web-1","Service":"web","State":"exited"}]'
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout=payload))
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+    stand = _make_stand(
+        host_kind=HostKind.DOCKER, docker_compose_file="/opt/x/docker-compose.yml", docker_compose_service="web"
+    )
+    assert DockerBackend().is_running(stand) is False
+
+
+def test_compose_service_up_table_ignores_substring_service_name():
+    # Табличный путь (старая версия compose) обязан различать web и webhook так же,
+    # как json-путь: имя сервиса — отдельный ТОКЕН строки, не подстрока.
+    ps_output = (
+        "NAME                 IMAGE          SERVICE   STATUS\n"
+        "proj-webhook-1       nginx:alpine   webhook   Up 2 seconds\n"
+    )
+    assert DockerBackend._compose_service_up(ps_output, "webhook") is True
+    assert DockerBackend._compose_service_up(ps_output, "web") is False
 
 
 def test_docker_backend_is_running_docker_missing_uses_tcp_fallback(monkeypatch):
@@ -724,11 +817,30 @@ def test_kubernetes_backend_is_running_false_when_ready_replicas_zero_and_port_c
     assert KubernetesBackend().is_running(stand) is False
 
 
-def test_kubernetes_backend_is_running_empty_output_falls_back_to_tcp(monkeypatch):
+def test_kubernetes_backend_is_running_trusts_empty_ready_replicas_over_open_port(monkeypatch):
+    # rc=0 и ПУСТОЙ вывод jsonpath — это определённый ответ «готовых реплик нет»:
+    # поля status.readyReplicas у деплоймента с нулём реплик просто не существует.
+    # Прежняя версия теста трактовала это как неопределённость и ожидала True через
+    # TCP-фолбэк. Живая приёмка 17.08.2026 показала, к чему это приводит: после
+    # stop (scale 0) NodePort продолжает слушаться, пока жив Service, и
+    # остановленный стенд отображался работающим (check_stand давал
+    # противоречивое process=ok, http=down).
     import shutil as _shutil
 
     monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout=""))
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+    stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
+    assert KubernetesBackend().is_running(stand) is False
+
+
+def test_kubernetes_backend_is_running_non_numeric_output_falls_back_to_tcp(monkeypatch):
+    # А вот НЕЧИСЛОВОЙ ответ — действительно неопределённость: формат вывода
+    # не тот, что ожидался, вердикт выносить не на чем → TCP-фолбэк.
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="<none>"))
     monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
     stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
     assert KubernetesBackend().is_running(stand) is True

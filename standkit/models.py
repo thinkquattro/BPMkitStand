@@ -41,8 +41,8 @@ class HostKind(str, Enum):
     KESTREL = "kestrel"
     IIS = "iis"
     DOCKER = "docker"
-    # Задел на будущее — схема допускает значение, логики пока нет
-    # (следующий этап, отдельный ADR).
+    # Реализован с standkit 0.5.0 (ADR-0002, standkit.hosting.KubernetesBackend);
+    # живая приёмка на кластере — 17.08.2026.
     K8S = "k8s"
 
 
