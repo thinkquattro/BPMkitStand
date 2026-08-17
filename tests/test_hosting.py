@@ -424,6 +424,208 @@ def test_iis_backend_read_logs_tails_latest_log_file(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# IIS: находки живой приёмки 17.08.2026 (до неё все эти пути были на моках с
+# ВЫДУМАННЫМИ ответами appcmd либо не покрыты вовсе)
+# --------------------------------------------------------------------------
+
+
+_APPS_XML_REAL = (
+    '<?xml version="1.0" encoding="UTF-8"?><appcmd>'
+    '<APP path="/" APP.NAME="site1/" APPPOOL.NAME="pool1" SITE.NAME="site1" />'
+    "</appcmd>"
+)
+_VDIRS_XML_REAL = (
+    '<?xml version="1.0" encoding="UTF-8"?><appcmd>'
+    '<VDIR physicalPath="C:\\wwroot\\site1" path="/" APP.NAME="site1/" VDIR.NAME="site1/" />'
+    "</appcmd>"
+)
+_SITES_XML_REAL = (
+    '<?xml version="1.0" encoding="UTF-8"?><appcmd>'
+    '<SITE SITE.NAME="site1" id="1" bindings="http/*:5081:" state="Started" />'
+    "</appcmd>"
+)
+
+
+def _iis_xml_runner(apps_xml=_APPS_XML_REAL):
+    """Фейковый appcmd, отдающий XML в РЕАЛЬНОМ формате (живой прогон 17.08.2026)."""
+
+    def _fake_run(cmd, **kwargs):
+        if "sites" in cmd:
+            return _completed(cmd, returncode=0, stdout=_SITES_XML_REAL)
+        if "vdirs" in cmd:
+            return _completed(cmd, returncode=0, stdout=_VDIRS_XML_REAL)
+        if "apps" in cmd:
+            return _completed(cmd, returncode=0, stdout=apps_xml)
+        return _completed(cmd, returncode=0, stdout="")
+
+    return _fake_run
+
+
+def test_iis_detect_site_reads_apppool_name_attribute(monkeypatch, tmp_path):
+    # `appcmd list apps /xml` называет атрибут пула APPPOOL.NAME. Прежний код
+    # читал applicationPool → пул НИКОГДА не определялся (кнопка «Определить
+    # автоматически» заполняла только сайт, kill_worker_processes оставался
+    # недоступен).
+    _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(subprocess, "run", _iis_xml_runner())
+    stand = _make_stand(host_kind=HostKind.IIS, stand_dir="C:\\wwroot\\site1", stand_port=5081)
+    match = hosting.detect_iis_site(stand)
+    assert match is not None
+    assert match.site == "site1"
+    assert match.app_pool == "pool1"
+    assert match.matched_by == "physical_path"
+
+
+def test_iis_detect_site_falls_back_to_application_pool_attribute(monkeypatch, tmp_path):
+    # Иная версия appcmd может отдать applicationPool — фолбэк сохранён.
+    apps_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?><appcmd>'
+        '<APP path="/" APP.NAME="site1/" applicationPool="poolLegacy" SITE.NAME="site1" />'
+        "</appcmd>"
+    )
+    _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(subprocess, "run", _iis_xml_runner(apps_xml=apps_xml))
+    stand = _make_stand(host_kind=HostKind.IIS, stand_dir="C:\\wwroot\\site1", stand_port=5081)
+    match = hosting.detect_iis_site(stand)
+    assert match is not None and match.app_pool == "poolLegacy"
+
+
+def test_iis_state_unknown_is_indeterminate_not_stopped(monkeypatch, tmp_path):
+    # Службы IIS остановлены → appcmd отдаёт state:Unknown. Это «не знаю», а НЕ
+    # «остановлен»: вердикт должен уходить в TCP-фолбэк, а причина — называть
+    # службы, а не врать про остановленный сайт.
+    _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="Unknown"))
+    monkeypatch.setattr(hosting, "_iis_services_down", lambda: ["WAS", "W3SVC"])
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+    stand = _make_stand(host_kind=HostKind.IIS, iis_site="site1", iis_app_pool="pool1")
+    state = IisBackend().describe_state(stand)
+    assert state.running is True  # вердикт по порту, состояние не выяснено
+    assert state.site_state is None
+    assert "остановлены службы IIS" in state.reason
+    assert "WAS" in state.reason
+    assert "остановлен (state=Unknown)" not in state.reason
+
+
+def test_iis_state_unknown_without_service_diagnosis_says_indeterminate(monkeypatch, tmp_path):
+    _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="Unknown"))
+    monkeypatch.setattr(hosting, "_iis_services_down", lambda: [])
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: False)
+    stand = _make_stand(host_kind=HostKind.IIS, iis_site="site1")
+    state = IisBackend().describe_state(stand)
+    assert state.running is False
+    assert "не вернул определённого состояния" in state.reason
+
+
+def test_appcmd_object_not_found_is_not_reported_as_elevation(monkeypatch, tmp_path):
+    # Код 1168 — это ERROR_NOT_FOUND («Не удалось найти объект SITE»), а не отказ
+    # в доступе. Elevated-процесс не должен получать совет «запустите от имени
+    # администратора» (живая приёмка: именно так и было).
+    appcmd = _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(hosting, "_process_is_elevated", lambda: True)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: _completed(
+            cmd, returncode=1168, stdout='ERROR ( message:Не удалось найти объект SITE с идентификатором "ghost". )'
+        ),
+    )
+    with pytest.raises(HostingError) as excinfo:
+        hosting._appcmd_checked([appcmd, "stop", "site", "/site.name:ghost"])
+    assert not isinstance(excinfo.value, hosting.IisElevationError)
+    assert "администратор" not in str(excinfo.value)
+    assert "Не удалось найти объект SITE" in str(excinfo.value)
+
+
+def test_appcmd_was_unavailable_is_service_error_with_service_hint(monkeypatch, tmp_path):
+    appcmd = _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(hosting, "_process_is_elevated", lambda: True)
+    monkeypatch.setattr(hosting, "_iis_services_down", lambda: ["WAS"])
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: _completed(
+            cmd, returncode=50, stdout="ERROR ( message:Служба WAS недоступна - попытайтесь сначала запустить службу. )"
+        ),
+    )
+    with pytest.raises(hosting.IisServiceUnavailableError) as excinfo:
+        hosting._appcmd_checked([appcmd, "list", "wp"])
+    text = str(excinfo.value)
+    assert "sc start WAS" in text
+    assert "Сейчас остановлены: WAS." in text
+
+
+def test_appcmd_any_error_in_non_elevated_process_is_elevation(monkeypatch, tmp_path):
+    # Без elevation appcmd не работает в принципе, как бы Windows ни
+    # сформулировала ошибку (живьём: неэлевированный `list wp` отвечает
+    # «Служба WAS недоступна», хотя служба запущена).
+    appcmd = _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(hosting, "_process_is_elevated", lambda: False)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: _completed(cmd, returncode=50, stdout="ERROR ( message:Служба WAS недоступна )"),
+    )
+    with pytest.raises(hosting.IisElevationError, match="администратора"):
+        hosting._appcmd_checked([appcmd, "list", "wp"])
+
+
+def test_appcmd_transient_rpc_failure_is_retried_once_for_read(monkeypatch, tmp_path):
+    appcmd = _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(hosting, "_process_is_elevated", lambda: True)
+    monkeypatch.setattr(hosting.time, "sleep", lambda _s: None)
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _completed(cmd, returncode=1726, stdout="ERROR ( hresult:800706be, message:Сбой при удаленном вызове процедуры. )")
+        return _completed(cmd, returncode=0, stdout='WP "123" (applicationPool:pool1)')
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    result = hosting._appcmd_checked([appcmd, "list", "wp"])
+    assert 'WP "123"' in result.stdout
+    assert len(calls) == 2
+
+
+def test_appcmd_transient_rpc_failure_on_mutation_is_not_retried_but_hinted(monkeypatch, tmp_path):
+    appcmd = _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(hosting, "_process_is_elevated", lambda: True)
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _completed(cmd, returncode=2147549190, stdout="ERROR ( hresult:80010006, message:Подключение было разорвано )")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    with pytest.raises(HostingError) as excinfo:
+        hosting._appcmd_checked([appcmd, "stop", "site", "/site.name:site1"])
+    assert len(calls) == 1  # изменяющую команду автоматически не повторяем
+    assert "канал управления IIS" in str(excinfo.value)
+    assert not isinstance(excinfo.value, hosting.IisElevationError)
+
+
+def test_iis_read_logs_finds_logs_in_dated_subfolder(tmp_path):
+    # Стенд BPMSoft под .NET Framework пишет логи в подпапки-даты
+    # (Logs\2026_08_17\Application.log) — плоский glob возвращал None.
+    log_dir = tmp_path / "Logs"
+    (log_dir / "2026_08_17").mkdir(parents=True)
+    (log_dir / "2026_08_17" / "Application.log").write_text("app line 1\napp line 2\n", encoding="utf-8")
+    stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1", iis_stdout_log_dir=str(log_dir))
+    assert IisBackend().read_logs(stand, 10) == ["app line 1", "app line 2"]
+
+
+def test_iis_read_logs_prefers_flat_log_over_subfolders(tmp_path):
+    log_dir = tmp_path / "Logs"
+    (log_dir / "2026_08_17").mkdir(parents=True)
+    (log_dir / "2026_08_17" / "Application.log").write_text("nested\n", encoding="utf-8")
+    (log_dir / "stdout.log").write_text("flat\n", encoding="utf-8")
+    stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1", iis_stdout_log_dir=str(log_dir))
+    assert IisBackend().read_logs(stand, 10) == ["flat"]
+
+
+# --------------------------------------------------------------------------
 # DockerBackend
 # --------------------------------------------------------------------------
 
