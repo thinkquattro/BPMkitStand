@@ -13,14 +13,22 @@ standkit / IIS Application Pool / Docker-контейнер), ортогонал
     понятным текстом (включая stderr внешней команды), если операция не
     удалась — голый ``subprocess.CalledProcessError``/``OSError`` наружу не
     просачивается;
-  - ``is_running`` — проба, никогда не бросает: любая ошибка (appcmd/docker
-    не найден, команда упала, парсинг не удался) трактуется как "не
-    подтверждено запущенным" и заменяется TCP-фолбэком на порт стенда, если
-    он тоже не открыт — результат ``False``.
+  - ``is_running`` — проба, никогда не бросает: ошибка (appcmd/docker/kubectl
+    не найден, команда упала, парсинг не удался) трактуется как "состояние
+    выяснить не удалось" и заменяется TCP-фолбэком на порт стенда; если порт
+    тоже не открыт — результат ``False``.
+
+ОТВЕТ CLI АВТОРИТЕТНЕЕ ОТКРЫТОГО ПОРТА. Фолбэк применяется ТОЛЬКО там, где
+состояние выяснить не удалось. Если appcmd/docker/kubectl успешно ответили
+«не запущено», это финальный вердикт: открытый TCP-порт ничего не опровергает —
+его может держать http.sys остановленного IIS-сайта, NodePort деплоймента с
+нулём реплик или посторонний процесс. Обратное поведение уже давало ложное
+«стенд жив» и по IIS, и по k8s (живая приёмка 17.08.2026).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -664,6 +672,55 @@ def _resolve_docker() -> str:
     return docker
 
 
+def _compose_service_up_json(ps_output: str, service: str) -> Optional[bool]:
+    """
+    Разбирает вывод ``docker compose ps --format json`` и отвечает, запущен ли
+    сервис ``service``. Возвращает ``None``, если разобрать не удалось (старая
+    версия compose, неожиданный формат) — вызывающий тогда пробует табличный
+    вывод.
+
+    Формат отличается между версиями: одни печатают JSON-массив, другие —
+    NDJSON (по объекту на строку). Поддерживаем оба. Имя сервиса берём из поля
+    ``Service`` и сравниваем НА РАВЕНСТВО — именно ради этого json и нужен
+    (табличный разбор по подстроке путал ``web`` с ``webhook``).
+    """
+    text = (ps_output or "").strip()
+    if not text:
+        return None
+
+    records: list[dict] = []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            records = [parsed]
+        elif isinstance(parsed, list):
+            records = [item for item in parsed if isinstance(item, dict)]
+    except ValueError:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except ValueError:
+                return None
+            if isinstance(item, dict):
+                records.append(item)
+
+    if not records:
+        return None
+    if not any("Service" in record for record in records):
+        return None
+
+    for record in records:
+        if record.get("Service") != service:
+            continue
+        state = str(record.get("State") or record.get("Status") or "").lower()
+        if state.startswith("running") or state.startswith("up"):
+            return True
+    return False
+
+
 class DockerBackend:
     """
     Бэкенд хостинга через Docker CLI. Два режима — определяются полями
@@ -727,31 +784,68 @@ class DockerBackend:
 
         try:
             if mode == "single":
-                result = _run([docker, "inspect", "-f", "{{.State.Running}}", stand.docker_container])
-                if result.returncode == 0 and result.stdout.strip().lower() == "true":
-                    return True
+                # ВАЖНО: спрашиваем .State.Status, а не .State.Running. У
+                # приостановленного контейнера (docker pause) Running=true, хотя
+                # он не обслуживает ни одного запроса — живая приёмка 17.08.2026
+                # показала его как «стенд работает».
+                result = _run([docker, "inspect", "-f", "{{.State.Status}}", stand.docker_container])
+                if result.returncode == 0:
+                    state = result.stdout.strip().lower()
+                    if state:
+                        # docker ответил ОПРЕДЕЛЁННО — доверяем ему и НЕ маскируем
+                        # открытым TCP-портом (порт может держать посторонний
+                        # процесс или проброс остановленного соседа). Та же
+                        # семантика, что у IIS-бэкенда: фолбэк только там, где
+                        # состояние выяснить не удалось.
+                        return state == "running"
             else:
-                result = _run([docker, "compose", "-f", stand.docker_compose_file, "ps"])
-                if result.returncode == 0 and self._compose_service_up(
-                    result.stdout, stand.docker_compose_service
-                ):
-                    return True
+                verdict = self._compose_service_state(docker, stand)
+                if verdict is not None:
+                    return verdict
         except HostingError:
             pass
         return _tcp_fallback(stand)
 
+    def _compose_service_state(self, docker: str, stand: Stand):
+        """
+        Определённый вердикт «запущен ли compose-сервис» или ``None``, если
+        выяснить не удалось (тогда вызывающий уходит в TCP-фолбэк).
+
+        Сначала пробуем машиночитаемый ``docker compose ps --format json``:
+        имя сервиса приходит отдельным полем, сравнение точное. Если версия
+        docker compose такого формата не понимает — падаем на табличный вывод
+        и разбираем его по ТОКЕНАМ (см. ``_compose_service_up``).
+        """
+        result = _run([docker, "compose", "-f", stand.docker_compose_file, "ps", "--format", "json"])
+        if result.returncode == 0:
+            verdict = _compose_service_up_json(result.stdout, stand.docker_compose_service)
+            if verdict is not None:
+                return verdict
+        result = _run([docker, "compose", "-f", stand.docker_compose_file, "ps"])
+        if result.returncode == 0:
+            return self._compose_service_up(result.stdout, stand.docker_compose_service)
+        return None
+
     @staticmethod
     def _compose_service_up(ps_output: str, service: str) -> bool:
         """
-        Ищет строку сервиса ``service`` в выводе ``docker compose ps`` и
-        проверяет, что состояние похоже на "запущено" (``Up``/``running``,
+        Ищет строку сервиса ``service`` в табличном выводе ``docker compose ps``
+        и проверяет, что состояние похоже на "запущено" (``Up``/``running``,
         без учёта регистра) — формат вывода отличается между версиями
         docker compose (v1 таблица "Up 2 hours", v2 "running"/"Up").
+
+        Имя сервиса сопоставляется как ОТДЕЛЬНЫЙ ТОКЕН строки, а не как
+        подстрока: живая приёмка 17.08.2026 поймала ложный вердикт «запущен»
+        для неподнятого сервиса ``web``, потому что в выводе была строка
+        соседнего сервиса ``webhook`` со статусом ``Up 2 seconds`` — подстрока
+        ``web`` в ней есть. Имена-подстроки в реальных compose-файлах обычны
+        (``api``/``api-gateway``, ``app``/``app-worker``).
         """
         for line in ps_output.splitlines():
-            if service not in line:
+            tokens = line.split()
+            if service not in tokens:
                 continue
-            lowered = line.lower()
+            lowered = [token.lower().strip(",") for token in tokens]
             if "up" in lowered or "running" in lowered:
                 return True
         return False
@@ -870,10 +964,21 @@ class KubernetesBackend:
             )
             if result.returncode == 0:
                 ready = (result.stdout or "").strip()
-                if ready and int(ready) > 0:
-                    return True
+                # ПУСТОЙ вывод при rc=0 — это НЕ неопределённость: поля
+                # status.readyReplicas у деплоймента с нулём готовых реплик
+                # просто нет. Значит kubectl ОПРЕДЕЛЁННО ответил «готовых
+                # реплик нет» — доверяем ему и не маскируем открытым портом.
+                # Живая приёмка 17.08.2026: после stop (scale 0) NodePort всё
+                # равно слушается, пока существует Service, и TCP-фолбэк
+                # показывал остановленный стенд работающим.
+                if not ready:
+                    return False
+                return int(ready) > 0
         except (HostingError, ValueError):
             pass
+        # Сюда попадаем, только если состояние выяснить НЕ удалось: kubectl не
+        # найден, вызов упал, kubectl вернул ненулевой код (нет деплоймента,
+        # нет контекста, нет доступа) или отдал нечисловой ответ.
         return _tcp_fallback(stand)
 
     def read_logs(
