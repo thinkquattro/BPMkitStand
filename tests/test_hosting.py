@@ -505,7 +505,13 @@ def test_docker_backend_is_running_single_container_true(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_run)
     stand = _make_stand(host_kind=HostKind.DOCKER, docker_container="c1")
     assert DockerBackend().is_running(stand) is True
-    assert calls[-1] == ["/usr/bin/docker", "inspect", "-f", "{{.State.Status}}", "c1"]
+    assert calls[-1] == [
+        "/usr/bin/docker",
+        "inspect",
+        "-f",
+        "{{.State.Status}}|{{.RestartCount}}|{{.State.ExitCode}}",
+        "c1",
+    ]
 
 
 def test_docker_backend_is_running_trusts_stopped_state_over_open_port(monkeypatch):
@@ -602,6 +608,93 @@ def test_docker_backend_is_running_compose_json_array_form(monkeypatch):
         host_kind=HostKind.DOCKER, docker_compose_file="/opt/x/docker-compose.yml", docker_compose_service="web"
     )
     assert DockerBackend().is_running(stand) is False
+
+
+def test_docker_describe_state_explains_crash_loop(monkeypatch):
+    # Контейнер в цикле перезапуска: вердикт False, но витрине нужна причина,
+    # иначе «мигающий» стенд выглядит как сбой диспетчера, а не как краш-луп.
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="restarting|7|1\n")
+    )
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: False)
+    stand = _make_stand(host_kind=HostKind.DOCKER, docker_container="c1")
+    state = DockerBackend().describe_state(stand)
+    assert state.running is False
+    assert state.restart_count == 7
+    assert "цикле перезапуска" in state.reason
+
+
+def test_docker_describe_state_warns_about_restarts_while_running(monkeypatch):
+    # Контейнер сейчас running, но уже перезапускался — предупреждение в reason
+    # ловит краш-луп, пойманный между падениями.
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="running|3|0\n")
+    )
+    stand = _make_stand(host_kind=HostKind.DOCKER, docker_container="c1")
+    state = DockerBackend().describe_state(stand)
+    assert state.running is True
+    assert "перезапускался" in state.reason
+
+
+def test_docker_describe_state_marks_verdict_from_port_as_undetermined(monkeypatch):
+    # Когда docker недоступен, вердикт по TCP-порту допустим, но витрина должна
+    # видеть, что это НЕ подтверждённый ответ CLI.
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+    stand = _make_stand(host_kind=HostKind.DOCKER, docker_container="c1")
+    state = DockerBackend().describe_state(stand)
+    assert state.running is True
+    assert state.status == "unknown"
+    assert "TCP-порту" in state.reason
+
+
+def test_kubernetes_describe_state_explains_zero_replicas(monkeypatch):
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="|0|"))
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+    stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
+    state = KubernetesBackend().describe_state(stand)
+    assert state.running is False
+    assert "0 реплик" in state.reason
+
+
+def test_kubernetes_describe_state_reports_partial_readiness(monkeypatch):
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="1|3|2"))
+    stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
+    state = KubernetesBackend().describe_state(stand)
+    assert state.running is True
+    assert "готово 1 из 3" in state.reason
+
+
+def test_check_stand_docker_puts_reason_into_details(monkeypatch):
+    # health.check_stand забирает reason у бэкендов с describe_state — раньше
+    # это работало только для IIS.
+    from standkit.health import check_stand
+    from standkit.models import ProbeState
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="paused|0|0\n")
+    )
+    monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+    stand = _make_stand(host_kind=HostKind.DOCKER, docker_container="c1", db_host="", db_port=0)
+    status = check_stand(stand)
+    assert status.process == ProbeState.DOWN
+    assert "приостановлен" in status.details.get("process_reason", "")
 
 
 def test_compose_service_up_table_ignores_substring_service_name():
@@ -762,16 +855,23 @@ def test_kubernetes_backend_stop_scales_to_zero(monkeypatch):
     assert calls[-1] == ["/usr/bin/kubectl", "-n", "default", "scale", "deployment/dep1", "--replicas=0"]
 
 
-def test_kubernetes_backend_stop_returns_false_on_nonzero_rc(monkeypatch):
+def test_kubernetes_backend_stop_raises_on_nonzero_rc(monkeypatch):
+    # Прежде здесь ожидался молчаливый False: вызывающий не мог отличить
+    # «остановлено» от «остановить не удалось», причина от kubectl терялась.
+    # Приведено к поведению DockerBackend.stop — исключение с текстом причины.
     import shutil as _shutil
 
     monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=1, stderr="boom"))
     stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
-    assert KubernetesBackend().stop(stand) is False
+    with pytest.raises(HostingError, match="boom"):
+        KubernetesBackend().stop(stand)
 
 
-def test_kubernetes_backend_restart_uses_rollout_restart(monkeypatch):
+def test_kubernetes_backend_restart_waits_for_rollout(monkeypatch):
+    # rollout restart возвращается мгновенно, старые поды ещё готовы — без
+    # ожидания «перезапустили» означало лишь «попросили перезапустить»
+    # (живая приёмка 17.08.2026: вызов 0.19 с, is_running сразу после — True).
     import shutil as _shutil
 
     monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
@@ -779,7 +879,23 @@ def test_kubernetes_backend_restart_uses_rollout_restart(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _completed(cmd, returncode=0))
     stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
     assert KubernetesBackend().restart(stand) is None
-    assert calls[-1] == ["/usr/bin/kubectl", "-n", "default", "rollout", "restart", "deployment/dep1"]
+    assert calls[0] == ["/usr/bin/kubectl", "-n", "default", "rollout", "restart", "deployment/dep1"]
+    assert calls[-1][:5] == ["/usr/bin/kubectl", "-n", "default", "rollout", "status"]
+    assert any(arg.startswith("--timeout=") for arg in calls[-1])
+
+
+def test_kubernetes_backend_restart_without_wait_when_disabled(monkeypatch):
+    # K8S_ROLLOUT_WAIT_SEC=0 возвращает прежнее поведение «не ждать».
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
+    monkeypatch.setattr(hosting, "K8S_ROLLOUT_WAIT_SEC", 0)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _completed(cmd, returncode=0))
+    stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
+    assert KubernetesBackend().restart(stand) is None
+    assert len(calls) == 1
+    assert calls[0] == ["/usr/bin/kubectl", "-n", "default", "rollout", "restart", "deployment/dep1"]
 
 
 def test_kubernetes_backend_is_running_true_when_ready_replicas_positive(monkeypatch):
@@ -803,7 +919,7 @@ def test_kubernetes_backend_is_running_true_when_ready_replicas_positive(monkeyp
         "deployment",
         "dep1",
         "-o",
-        "jsonpath={.status.readyReplicas}",
+        "jsonpath={.status.readyReplicas}|{.spec.replicas}|{.status.unavailableReplicas}",
     ]
 
 
@@ -865,17 +981,28 @@ def test_kubernetes_backend_is_running_nonzero_rc_falls_back_to_tcp(monkeypatch)
     assert KubernetesBackend().is_running(stand) is True
 
 
-def test_kubernetes_backend_read_logs_deployment(monkeypatch):
+def _k8s_logs_run(calls, log_stdout, selector='{"app":"dep1"}'):
+    """Фейк subprocess.run для read_logs: сперва спрашивается селектор, затем логи."""
+
+    def _fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "jsonpath={.spec.selector.matchLabels}" in cmd:
+            return _completed(cmd, returncode=0, stdout=selector)
+        return _completed(cmd, returncode=0, stdout=log_stdout)
+
+    return _fake_run
+
+
+def test_kubernetes_backend_read_logs_reads_all_pods_by_selector(monkeypatch):
+    # kubectl logs deployment/X читает ОДИН под, выбранный самим kubectl:
+    # при нескольких репликах часть событий стенда молча не видна (живая
+    # приёмка 17.08.2026 на двух репликах). Читаем по label-селектору с
+    # префиксом имени пода.
     import shutil as _shutil
 
     monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
     calls = []
-
-    def _fake_run(cmd, **kw):
-        calls.append(cmd)
-        return _completed(cmd, returncode=0, stdout="line1\nline2\n")
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr(subprocess, "run", _k8s_logs_run(calls, "line1\nline2\n"))
     stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
     lines = KubernetesBackend().read_logs(stand, 50)
     assert lines == ["line1", "line2"]
@@ -884,10 +1011,55 @@ def test_kubernetes_backend_read_logs_deployment(monkeypatch):
         "-n",
         "default",
         "logs",
-        "deployment/dep1",
+        "-l",
+        "app=dep1",
+        "--prefix",
+        "--max-log-requests",
+        str(hosting.K8S_MAX_LOG_REQUESTS),
         "--tail",
         "50",
     ]
+
+
+def test_kubernetes_backend_read_logs_keeps_all_pods_when_over_tail(monkeypatch):
+    # --tail n kubectl применяет к КАЖДОМУ поду; обрезать общий вывод хвостом
+    # нельзя — хвост принадлежит одному поду, и логи остальных реплик пропадают
+    # (перепрогон живой приёмки на двух репликах поймал ровно это).
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
+    calls = []
+    stdout = "".join("[pod/a] line%d\n" % i for i in range(3)) + "".join(
+        "[pod/b] line%d\n" % i for i in range(3)
+    )
+    monkeypatch.setattr(subprocess, "run", _k8s_logs_run(calls, stdout))
+    stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
+    lines = KubernetesBackend().read_logs(stand, 3)
+    assert len(lines) == 6
+    assert any(line.startswith("[pod/a]") for line in lines)
+    assert any(line.startswith("[pod/b]") for line in lines)
+
+
+def test_kubernetes_backend_read_logs_falls_back_to_deployment_without_selector(monkeypatch):
+    # Селектор получить не удалось — прежний путь по deployment/X.
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
+    calls = []
+    monkeypatch.setattr(subprocess, "run", _k8s_logs_run(calls, "line1\n", selector=""))
+    stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
+    assert KubernetesBackend().read_logs(stand, 50) == ["line1"]
+    assert calls[-1] == ["/usr/bin/kubectl", "-n", "default", "logs", "deployment/dep1", "--tail", "50"]
+
+
+def test_kubernetes_backend_read_logs_returns_none_without_kubectl(monkeypatch):
+    # Общий контракт read_logs: нет CLI — None, как у DockerBackend, а не
+    # исключение (раньше бэкенды вели себя по-разному).
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1")
+    assert KubernetesBackend().read_logs(stand, 10) is None
 
 
 def test_kubernetes_backend_read_logs_with_container(monkeypatch):
@@ -895,26 +1067,12 @@ def test_kubernetes_backend_read_logs_with_container(monkeypatch):
 
     monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/kubectl")
     calls = []
-
-    def _fake_run(cmd, **kw):
-        calls.append(cmd)
-        return _completed(cmd, returncode=0, stdout="a\nb\n")
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr(subprocess, "run", _k8s_logs_run(calls, "a\nb\n"))
     stand = _make_stand(host_kind=HostKind.K8S, k8s_deployment="dep1", k8s_container="webhost")
     lines = KubernetesBackend().read_logs(stand, 20)
     assert lines == ["a", "b"]
-    assert calls[-1] == [
-        "/usr/bin/kubectl",
-        "-n",
-        "default",
-        "logs",
-        "deployment/dep1",
-        "--tail",
-        "20",
-        "-c",
-        "webhost",
-    ]
+    assert calls[-1][-2:] == ["-c", "webhost"]
+    assert "-l" in calls[-1] and "app=dep1" in calls[-1]
 
 
 def test_kubernetes_backend_read_logs_raises_on_error(monkeypatch):
