@@ -46,6 +46,17 @@ from standkit.models import HostKind, Stand
 # легитимно медленный docker compose up на первом старте образа.
 _DEFAULT_TIMEOUT = 20.0
 
+# Сколько секунд KubernetesBackend.restart ждёт завершения выката
+# (`kubectl rollout status`). 0 — не ждать вовсе, прежнее поведение: kubectl
+# только ПРОСИЛИ перезапустить, и сразу после вызова стенд выглядит здоровым,
+# потому что старые поды ещё готовы.
+K8S_ROLLOUT_WAIT_SEC = 60.0
+
+# Предел параллельных запросов логов при чтении по label-селектору
+# (`kubectl logs -l ... --max-log-requests`): защищает от деплоймента с
+# десятками подов, но покрывает реальные стенды.
+K8S_MAX_LOG_REQUESTS = 10
+
 
 class HostingError(Exception):
     """Ошибка бэкенда хостинга (внешняя утилита не найдена, команда завершилась с ошибкой и т.п.)."""
@@ -89,7 +100,16 @@ class HostingBackend(Protocol):
     def read_logs(
         self, stand: Stand, n: int = 100, *, log_dir: Optional[Path] = None
     ) -> Optional[list[str]]:
-        """Последние ``n`` строк лога бэкенда, либо None — пусть вызывающий читает файл-лог сам."""
+        """
+        Последние ``n`` строк лога бэкенда, либо ``None``.
+
+        ``None`` означает «этот бэкенд лога не даёт» — CLI не найден, каталог
+        лога не задан и т.п.; вызывающий тогда читает файл-лог сам. Ошибка уже
+        начатого чтения (утилита есть, но команда упала) — по-прежнему
+        ``HostingError``. Контракт единый для всех бэкендов: раньше docker в
+        отсутствие CLI отдавал ``None``, а k8s в том же случае бросал
+        исключение, и вызывающему приходилось обрабатывать оба варианта.
+        """
         ...
 
 
@@ -672,10 +692,38 @@ def _resolve_docker() -> str:
     return docker
 
 
-def _compose_service_up_json(ps_output: str, service: str) -> Optional[bool]:
+@dataclass
+class ContainerState:
     """
-    Разбирает вывод ``docker compose ps --format json`` и отвечает, запущен ли
-    сервис ``service``. Возвращает ``None``, если разобрать не удалось (старая
+    Развёрнутое состояние контейнерной нагрузки (docker-контейнер, compose-сервис,
+    k8s-деплоймент) — аналог ``IisState`` для IIS.
+
+    ``running`` — вердикт «обслуживает ли стенд» (его отдаёт ``is_running``),
+    ``status`` — сырое состояние от CLI (``running``/``paused``/``exited`` и т.п.),
+    ``restart_count`` — счётчик перезапусков (docker), ``reason`` — человеческое
+    объяснение для витрины: почему стенд не работает или чем примечательно его
+    состояние. ``reason`` попадает в ``StandStatus.details['process_reason']``
+    (см. ``standkit.health.check_stand``), поэтому пишется по-русски и коротко.
+    """
+
+    running: bool
+    status: str = ""
+    restart_count: int = 0
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "running": self.running,
+            "status": self.status,
+            "restart_count": self.restart_count,
+            "reason": self.reason,
+        }
+
+
+def _compose_service_state_json(ps_output: str, service: str) -> Optional[ContainerState]:
+    """
+    Разбирает вывод ``docker compose ps --format json`` и отдаёт состояние
+    сервиса ``service``. Возвращает ``None``, если разобрать не удалось (старая
     версия compose, неожиданный формат) — вызывающий тогда пробует табличный
     вывод.
 
@@ -717,8 +765,79 @@ def _compose_service_up_json(ps_output: str, service: str) -> Optional[bool]:
             continue
         state = str(record.get("State") or record.get("Status") or "").lower()
         if state.startswith("running") or state.startswith("up"):
-            return True
-    return False
+            return ContainerState(running=True, status=state)
+        return ContainerState(
+            running=False,
+            status=state,
+            reason="compose-сервис '%s' в состоянии '%s'" % (service, state or "неизвестно"),
+        )
+    return ContainerState(
+        running=False,
+        status="absent",
+        reason="compose-сервис '%s' не поднят (нет в выводе docker compose ps)" % service,
+    )
+
+
+def _container_state_from_inspect(raw: str) -> ContainerState:
+    """
+    Строит ``ContainerState`` из вывода
+    ``docker inspect -f {{.State.Status}}|{{.RestartCount}}|{{.State.ExitCode}}``.
+
+    Ключевое: «жив» — это ``status == running``, а не ``State.Running``.
+    У приостановленного контейнера ``Running`` остаётся ``true``, хотя запросов
+    он не обслуживает; у контейнера в цикле перезапуска состояние прыгает между
+    ``running`` и ``restarting``, и вердикт без пояснения выглядит как мигание.
+    """
+    parts = (raw or "").strip().split("|")
+    status = (parts[0] if parts else "").strip().lower()
+    restarts = 0
+    exit_code = ""
+    if len(parts) > 1:
+        try:
+            restarts = int(parts[1].strip() or 0)
+        except ValueError:
+            restarts = 0
+    if len(parts) > 2:
+        exit_code = parts[2].strip()
+
+    if status == "running":
+        reason = ""
+        if restarts > 0:
+            reason = (
+                "контейнер уже перезапускался (перезапусков: %d) — возможен цикл падений, "
+                "проверьте логи" % restarts
+            )
+        return ContainerState(running=True, status=status, restart_count=restarts, reason=reason)
+
+    reasons = {
+        "paused": "контейнер приостановлен (docker pause) — запросы не обслуживаются",
+        "restarting": "контейнер в цикле перезапуска (перезапусков: %d)" % restarts,
+        "exited": "контейнер остановлен (код выхода %s)" % (exit_code or "?"),
+        "created": "контейнер создан, но ни разу не запускался",
+        "dead": "контейнер в состоянии dead — требуется пересоздание",
+        "removing": "контейнер удаляется",
+    }
+    return ContainerState(
+        running=False,
+        status=status,
+        restart_count=restarts,
+        reason=reasons.get(status, "состояние контейнера: '%s'" % (status or "неизвестно")),
+    )
+
+
+def _undetermined_state(stand: Stand, detail: str) -> ContainerState:
+    """
+    Состояние «выяснить не удалось»: вердикт выносится TCP-фолбэком, а причина
+    честно сообщается витрине — чтобы «зелёный» по порту не выглядел как
+    подтверждённый ответ CLI.
+    """
+    alive = _tcp_fallback(stand)
+    return ContainerState(
+        running=alive,
+        status="unknown",
+        reason="состояние выяснить не удалось (%s); вердикт по TCP-порту %s:%s"
+        % (detail.strip() or "нет деталей", stand.stand_host, stand.stand_port),
+    )
 
 
 class DockerBackend:
@@ -776,40 +895,50 @@ class DockerBackend:
         return None
 
     def is_running(self, stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+        return self.describe_state(stand, run_dir=run_dir).running
+
+    def describe_state(self, stand: Stand, *, run_dir: Optional[Path] = None) -> ContainerState:
+        """
+        Разбирает состояние контейнера/compose-сервиса и объясняет его словами
+        (см. ``ContainerState``). ``is_running`` — тонкая обёртка над этим методом,
+        а ``standkit.health.check_stand`` забирает ``reason`` в детали статуса,
+        как уже делает для IIS.
+
+        Спрашивается ``.State.Status``, а не ``.State.Running``: у
+        приостановленного контейнера (``docker pause``) ``Running=true``, хотя он
+        не обслуживает ни одного запроса — живая приёмка 17.08.2026 показала его
+        как «стенд работает».
+
+        Ответ docker при rc=0 — ОКОНЧАТЕЛЬНЫЙ: открытым TCP-портом он не
+        переопределяется (порт может держать посторонний процесс). Фолбэк — только
+        там, где состояние выяснить не удалось. Та же семантика, что у IIS.
+        """
         try:
             docker = _resolve_docker()
             mode = self._mode(stand)
-        except HostingError:
-            return _tcp_fallback(stand)
+        except HostingError as exc:
+            return _undetermined_state(stand, str(exc))
 
         try:
             if mode == "single":
-                # ВАЖНО: спрашиваем .State.Status, а не .State.Running. У
-                # приостановленного контейнера (docker pause) Running=true, хотя
-                # он не обслуживает ни одного запроса — живая приёмка 17.08.2026
-                # показала его как «стенд работает».
-                result = _run([docker, "inspect", "-f", "{{.State.Status}}", stand.docker_container])
-                if result.returncode == 0:
-                    state = result.stdout.strip().lower()
-                    if state:
-                        # docker ответил ОПРЕДЕЛЁННО — доверяем ему и НЕ маскируем
-                        # открытым TCP-портом (порт может держать посторонний
-                        # процесс или проброс остановленного соседа). Та же
-                        # семантика, что у IIS-бэкенда: фолбэк только там, где
-                        # состояние выяснить не удалось.
-                        return state == "running"
-            else:
-                verdict = self._compose_service_state(docker, stand)
-                if verdict is not None:
-                    return verdict
-        except HostingError:
-            pass
-        return _tcp_fallback(stand)
+                result = _run(
+                    [docker, "inspect", "-f", "{{.State.Status}}|{{.RestartCount}}|{{.State.ExitCode}}",
+                     stand.docker_container]
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return _container_state_from_inspect(result.stdout)
+                return _undetermined_state(stand, (result.stderr or result.stdout or "").strip())
+            state = self._compose_service_state(docker, stand)
+            if state is not None:
+                return state
+            return _undetermined_state(stand, "docker compose ps не дал разбираемого ответа")
+        except HostingError as exc:
+            return _undetermined_state(stand, str(exc))
 
-    def _compose_service_state(self, docker: str, stand: Stand):
+    def _compose_service_state(self, docker: str, stand: Stand) -> Optional[ContainerState]:
         """
-        Определённый вердикт «запущен ли compose-сервис» или ``None``, если
-        выяснить не удалось (тогда вызывающий уходит в TCP-фолбэк).
+        Состояние compose-сервиса или ``None``, если выяснить не удалось (тогда
+        вызывающий уходит в TCP-фолбэк).
 
         Сначала пробуем машиночитаемый ``docker compose ps --format json``:
         имя сервиса приходит отдельным полем, сравнение точное. Если версия
@@ -818,12 +947,18 @@ class DockerBackend:
         """
         result = _run([docker, "compose", "-f", stand.docker_compose_file, "ps", "--format", "json"])
         if result.returncode == 0:
-            verdict = _compose_service_up_json(result.stdout, stand.docker_compose_service)
-            if verdict is not None:
-                return verdict
+            state = _compose_service_state_json(result.stdout, stand.docker_compose_service)
+            if state is not None:
+                return state
         result = _run([docker, "compose", "-f", stand.docker_compose_file, "ps"])
         if result.returncode == 0:
-            return self._compose_service_up(result.stdout, stand.docker_compose_service)
+            up = self._compose_service_up(result.stdout, stand.docker_compose_service)
+            return ContainerState(
+                running=up,
+                status="up" if up else "not up",
+                reason="" if up else "compose-сервис '%s' не значится запущенным в docker compose ps"
+                % stand.docker_compose_service,
+            )
         return None
 
     @staticmethod
@@ -936,65 +1071,190 @@ class KubernetesBackend:
         return None
 
     def stop(self, stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+        """
+        Масштабирует деплоймент в ноль реплик.
+
+        При неудаче бросает ``HostingError`` с текстом kubectl — как это делает
+        ``DockerBackend.stop``. Прежняя версия возвращала молчаливый ``False`` по
+        ненулевому коду возврата, и вызывающий не мог отличить «остановлено» от
+        «остановить не удалось, причина потеряна».
+        """
         kubectl = _resolve_kubectl()
         deployment = self._deployment(stand)
-        result = _run(
+        _run_checked(
             self._base_args(kubectl, stand)
             + ["scale", f"deployment/{deployment}", "--replicas=0"]
         )
-        return result.returncode == 0
+        return True
 
     def restart(
         self, stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None
     ) -> Optional[int]:
+        """
+        Перезапускает деплоймент (``rollout restart``) и, если
+        ``K8S_ROLLOUT_WAIT_SEC`` больше нуля, ДОЖИДАЕТСЯ завершения выката.
+
+        Без ожидания ``rollout restart`` возвращается за доли секунды, старые
+        поды ещё готовы, и сразу после вызова стенд выглядит здоровым, хотя
+        новые поды могут не подняться вовсе. Живая приёмка 17.08.2026: вызов
+        отработал за 0.19 с, ``is_running`` немедленно после него — ``True``.
+        Теперь «перезапустили» означает перезапустили, а не «попросили».
+        """
         kubectl = _resolve_kubectl()
         deployment = self._deployment(stand)
         _run_checked(
             self._base_args(kubectl, stand) + ["rollout", "restart", f"deployment/{deployment}"]
         )
+        if K8S_ROLLOUT_WAIT_SEC > 0:
+            _run_checked(
+                self._base_args(kubectl, stand)
+                + [
+                    "rollout",
+                    "status",
+                    f"deployment/{deployment}",
+                    "--timeout=%ds" % int(K8S_ROLLOUT_WAIT_SEC),
+                ],
+                timeout=K8S_ROLLOUT_WAIT_SEC + 15,
+            )
         return None
 
     def is_running(self, stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
+        return self.describe_state(stand, run_dir=run_dir).running
+
+    def describe_state(self, stand: Stand, *, run_dir: Optional[Path] = None) -> ContainerState:
+        """
+        Состояние деплоймента словами: сколько реплик готово из запрошенных.
+
+        ПУСТОЙ ответ ``jsonpath={.status.readyReplicas}`` при rc=0 — это НЕ
+        неопределённость: поля ``status.readyReplicas`` у деплоймента с нулём
+        готовых реплик просто нет. Значит kubectl ОПРЕДЕЛЁННО ответил «готовых
+        реплик нет» — доверяем ему и не маскируем открытым портом. Живая приёмка
+        17.08.2026: после ``stop`` (scale 0) NodePort всё равно слушается, пока
+        существует Service, и TCP-фолбэк показывал остановленный стенд
+        работающим (``process=ok`` при ``http=down``).
+        """
         try:
             kubectl = _resolve_kubectl()
             deployment = self._deployment(stand)
+        except HostingError as exc:
+            return _undetermined_state(stand, str(exc))
+
+        try:
             result = _run(
                 self._base_args(kubectl, stand)
-                + ["get", "deployment", deployment, "-o", "jsonpath={.status.readyReplicas}"]
+                + [
+                    "get",
+                    "deployment",
+                    deployment,
+                    "-o",
+                    "jsonpath={.status.readyReplicas}|{.spec.replicas}|{.status.unavailableReplicas}",
+                ]
             )
-            if result.returncode == 0:
-                ready = (result.stdout or "").strip()
-                # ПУСТОЙ вывод при rc=0 — это НЕ неопределённость: поля
-                # status.readyReplicas у деплоймента с нулём готовых реплик
-                # просто нет. Значит kubectl ОПРЕДЕЛЁННО ответил «готовых
-                # реплик нет» — доверяем ему и не маскируем открытым портом.
-                # Живая приёмка 17.08.2026: после stop (scale 0) NodePort всё
-                # равно слушается, пока существует Service, и TCP-фолбэк
-                # показывал остановленный стенд работающим.
-                if not ready:
-                    return False
-                return int(ready) > 0
-        except (HostingError, ValueError):
-            pass
-        # Сюда попадаем, только если состояние выяснить НЕ удалось: kubectl не
-        # найден, вызов упал, kubectl вернул ненулевой код (нет деплоймента,
-        # нет контекста, нет доступа) или отдал нечисловой ответ.
-        return _tcp_fallback(stand)
+        except HostingError as exc:
+            return _undetermined_state(stand, str(exc))
+
+        if result.returncode != 0:
+            return _undetermined_state(stand, (result.stderr or result.stdout or "").strip())
+
+        parts = (result.stdout or "").strip().split("|")
+
+        def _num(index: int) -> Optional[int]:
+            if len(parts) <= index:
+                return 0
+            raw = parts[index].strip()
+            if not raw:
+                return 0
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+
+        ready, desired, unavailable = _num(0), _num(1), _num(2)
+        if ready is None or desired is None:
+            # Нечисловой ответ — формат не тот, что ожидался: вердикт выносить
+            # не на чем, это настоящая неопределённость.
+            return _undetermined_state(stand, "неожиданный ответ kubectl: %r" % result.stdout.strip())
+
+        if ready > 0:
+            reason = ""
+            if desired and ready < desired:
+                reason = "готово %d из %d реплик (недоступно: %d)" % (ready, desired, unavailable or 0)
+            return ContainerState(running=True, status="ready=%d/%d" % (ready, desired or ready), reason=reason)
+
+        if not desired:
+            reason = "деплоймент масштабирован в 0 реплик — стенд остановлен"
+        else:
+            reason = "нет готовых реплик (запрошено %d, недоступно %d)" % (desired, unavailable or desired)
+        return ContainerState(running=False, status="ready=0/%d" % (desired or 0), reason=reason)
+
+    def _selector(self, kubectl: str, stand: Stand, deployment: str) -> str:
+        """
+        Label-селектор деплоймента в форме ``k=v,k2=v2`` — нужен, чтобы читать
+        логи ВСЕХ подов, а не одного. Пустая строка, если получить не удалось.
+        """
+        result = _run(
+            self._base_args(kubectl, stand)
+            + ["get", "deployment", deployment, "-o", "jsonpath={.spec.selector.matchLabels}"]
+        )
+        if result.returncode != 0:
+            return ""
+        raw = (result.stdout or "").strip()
+        if not raw:
+            return ""
+        try:
+            labels = json.loads(raw)
+        except ValueError:
+            return ""
+        if not isinstance(labels, dict) or not labels:
+            return ""
+        return ",".join("%s=%s" % (key, value) for key, value in labels.items())
 
     def read_logs(
         self, stand: Stand, n: int = 100, *, log_dir: Optional[Path] = None
     ) -> Optional[list[str]]:
-        kubectl = _resolve_kubectl()
-        deployment = self._deployment(stand)
-        cmd = self._base_args(kubectl, stand) + [
-            "logs",
-            f"deployment/{deployment}",
-            "--tail",
-            str(n),
-        ]
+        """
+        Логи стенда. Читаются со ВСЕХ подов деплоймента по label-селектору с
+        префиксом имени пода: ``kubectl logs deployment/X`` показывает логи
+        ОДНОГО пода, выбранного самим kubectl, и при нескольких репликах часть
+        событий стенда молча не видна (живая приёмка 17.08.2026 на двух
+        репликах). Если селектор получить не удалось — старый путь по
+        ``deployment/X``.
+
+        ``None`` (а не исключение) при отсутствии kubectl — общий контракт
+        ``read_logs`` для всех бэкендов, см. протокол ``HostingBackend``.
+        """
+        try:
+            kubectl = _resolve_kubectl()
+            deployment = self._deployment(stand)
+        except HostingError:
+            return None
+
+        selector = self._selector(kubectl, stand, deployment)
+        if selector:
+            cmd = self._base_args(kubectl, stand) + [
+                "logs",
+                "-l",
+                selector,
+                "--prefix",
+                "--max-log-requests",
+                str(K8S_MAX_LOG_REQUESTS),
+                "--tail",
+                str(n),
+            ]
+        else:
+            cmd = self._base_args(kubectl, stand) + ["logs", f"deployment/{deployment}", "--tail", str(n)]
         if stand.k8s_container:
             cmd += ["-c", stand.k8s_container]
         result = _run_checked(cmd)
         combined = result.stdout + result.stderr
         lines = combined.splitlines()
-        return lines[-n:] if n > 0 else []
+        if n <= 0:
+            return []
+        if selector:
+            # ВАЖНО: при чтении по селектору `--tail n` уже применён kubectl'ом к
+            # КАЖДОМУ поду. Дополнительно обрезать общий вывод хвостом нельзя —
+            # хвост целиком принадлежит поду, который писал последним, и логи
+            # остальных реплик снова пропадают (ровно это показал перепрогон
+            # живой приёмки на двух репликах: строки только одного пода).
+            return lines
+        return lines[-n:]
