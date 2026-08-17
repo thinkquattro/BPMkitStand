@@ -606,6 +606,43 @@ def test_appcmd_transient_rpc_failure_on_mutation_is_not_retried_but_hinted(monk
     assert not isinstance(excinfo.value, hosting.IisElevationError)
 
 
+def test_iis_lifecycle_commands_get_a_generous_timeout(monkeypatch, tmp_path):
+    # `appcmd stop apppool` ждёт завершения w3wp, а IIS отводит на это
+    # shutdownTimeLimit (по умолчанию 90с). Живьём остановка пула прогретого
+    # стенда BPMSoft заняла 20.6с и не влезала в общий таймаут 20с — диспетчер
+    # рапортовал ошибку на штатной операции.
+    _prep_iis_windows(monkeypatch, tmp_path)
+    seen = []
+
+    def _fake_run(cmd, **kwargs):
+        seen.append((cmd, kwargs.get("timeout")))
+        return _completed(cmd, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1")
+    IisBackend().stop(stand)
+    IisBackend().start(stand)
+    IisBackend().restart(stand)
+    assert seen, "команды appcmd не вызывались"
+    assert all(t == hosting._IIS_LIFECYCLE_TIMEOUT for _cmd, t in seen), seen
+    assert hosting._IIS_LIFECYCLE_TIMEOUT >= 90.0  # не меньше shutdownTimeLimit самого IIS
+
+
+def test_iis_state_probe_keeps_the_short_timeout(monkeypatch, tmp_path):
+    # Читающие пробы состояния остаются быстрыми — дашборд опрашивает их часто.
+    _prep_iis_windows(monkeypatch, tmp_path)
+    seen = []
+
+    def _fake_run(cmd, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return _completed(cmd, returncode=0, stdout="Started")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    stand = _make_stand(host_kind=HostKind.IIS, iis_site="site1")
+    IisBackend().describe_state(stand)
+    assert seen and all(t == hosting._DEFAULT_TIMEOUT for t in seen), seen
+
+
 def test_iis_read_logs_finds_logs_in_dated_subfolder(tmp_path):
     # Стенд BPMSoft под .NET Framework пишет логи в подпапки-даты
     # (Logs\2026_08_17\Application.log) — плоский glob возвращал None.

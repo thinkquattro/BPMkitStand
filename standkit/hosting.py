@@ -62,6 +62,15 @@ K8S_MAX_LOG_REQUESTS = 10
 # транзиентном сбое RPC до службы WAS (см. _appcmd_checked).
 _TRANSIENT_RPC_RETRY_DELAY = 1.0
 
+# Таймаут ИЗМЕНЯЮЩИХ операций IIS (start/stop/recycle сайта и пула). Общий
+# _DEFAULT_TIMEOUT=20с для них мал: `appcmd stop apppool` ждёт завершения
+# рабочего процесса, а у самого IIS на это отведён shutdownTimeLimit (по
+# умолчанию 90 секунд). Живая приёмка 17.08.2026: остановка пула прогретого
+# стенда BPMSoft (.NET Framework) заняла 20.6с — диспетчер получал таймаут и
+# рапортовал ошибку, хотя IIS штатно останавливал пул. Берём 120с — с запасом
+# над дефолтным лимитом самого IIS.
+_IIS_LIFECYCLE_TIMEOUT = 120.0
+
 # Состояния сайта/пула, которые appcmd отдаёт, когда САМ не знает ответа
 # (службы IIS остановлены/перезапускаются). Их нельзя приравнивать к
 # «остановлен» — иначе сломанный канал управления выглядит как штатно
@@ -704,9 +713,11 @@ class IisBackend:
                 f"стенд '{stand.name}': host_kind=iis требует iis_site и/или iis_app_pool"
             )
         if stand.iis_app_pool:
-            _appcmd_checked([appcmd, "start", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
+            _appcmd_checked([appcmd, "start", "apppool", f"/apppool.name:{stand.iis_app_pool}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
         if stand.iis_site:
-            _appcmd_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"])
+            _appcmd_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
         return None
 
     def stop(self, stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
@@ -720,9 +731,11 @@ class IisBackend:
         # положила бы и их (решение Владимира — гасить только стенд). App Pool
         # гасим лишь как единственный хэндл, когда сайт вообще не задан.
         if stand.iis_site:
-            _appcmd_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"])
+            _appcmd_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
             return True
-        _appcmd_checked([appcmd, "stop", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
+        _appcmd_checked([appcmd, "stop", "apppool", f"/apppool.name:{stand.iis_app_pool}"],
+                        timeout=_IIS_LIFECYCLE_TIMEOUT)
         return True
 
     def restart(
@@ -733,10 +746,13 @@ class IisBackend:
         # трогаем/не рециклим — он может быть общим (см. stop). Recycle пула —
         # только когда сайт не задан (пул — единственный хэндл стенда).
         if stand.iis_site:
-            _appcmd_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"])
-            _appcmd_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"])
+            _appcmd_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
+            _appcmd_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
         elif stand.iis_app_pool:
-            _appcmd_checked([appcmd, "recycle", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
+            _appcmd_checked([appcmd, "recycle", "apppool", f"/apppool.name:{stand.iis_app_pool}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
         else:
             raise HostingError(
                 f"стенд '{stand.name}': host_kind=iis требует iis_site и/или iis_app_pool"
