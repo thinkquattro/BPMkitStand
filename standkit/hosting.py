@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,9 +58,40 @@ K8S_ROLLOUT_WAIT_SEC = 60.0
 # десятками подов, но покрывает реальные стенды.
 K8S_MAX_LOG_REQUESTS = 10
 
+# Пауза перед единственным повтором ЧИТАЮЩЕЙ команды appcmd, упавшей на
+# транзиентном сбое RPC до службы WAS (см. _appcmd_checked).
+_TRANSIENT_RPC_RETRY_DELAY = 1.0
+
+# Таймаут ИЗМЕНЯЮЩИХ операций IIS (start/stop/recycle сайта и пула). Общий
+# _DEFAULT_TIMEOUT=20с для них мал: `appcmd stop apppool` ждёт завершения
+# рабочего процесса, а у самого IIS на это отведён shutdownTimeLimit (по
+# умолчанию 90 секунд). Живая приёмка 17.08.2026: остановка пула прогретого
+# стенда BPMSoft (.NET Framework) заняла 20.6с — диспетчер получал таймаут и
+# рапортовал ошибку, хотя IIS штатно останавливал пул. Берём 120с — с запасом
+# над дефолтным лимитом самого IIS.
+_IIS_LIFECYCLE_TIMEOUT = 120.0
+
+# Состояния сайта/пула, которые appcmd отдаёт, когда САМ не знает ответа
+# (службы IIS остановлены/перезапускаются). Их нельзя приравнивать к
+# «остановлен» — иначе сломанный канал управления выглядит как штатно
+# погашенный стенд (живая приёмка IIS 17.08.2026).
+_INDETERMINATE_IIS_STATES = ("unknown", "")
+
 
 class HostingError(Exception):
     """Ошибка бэкенда хостинга (внешняя утилита не найдена, команда завершилась с ошибкой и т.п.)."""
+
+
+class IisServiceUnavailableError(HostingError):
+    """
+    Службы IIS (WAS/W3SVC) остановлены: ``appcmd`` физически не может узнать
+    состояние сайта/пула, а ``list site`` начинает отдавать ``Unknown``.
+
+    Отдельный тип нужен ровно потому, что ДО живой приёмки 17.08.2026 этот
+    случай выдавался за нехватку прав администратора (см. ``_ELEVATION_MARKERS``):
+    пользователь перезапускал хаб «от имени администратора» вместо того, чтобы
+    поднять службу.
+    """
 
 
 class IisElevationError(HostingError):
@@ -172,16 +204,61 @@ def _run(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subprocess.Com
 # Признаки того, что внешняя команда упала из-за НЕХВАТКИ ПРАВ (нужен запуск
 # «от имени администратора»). Для appcmd это типично: чтение config/
 # redirection.config в %windir%\system32\inetsrv требует elevation.
+#
+# Список УЗКИЙ намеренно (живая приёмка IIS 17.08.2026). Прежние маркеры
+# "error ( message:" и "(код 1168)" ловили ЛЮБУЮ ошибку appcmd, и elevated-
+# диспетчер получал диагноз «не хватает прав администратора» там, где реальная
+# причина другая: «Не удалось найти объект SITE» (код 1168 — это
+# ERROR_NOT_FOUND, а не отказ в доступе) и «Служба WAS недоступна» (код 50).
+# Ложный диагноз хуже отсутствия подсказки: он отправляет пользователя
+# перезапускать хаб от администратора вместо того, чтобы поднять службу или
+# исправить имя сайта.
 _ELEVATION_MARKERS = (
     "redirection.config",
     "access is denied",
     "отказано в доступе",
-    "разрешени",       # «…необходимых разрешений»
+    "необходимых разрешений",
     "0x80070005",
-    "(код 1168)",
     "requires administrator",
     "elevated",
-    "error ( message:",  # общий appcmd-ERROR при неудачном открытии config
+)
+
+# Служба активации Windows (WAS) / служба веб-публикаций (W3SVC) остановлена:
+# appcmd отвечает кодом 50 (ERROR_NOT_SUPPORTED) с явным текстом, а состояние
+# сайта в `list site` при этом становится "Unknown". Диагноз — «поднимите
+# службу», а НЕ «запустите от имени администратора».
+_WAS_DOWN_MARKERS = (
+    "служба was недоступна",
+    "was service is not available",
+    "(код 50)",
+)
+
+WAS_DOWN_HINT = (
+    "\n\nПохоже, остановлена служба IIS: appcmd не может обратиться к службе "
+    "активации Windows (WAS). Запустите службы WAS и W3SVC (`sc start WAS`, "
+    "`sc start W3SVC`, либо `iisreset /start`) и повторите операцию."
+)
+
+# Транзиентный сбой канала управления IIS: RPC до WAS отвалился (служба
+# перезапускается/падала). Живая приёмка 17.08.2026: `appcmd list wp` отдавал
+# код 1726 (RPC failed) и 2147549190 (0x80010006, «подключение разорвано»)
+# сразу после операций над пулами, а через секунду та же команда работала.
+# Для ЧИТАЮЩИХ команд такой ответ ретраится один раз (см. _run), для
+# изменяющих — к тексту ошибки добавляется подсказка (повтор небезопасен
+# автоматически, решение за пользователем).
+_TRANSIENT_RPC_MARKERS = (
+    "hresult:800706be",
+    "hresult:80010006",
+    "(код 1726)",
+    "(код 2147549190)",
+    "сбой при удаленном вызове процедуры",
+    "the remote procedure call failed",
+)
+
+TRANSIENT_RPC_HINT = (
+    "\n\nПохоже, канал управления IIS отвалился на момент вызова (RPC до службы "
+    "WAS): служба перезапускается либо только что падала. Проверьте состояние "
+    "служб WAS/W3SVC и повторите операцию."
 )
 
 # Подсказка, которая дописывается к любой ошибке appcmd, похожей на нехватку
@@ -198,6 +275,66 @@ def _looks_like_elevation_error(text: str) -> bool:
     return any(m in low for m in _ELEVATION_MARKERS)
 
 
+def _looks_like_was_down(text: str) -> bool:
+    low = text.lower()
+    return any(m in low for m in _WAS_DOWN_MARKERS)
+
+
+def _looks_like_transient_rpc(text: str) -> bool:
+    low = text.lower()
+    return any(m in low for m in _TRANSIENT_RPC_MARKERS)
+
+
+def _process_is_elevated() -> Optional[bool]:
+    """
+    Запущен ли ТЕКУЩИЙ процесс с правами администратора. ``None`` — выяснить не
+    удалось (не Windows либо ctypes недоступен).
+
+    Нужен для честной классификации отказа appcmd: без elevation appcmd не
+    читает даже свой ``redirection.config``, поэтому ЛЮБАЯ его ошибка в
+    неэлевированном процессе — про права, как бы Windows её ни сформулировала
+    (живая приёмка 17.08.2026: неэлевированный ``list wp`` отвечает «Служба WAS
+    недоступна», хотя служба работает).
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return None
+
+
+def _service_state(name: str) -> Optional[str]:
+    """
+    Состояние Windows-службы по ``sc query`` (``RUNNING``/``STOPPED``/...) либо
+    ``None``, если выяснить не удалось. Второй канал для диагноза «служба
+    остановлена» — текст ошибки appcmd сам по себе не доказательство.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        proc = subprocess.run(["sc", "query", name], capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = _decode_console(proc.stdout).upper()
+    for token in ("RUNNING", "STOP_PENDING", "START_PENDING", "STOPPED", "PAUSED"):
+        if token in text:
+            return token
+    return None
+
+
+def _iis_services_down() -> list[str]:
+    """Список остановленных служб IIS из (WAS, W3SVC) — пусто, если обе живы/неизвестны."""
+    down = []
+    for name in ("WAS", "W3SVC"):
+        state = _service_state(name)
+        if state in ("STOPPED", "STOP_PENDING"):
+            down.append(name)
+    return down
+
+
 def _run_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
     """Как ``_run``, но дополнительно бросает ``HostingError``, если код возврата не 0."""
     result = _run(cmd, timeout=timeout)
@@ -207,17 +344,55 @@ def _run_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subpro
     return result
 
 
+def _is_read_only_appcmd(cmd: list[str]) -> bool:
+    """``appcmd list ...`` — читающая команда (её безопасно повторить)."""
+    return len(cmd) > 1 and cmd[1].lower() == "list"
+
+
 def _appcmd_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
-    """``_run_checked`` для appcmd: при ошибке нехватки прав бросает
-    ``IisElevationError`` с понятной подсказкой «запустите от имени
-    администратора» (подтип ``HostingError`` — прежние ``except HostingError``
-    продолжают работать, но UI может отличить именно этот случай)."""
-    try:
-        return _run_checked(cmd, timeout=timeout)
-    except HostingError as exc:
-        if _looks_like_elevation_error(str(exc)):
-            raise IisElevationError(str(exc) + ELEVATION_HINT) from exc
-        raise
+    """
+    ``_run_checked`` для appcmd с ЧЕСТНОЙ классификацией отказа (живая приёмка
+    IIS 17.08.2026 — до неё любая ошибка appcmd объявлялась нехваткой прав):
+
+    1. транзиентный сбой RPC до WAS — читающая команда (``appcmd list ...``)
+       повторяется один раз, изменяющая отдаётся с подсказкой про канал
+       управления (автоматически повторять изменение нельзя);
+    2. явные признаки нехватки прав (``redirection.config``, «отказано в
+       доступе», ``0x80070005``) — ``IisElevationError``;
+    3. процесс НЕ elevated — ``IisElevationError`` независимо от формулировки
+       Windows (без elevation appcmd не работает в принципе);
+    4. «Служба WAS недоступна» в elevated-процессе, подтверждённая состоянием
+       службы, — ``IisServiceUnavailableError`` с подсказкой «поднимите службу»;
+    5. остальное (например «Не удалось найти объект SITE», код 1168) — обычный
+       ``HostingError`` без ложных подсказок.
+    """
+    attempts = 2 if _is_read_only_appcmd(cmd) else 1
+    last: Optional[HostingError] = None
+    for attempt in range(attempts):
+        try:
+            return _run_checked(cmd, timeout=timeout)
+        except HostingError as exc:
+            last = exc
+            if attempt + 1 < attempts and _looks_like_transient_rpc(str(exc)):
+                time.sleep(_TRANSIENT_RPC_RETRY_DELAY)
+                continue
+            break
+
+    assert last is not None
+    text = str(last)
+    if _looks_like_transient_rpc(text):
+        raise HostingError(text + TRANSIENT_RPC_HINT) from last
+    if _looks_like_elevation_error(text):
+        raise IisElevationError(text + ELEVATION_HINT) from last
+    if _process_is_elevated() is False:
+        raise IisElevationError(text + ELEVATION_HINT) from last
+    if _looks_like_was_down(text):
+        down = _iis_services_down()
+        suffix = WAS_DOWN_HINT
+        if down:
+            suffix += " Сейчас остановлены: %s." % ", ".join(down)
+        raise IisServiceUnavailableError(text + suffix) from last
+    raise last
 
 
 def _tcp_fallback(stand: Stand) -> bool:
@@ -488,7 +663,15 @@ def detect_iis_site(stand: Stand) -> Optional[IisSiteMatch]:
     apps = _parse_appcmd_xml(_appcmd_checked([appcmd, "list", "apps", "/xml"]).stdout, "APP")
     for app in apps:
         if _site_of_vdir(app.get("APP.NAME", "")) == match.site:
-            match.app_pool = app.get("applicationPool") or None
+            # ВНИМАНИЕ: `appcmd list apps /xml` называет атрибут пула
+            # APPPOOL.NAME (а НЕ applicationPool, как в applicationHost.config
+            # и как читал прежний код) — из-за этого автоопределение всегда
+            # возвращало пустой пул, кнопка «Определить автоматически»
+            # заполняла только сайт, а kill_worker_processes (требует явного
+            # iis_app_pool) оставался недоступен. Живая приёмка 17.08.2026;
+            # юнит-тесты этот атрибут не мокали вовсе. Второе имя оставлено
+            # фолбэком — на случай иной версии appcmd.
+            match.app_pool = app.get("APPPOOL.NAME") or app.get("applicationPool") or None
             break
 
     return match
@@ -502,11 +685,24 @@ class IisBackend:
     """
 
     def _query_state(self, appcmd: str, target: str, name: str) -> Optional[str]:
-        """``appcmd list <target> <name> /text:state`` → строка состояния либо None при ошибке."""
+        """
+        ``appcmd list <target> <name> /text:state`` → строка состояния либо
+        ``None``, если состояние выяснить НЕ удалось.
+
+        ``None`` возвращается не только при ошибке команды, но и когда appcmd
+        ответил ``Unknown`` (или пустотой): так он говорит «я сам не знаю» —
+        типично при остановленных службах WAS/W3SVC. Приравнивать это к
+        «остановлен» нельзя (живая приёмка 17.08.2026: остановка W3SVC давала
+        вердикт «сайт остановлен (state=Unknown)» — сломанный канал управления
+        выглядел как погашенный стенд).
+        """
         result = _run([appcmd, "list", target, name, "/text:state"])
         if result.returncode != 0:
             return None
-        return result.stdout.strip()
+        state = result.stdout.strip()
+        if state.lower() in _INDETERMINATE_IIS_STATES:
+            return None
+        return state
 
     def start(
         self, stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None
@@ -517,9 +713,11 @@ class IisBackend:
                 f"стенд '{stand.name}': host_kind=iis требует iis_site и/или iis_app_pool"
             )
         if stand.iis_app_pool:
-            _appcmd_checked([appcmd, "start", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
+            _appcmd_checked([appcmd, "start", "apppool", f"/apppool.name:{stand.iis_app_pool}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
         if stand.iis_site:
-            _appcmd_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"])
+            _appcmd_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
         return None
 
     def stop(self, stand: Stand, *, run_dir: Optional[Path] = None) -> bool:
@@ -533,9 +731,11 @@ class IisBackend:
         # положила бы и их (решение Владимира — гасить только стенд). App Pool
         # гасим лишь как единственный хэндл, когда сайт вообще не задан.
         if stand.iis_site:
-            _appcmd_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"])
+            _appcmd_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
             return True
-        _appcmd_checked([appcmd, "stop", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
+        _appcmd_checked([appcmd, "stop", "apppool", f"/apppool.name:{stand.iis_app_pool}"],
+                        timeout=_IIS_LIFECYCLE_TIMEOUT)
         return True
 
     def restart(
@@ -546,10 +746,13 @@ class IisBackend:
         # трогаем/не рециклим — он может быть общим (см. stop). Recycle пула —
         # только когда сайт не задан (пул — единственный хэндл стенда).
         if stand.iis_site:
-            _appcmd_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"])
-            _appcmd_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"])
+            _appcmd_checked([appcmd, "stop", "site", f"/site.name:{stand.iis_site}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
+            _appcmd_checked([appcmd, "start", "site", f"/site.name:{stand.iis_site}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
         elif stand.iis_app_pool:
-            _appcmd_checked([appcmd, "recycle", "apppool", f"/apppool.name:{stand.iis_app_pool}"])
+            _appcmd_checked([appcmd, "recycle", "apppool", f"/apppool.name:{stand.iis_app_pool}"],
+                            timeout=_IIS_LIFECYCLE_TIMEOUT)
         else:
             raise HostingError(
                 f"стенд '{stand.name}': host_kind=iis требует iis_site и/или iis_app_pool"
@@ -591,10 +794,20 @@ class IisBackend:
         if primary is None:
             state.port_open = _tcp_fallback(stand)
             state.running = state.port_open
-            state.reason = (
-                "appcmd не вернул состояние (сайт/пул не найден либо не хватает прав) — "
-                "вердикт по TCP-порту"
-            )
+            down = _iis_services_down()
+            if down:
+                # Самая частая причина «состояние Unknown» — остановленные службы
+                # IIS. Говорим это прямо, чтобы пользователь поднимал службу, а не
+                # искал стенд (живая приёмка 17.08.2026).
+                state.reason = (
+                    "состояние не выяснено: остановлены службы IIS (%s) — appcmd отдаёт "
+                    "Unknown; вердикт по TCP-порту" % ", ".join(down)
+                )
+            else:
+                state.reason = (
+                    "appcmd не вернул определённого состояния (сайт/пул не найден, "
+                    "состояние Unknown либо не хватает прав) — вердикт по TCP-порту"
+                )
             return state
 
         site_ok = (state.site_state == "Started") if stand.iis_site else True
@@ -669,6 +882,18 @@ class IisBackend:
         if not directory.exists() or not directory.is_dir():
             return None
         log_files = sorted(directory.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not log_files:
+            # Стенд BPMSoft под .NET Framework раскладывает логи по ПОДПАПКАМ-датам
+            # (Logs\2026_08_17\Application.log), в корне каталога *.log нет вовсе —
+            # плоский glob возвращал None, и консоль стенда в диспетчере оставалась
+            # пустой при 11 живых файлах лога (живая приёмка IIS 17.08.2026).
+            # Обход ограничен ближайшими подпапками: рекурсия на весь каталог
+            # стенда дорога, а логи лежат ровно на этом уровне.
+            log_files = sorted(
+                (p for p in directory.glob("*/*.log") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
         if not log_files:
             return None
         from standkit import logs as _logs  # локальный импорт — избегаем цикла
