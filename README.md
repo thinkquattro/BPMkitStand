@@ -127,6 +127,7 @@ BPMkitStand использует тот же реестр, что и MCP BPMkit 
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — история изменений по версиям.
 - [docs/BACKLOG.md](docs/BACKLOG.md) — честный список «упомянуто в коде, но не реализовано» (заделы/заглушки) со ссылками на код.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/HOSTING.md](docs/HOSTING.md) · [docs/REMOTE_STANDS.md](docs/REMOTE_STANDS.md) · [SECURITY.md](SECURITY.md)
+- [docs/COOKBOOK_LINUX.md](docs/COOKBOOK_LINUX.md) — пошаговое развёртывание агента на Linux: pipx/venv, реестр, секреты, systemd, TLS/mTLS и полный разбор типичных ошибок с реальными сообщениями.
 - Решения (ADR): [0001 — hosting backends](docs/adr/0001-hosting-backends.md) · [0002 — k8s backend](docs/adr/0002-k8s-backend.md) · [0003 — браузинг логов удалённых стендов (предложено)](docs/adr/0003-remote-log-browsing.md) · [0004 — IIS: жизненный цикл по Site](docs/adr/0004-iis-site-scoped-lifecycle.md)
 
 > Статус: `standkit` — молодой проект (0.5.x). Ядро/агент/хаб работоспособны, но
