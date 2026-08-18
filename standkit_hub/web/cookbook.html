@@ -465,6 +465,9 @@ sudo ln -s ~/.venvs/standkit/bin/standkit-hub /usr/local/bin/standkit-hub</div>
     <p class="tmuted">Дополнение <code>[desktop]</code> (нативное окно) на Linux требует WebKitGTK в системе;
     без него просто пользуйтесь браузером. К уже поставленному pipx-пакету дополнение добавляется
     инъекцией: <code>pipx inject standkit keyring</code>.</p>
+    <p class="tmuted">Разворачиваете <b>агента</b> на Linux-хосте стенда — есть отдельный подробный кукбук
+    <code>docs/COOKBOOK_LINUX.md</code>: сервисный аккаунт, systemd-юнит, TLS/mTLS, ротация токена
+    и таблица типичных ошибок с реальными сообщениями.</p>
     <div class="note stopnote" style="margin-top:10px">⛔ <b><code>--break-system-packages</code> на рабочем сервере — антипаттерн.</b>
     На Debian/Ubuntu системный Python обслуживает сам <code>apt</code>; сломав его, вы теряете управление
     пакетами машины. Флаг существует для контейнеров и одноразовых песочниц, не для хоста со стендами.</div>
