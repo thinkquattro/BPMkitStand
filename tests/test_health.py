@@ -424,12 +424,28 @@ def test_http_probe_connection_refused_names_endpoint(monkeypatch):
 
 
 def test_http_probe_refused_on_closed_port_live():
-    """Тот же случай без моков: заведомо закрытый локальный порт."""
+    """
+    Тот же случай без моков: заведомо закрытый локальный порт.
+
+    Точный диагноз здесь диктует ОС, а не наш код. На POSIX ядро отвечает RST,
+    и проба обязана сказать «соединение отклонено». На **Windows** тот же
+    сценарий регулярно даёт не RST, а молчание: SYN на только что освобождённый
+    порт отбрасывается (фильтр/состояние стека), и проба честно упирается в
+    таймаут. Обе формулировки — рабочий диагноз, поэтому здесь проверяется
+    контракт, а не конкретная ветка классификатора: проба не упала, вернула
+    ok=False и внятную причину. Разбор самих формулировок — в соседних тестах
+    на моках (`test_http_probe_connection_refused_*`, `test_http_probe_timeout_*`),
+    там поведение ОС ни при чём.
+    """
     port = _find_closed_port()
     result = http_probe(f"http://127.0.0.1:{port}/", timeout=0.5)
     assert result.ok is False
-    assert "соединение отклонено" in result.reason
-    assert f"127.0.0.1:{port}" in result.reason
+    if "соединение отклонено" in result.reason:
+        assert f"127.0.0.1:{port}" in result.reason
+    else:
+        assert result.reason == "нет ответа за 0.5 с", (
+            f"ожидался отказ соединения или таймаут, получено: {result.reason!r}"
+        )
 
 
 def test_http_probe_timeout_reports_seconds(monkeypatch):
