@@ -49,6 +49,8 @@ BPMkitStand управляет удалёнными стендами через 
 | `POST` | `/stand/{name}/stop` | control | остановить стенд |
 | `POST` | `/stand/{name}/restart` | control | перезапустить стенд |
 
+Эндпоинта `/health` у агента **нет** — живость проверяется `GET /stands` с токеном.
+
 ---
 
 ## Модель безопасности
@@ -115,6 +117,13 @@ C:\ProgramData\standkit\venv\Scripts\pip install standkit
 где перечислены стенды **этого** хоста (можно только они). Пример записи локального для
 агента стенда:
 
+> **Отдельной CLI-команды регистрации нет.** Файл пишется руками по образцу
+> [`projects.sample.json`](../projects.sample.json) либо скриптом через
+> `Registry.add_existing()` — питоном ТОГО окружения, куда установлен пакет
+> (`/opt/standkit/venv/bin/python`; системный `python3` модуля не увидит).
+> Каталог и файл создаются при первом `save()`. Пошаговый рецепт — в кукбуке,
+> раздел «Реестр стендов».
+
 ```json
 {
   "default": "",
@@ -124,7 +133,7 @@ C:\ProgramData\standkit\venv\Scripts\pip install standkit
       "stand_dir": "/opt/bpmsoft/client-uat",
       "stand_dll": "BPMSoft.WebHost.dll",
       "dotnet": "dotnet",
-      "stand_host": "0.0.0.0",
+      "stand_host": "127.0.0.1",
       "stand_port": 5000,
       "db_type": "postgres",
       "db_host": "127.0.0.1",
@@ -139,6 +148,16 @@ C:\ProgramData\standkit\venv\Scripts\pip install standkit
 > На стороне агента стенд остаётся `transport: "local"` — агент поднимает его локально
 > у себя. Удалённым (`transport: "agent"`) он становится только в реестре **оператора** —
 > см. [Подключение из дашборда](#подключение-из-дашборда).
+
+**Какой адрес писать в `stand_host`/`stand_port`.** Агент работает на хосте, вне
+контейнера, поэтому это адрес **обращения к стенду с хоста**, а не адрес слушания:
+`0.0.0.0` даёт ложный `http: down`. Для Docker порт берётся из
+`docker ps --format '{{.Names}}\t{{.Ports}}'` — в `127.0.0.1:5010->5002/tcp` нужен **левый**
+(5010); строка `5000/tcp` без стрелки означает, что порт наружу не опубликован. Внутренний
+IP контейнера (`172.17.x.x`) работать будет, но меняется при пересоздании — в реестр не
+писать. То же правило для `db_host`/`db_port` и `redis_host`/`redis_port`.
+
+**Агент читает реестр при старте** — после правки `projects.json` нужен рестарт службы.
 
 ### 3. Задать токен(ы) агента как секрет
 
@@ -193,6 +212,10 @@ openssl req -x509 -newkey rsa:4096 -nodes -days 365 \
 ```
 
 ### 5. Запустить агента
+
+`--token-ref` обязателен: без него argparse откажет ещё до старта. Каталоги по
+умолчанию — `~/.standkit/run`, `~/.standkit/logs`, `~/.standkit/audit.log`; у службы свой
+`$HOME`, поэтому `--run-dir`/`--log-dir`/`--audit-log` задавайте явно.
 
 **Dev / закрытый loopback (без сети):**
 
@@ -286,6 +309,16 @@ curl --cacert agent.crt \
 | `403 forbidden: insufficient scope` | использован readonly-токен для управления | использовать control-токен (`--token-ref`) |
 | `429 too many failed attempts` | сработал lockout по IP | подождать окно `--lockout-window`, проверить токен |
 | В дашборде стенд с ошибкой связи | агент недоступен/таймаут/сертификат | проверить сеть/файрвол, срок и CN сертификата |
+| `the following arguments are required: --token-ref` | ключ обязателен всегда | добавить `--token-ref standkit:<стенд>:agent-token` |
+| `error: externally-managed-environment` | PEP 668 на свежих Ubuntu/Debian | ставить через pipx или venv, `--break-system-packages` на рабочем хосте не использовать |
+| `No module named 'standkit_agent'` в скрипте | запущен системный `python3`, а пакет в venv/pipx | звать питон окружения (`/opt/standkit/venv/bin/python`) |
+| `/etc/standkit/agent.env: Permission denied` | файл 600 под root, служба под другим пользователем | `chown` на пользователя службы |
+| `SecretError` при верном `ref` | забыт префикс `STANDKIT_SECRET__` (или лишний `_` от `echo … | tr`) | сверить имя по формуле, использовать `printf '%s'` |
+| `RegistryError: Стенд не найден` | регистрация не выполнялась или ушла в другой файл | задавать `--registry` явным абсолютным путём |
+| `409 adopt_required` на stop/restart | стенд поднят вне диспетчера, согласия не было | повторить с `?force=1` либо `POST /stand/<имя>/adopt` — это штатный отказ, не ошибка |
+| `http: down` при живом стенде | `stand_host=0.0.0.0`, неопубликованный порт или стенд за HTTPS | взять адрес обращения с хоста; про HTTPS — см. «Ограничения» |
+| Статус не меняется после правки реестра | агент читает реестр при старте | перезапустить службу агента |
+| PowerShell: `ParameterBindingException` на `curl` | `curl` там алиас `Invoke-WebRequest` | `curl.exe -s -H "Authorization: Bearer …"` или `Invoke-RestMethod -Headers @{Authorization="Bearer $tok"}` |
 | TLS-хендшейк отклонён | нет/невалиден клиентский сертификат (mTLS) | выпустить клиентский сертификат из того же CA (`--tls-client-ca`) |
 
 Аудит-лог агента (`--audit-log`) — append-only JSON-lines: `ts`, `src_ip`, `identity`,
@@ -306,6 +339,9 @@ curl --cacert agent.crt \
   CN используется лишь для идентичности в аудите).
 - Параллельный опрос агентов дашбордом (сейчас — последовательный; при большом числе агентов
   и таймаутах масштабируется хуже).
+- HTTP-проба стенда **за HTTPS**: URL строится жёстко со схемой `http://`, а проверка
+  идёт с валидацией цепочки сертификатов — стенд за TLS всегда показывает `http: down`
+  при живых `process`/`db` (найдено живой установкой на Ubuntu 24.04 18.08.2026).
 - Транспорты `ssh` / `winrm` — допускаются схемой реестра, но логика не реализована.
 - `host_kind` (kestrel/iis/docker — как стенд ХОСТИТСЯ, ортогонально транспорту выше) —
   см. [docs/HOSTING.md](HOSTING.md); `host_kind=k8s` — задел, логика не реализована.

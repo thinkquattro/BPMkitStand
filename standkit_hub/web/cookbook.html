@@ -237,7 +237,7 @@
   </div>
   <input id="filter" type="search" placeholder="Поиск: «агент», «IIS», «Redis», «токен»…" autocomplete="off">
   <span id="filterInfo"></span>
-  <button id="docmeta" title="О документе: версия, контакты, история">версия документа 1.0<br>август 2026</button>
+  <button id="docmeta" title="О документе: версия, контакты, история">версия документа 1.1<br>август 2026</button>
   <button id="themeBtn" title="Переключить тему">☀️ Светлая</button>
 </header>
 
@@ -459,9 +459,19 @@ standkit-hub</div>
     <p><b>Вариант B — venv</b> (если pipx нет или окружение нужно своё):</p>
     <div class="prompt">python3 -m venv ~/.venvs/standkit
 ~/.venvs/standkit/bin/pip install "standkit[secrets]"
-~/.venvs/standkit/bin/standkit-hub</div>
+~/.venvs/standkit/bin/standkit-hub
+# при желании — короткая команда:
+sudo ln -s ~/.venvs/standkit/bin/standkit-hub /usr/local/bin/standkit-hub</div>
     <p class="tmuted">Дополнение <code>[desktop]</code> (нативное окно) на Linux требует WebKitGTK в системе;
-    без него просто пользуйтесь браузером.</p>
+    без него просто пользуйтесь браузером. К уже поставленному pipx-пакету дополнение добавляется
+    инъекцией: <code>pipx inject standkit keyring</code>.</p>
+    <div class="note stopnote" style="margin-top:10px">⛔ <b><code>--break-system-packages</code> на рабочем сервере — антипаттерн.</b>
+    На Debian/Ubuntu системный Python обслуживает сам <code>apt</code>; сломав его, вы теряете управление
+    пакетами машины. Флаг существует для контейнеров и одноразовых песочниц, не для хоста со стендами.</div>
+    <div class="note warnnote" style="margin-top:10px">🐍 <b>Скрипты запускайте питоном того окружения, куда поставили пакет.</b>
+    Системный <code>python3</code> модуля не видит — будет <code>No module named 'standkit_agent'</code>.
+    Для pipx это <code>~/.local/share/pipx/venvs/standkit/bin/python</code>, для venv —
+    <code>~/.venvs/standkit/bin/python</code>.</div>
   </div>
 </div>
 
@@ -701,10 +711,12 @@ pipx upgrade standkit                         # Linux, установка чер
   <div class="tile acc">
     <h3><span class="ico">📄</span>Где лежит</h3>
     <ul>
-      <li>Порядок резолва: <code>BPMSOFT_PROJECTS_FILE</code> → профиль пользователя → <code>./projects.json</code></li>
+      <li>Порядок резолва: <code>BPMSOFT_PROJECTS_FILE</code> (если файл существует) → канонический путь профиля → <code>./projects.json</code> в текущем каталоге</li>
       <li>Windows: <code>%APPDATA%\BPMkit\projects.json</code></li>
-      <li>Linux: <code>~/.config/BPMkit/projects.json</code></li>
+      <li>Linux: <code>$XDG_CONFIG_HOME/BPMkit/projects.json</code>, иначе <code>~/.config/BPMkit/projects.json</code></li>
       <li>Стенды — под ключом <code>projects</code>, имя записи = имя стенда</li>
+      <li><b>На чистой машине файла нет — это норма:</b> чтение несуществующего реестра даёт пустой список,
+        а сам файл (вместе с каталогом) создаётся при первой записи</li>
     </ul>
   </div>
   <div class="tile ok">
@@ -724,6 +736,11 @@ pipx upgrade standkit                         # Linux, установка чер
       <li>Кнопка «Зарегистрировать стенд» <b>привязывает уже существующий</b> стенд к реестру</li>
       <li>Каталог, база и дистрибутив должны существовать заранее</li>
       <li>Развернуть стенд «с нуля» диспетчер не умеет — это зона BPMkit</li>
+      <li><b>Отдельной CLI-команды регистрации в пакете нет</b> — три рабочих пути: кнопка в дашборде,
+        правка <code>projects.json</code> руками по образцу <code>projects.sample.json</code>,
+        <code>Registry.add_existing()</code> из Python (рецепт ниже — для сервера без дашборда)</li>
+      <li>Обязательные поля: <code>name</code> и <code>stand_dir</code>; для <code>host_kind=docker</code> —
+        <code>docker_container</code> (или compose-пара), для <code>kestrel</code> — <code>stand_dll</code> и <code>dotnet</code></li>
     </ul>
   </div>
 </div>
@@ -753,7 +770,62 @@ pipx upgrade standkit                         # Linux, установка чер
 </table>
 </div>
 
+<h3 style="margin-top:20px">Один стенд — две разные записи в двух реестрах</h3>
+<p class="lead">Самая частая ошибка при удалённом управлении. Стенд живёт на своём хосте, и там он для агента
+<b>локальный</b>. Удалённым он становится только в реестре оператора — это отдельная запись в другом файле.
+Синхронизировать реестры между собой не нужно.</p>
+<div class="twrap">
+<table>
+  <tr><th style="width:22%">Что</th><th>Реестр на хосте стенда (читает агент)</th><th>Реестр оператора (читает дашборд)</th></tr>
+  <tr><td><b>transport</b></td><td><code>local</code> — агент поднимает стенд у себя</td><td><code>agent</code> — дашборд ходит к агенту по HTTP</td></tr>
+  <tr><td><b>Адрес агента</b></td><td>—</td><td><code>agent_url</code> + <code>agent_secret_ref</code></td></tr>
+  <tr><td><b>Как запускается</b></td><td><code>stand_dll</code>/<code>dotnet</code>, <code>docker_container</code>, IIS-сайт…</td><td>Не важно — запуск делает агент</td></tr>
+  <tr><td><b>Секреты</b></td><td>Пароль БД стенда (<code>secret_ref_db</code>)</td><td>Токен агента (<code>agent_secret_ref</code>)</td></tr>
+  <tr><td><b>Путь файла</b></td><td>Задаётся агенту явно: <code>--registry /opt/standkit/projects.json</code></td><td>Профиль оператора: <code>%APPDATA%\BPMkit\projects.json</code></td></tr>
+</table>
+</div>
+<div class="note warnnote">🔁 <b>Агент читает реестр при старте.</b> Поправили <code>projects.json</code> на хосте —
+перезапустите службу агента, иначе увидите прежнюю картину и будете искать несуществующую проблему.</div>
+
 <div class="grid g2">
+<details class="tile">
+  <summary>🐍 Регистрация стенда на сервере без дашборда<span class="badge b-acc">рецепт</span><span class="chev">▶</span></summary>
+  <div class="body">
+    <p class="tmuted">Дашборд на headless-хосте неудобен (слушает только <code>127.0.0.1</code>), CLI регистрации нет —
+    поэтому запись добавляется из Python. Питон берём <b>из того окружения, куда поставлен пакет</b>.</p>
+    <div class="prompt">/opt/standkit/venv/bin/python - &lt;&lt;'PY'
+from standkit.models import Stand
+from standkit.registry import Registry
+
+reg = Registry.load("/opt/standkit/projects.json")
+reg.add_existing(Stand.from_dict("survey9", {
+    "transport": "local",
+    "host_kind": "docker",
+    "docker_container": "survey9-web",
+    "stand_dir": "/opt/bpmsoft/survey9",
+    "stand_host": "127.0.0.1",   # адрес ОБРАЩЕНИЯ с хоста, не 0.0.0.0
+    "stand_port": 5010,          # левый порт из docker ps
+    "db_type": "postgres",
+    "db_host": "127.0.0.1",
+    "db_port": 5433,
+    "db_name": "survey9",
+    "secret_ref_db": "standkit:survey9:db",
+    "redis_host": "127.0.0.1",
+    "redis_port": 6379,
+    "redis_db": 2,
+}))
+reg.save("/opt/standkit/projects.json")
+print("ok")
+PY</div>
+    <ul>
+      <li>Файл и каталог создаются сами при <code>save()</code> — заводить их заранее не нужно</li>
+      <li><code>add_existing()</code> валидирует запись: пропущенное обязательное поле для выбранного
+        <code>host_kind</code> вылезет сразу, а не при первом старте</li>
+      <li>После правки реестра — перезапуск агента</li>
+    </ul>
+  </div>
+</details>
+
 <details class="tile">
   <summary>📁 Минимальная запись локального стенда (kestrel)<span class="chev">▶</span></summary>
   <div class="body">
@@ -863,6 +935,31 @@ pipx upgrade standkit                         # Linux, установка чер
 </table>
 </div>
 
+<h3 style="margin-top:20px">Docker: какой адрес писать в реестр</h3>
+<p class="lead">Здесь ошибаются практически все, а расплата — ложный <code>http: down</code> при живом стенде.
+Диспетчер (и агент) работают <b>на хосте, вне контейнера</b>, поэтому в <code>stand_host</code>/<code>stand_port</code>
+идёт адрес, по которому до стенда достучаться <b>с хоста</b>. Не адрес слушания и не внутренний IP контейнера.</p>
+<div class="grid g3">
+  <div class="tile stop"><h3><span class="ico">🚫</span><code>0.0.0.0</code> — неверно</h3>
+    <ul><li>Это адрес для bind внутри контейнера, а не адрес для обращения</li>
+        <li>Проба по нему не ходит — стенд живой, а в таблице <code>down</code></li>
+        <li>Пишите <code>127.0.0.1</code> (порт опубликован на хост) или реальное имя/адрес хоста</li></ul></div>
+  <div class="tile ok"><h3><span class="ico">🔎</span>Где взять порт</h3>
+    <div class="prompt">docker ps --format '{{.Names}}\t{{.Ports}}'</div>
+    <ul><li>В <code>127.0.0.1:5010-&gt;5002/tcp</code> нужен <b>левый</b> порт — <code>5010</code></li>
+        <li>Строка вида <code>5000/tcp</code> без стрелки = порт объявлен, но наружу не опубликован; с хоста его нет</li></ul></div>
+  <div class="tile warn"><h3><span class="ico">📌</span>Внутренний IP не писать</h3>
+    <ul><li><code>172.17.x.x</code> работает, но меняется при пересоздании контейнера</li>
+        <li>То же правило для <code>db_host</code>/<code>db_port</code> и <code>redis_host</code>/<code>redis_port</code></li>
+        <li>Нет <code>redis_host</code>/<code>redis_port</code> — проба честно вернёт <b>unknown</b>, а не <code>down</code>: это «не настроено», а не авария</li></ul></div>
+</div>
+
+<div class="note stopnote">🔐 <b>Известное ограничение: стенд за HTTPS.</b> HTTP-проба строит URL жёстко со схемой
+<code>http://</code> и проверяет цепочку сертификатов, поэтому стенд за TLS (тем более с самоподписанным
+сертификатом) всегда показывает <code>http: down</code> при живых <code>process</code> и <code>db</code>.
+Пока это ограничение, а не поломка вашего стенда: ориентируйтесь на остальные пробы и открывайте стенд
+в браузере вручную.</div>
+
 <div class="grid g3">
   <div class="tile stop">
     <h3><span class="ico">🛡️</span>IIS: только от администратора</h3>
@@ -941,7 +1038,14 @@ pipx upgrade standkit                         # Linux, установка чер
 
 <div class="note stopnote">🛑 <b>Правило №1.</b> Агент по HTTP запускает и останавливает процессы на своём хосте —
 это <b>поверхность удалённого исполнения кода по дизайну</b>. Никогда не выставляйте его в недоверенную сеть
-открытым HTTP. Только TLS с клиентской аутентификацией (mTLS) — либо loopback внутри VPN / SSH-туннеля.</div>
+открытым HTTP. Только TLS с клиентской аутентификацией (mTLS) — либо loopback внутри VPN / SSH-туннеля.
+<br><br>Связка <code>--insecure</code> + <code>--host 0.0.0.0</code> на публичном IP означает, что Bearer-токен
+уходит открытым текстом через интернет. Поэтому: <b>(1)</b> порт закрыть firewall'ом на конкретные адреса
+(<code>ufw allow from &lt;IP&gt; to any port 8765 proto tcp</code>); <b>(2)</b> <code>--insecure</code> — только на
+первую проверку связи в доверенной сети, для постоянной работы TLS обязателен; <b>(3)</b> <code>agent.env</code> —
+<code>chmod 600</code>, токен не показывать в консоли и на скриншотах, при утечке перевыпускать;
+<b>(4)</b> пароли БД в <code>projects.json</code> (<code>db_password</code>) не писать — только
+<code>secret_ref_db</code>.</div>
 
 <h3 style="margin-top:20px">Где что лежит на хосте агента</h3>
 <div class="grid g2">
@@ -997,7 +1101,9 @@ C:\ProgramData\standkit\venv\Scripts\pip install standkit</div></div>
 
   <div class="st"><b>Положить реестр стендов этого хоста</b>
     <span class="tmuted">Файл <code>/opt/standkit/projects.json</code> (Windows — <code>C:\ProgramData\standkit\projects.json</code>).
-    Достаточно стендов этой машины; секретов в нём нет — только ссылки.</span>
+    Достаточно стендов этой машины; секретов в нём нет — только ссылки. Стенды здесь остаются
+    <code>transport: "local"</code>. Написать файл можно руками или скриптом —
+    рецепт <code>Registry.add_existing()</code> в разделе <a href="#registry">Реестр стендов</a>.</span>
     <div class="prompt">{
   "default": "",
   "projects": {
@@ -1006,7 +1112,7 @@ C:\ProgramData\standkit\venv\Scripts\pip install standkit</div></div>
       "stand_dir": "/opt/bpmsoft/client-uat",
       "stand_dll": "BPMSoft.WebHost.dll",
       "dotnet": "dotnet",
-      "stand_host": "0.0.0.0",
+      "stand_host": "127.0.0.1",
       "stand_port": 5000,
       "db_type": "postgres",
       "db_host": "127.0.0.1",
@@ -1015,7 +1121,10 @@ C:\ProgramData\standkit\venv\Scripts\pip install standkit</div></div>
       "secret_ref_db": "standkit:client-uat:db"
     }
   }
-}</div></div>
+}</div>
+    <span class="tmuted">⚠️ В <code>stand_host</code> — адрес <b>обращения</b> к стенду с этого хоста, а не адрес слушания:
+    <code>0.0.0.0</code> здесь даёт ложный <code>http: down</code>. Для контейнеров порт берётся из
+    <code>docker ps</code> — см. <a href="#hosting">Виды хостинга</a>.</span></div>
 
   <div class="st"><b>Задать токены агента</b>
     <span class="tmuted">Токены не передаются в командной строке открытым текстом — только ссылкой на секрет.
@@ -1024,11 +1133,25 @@ C:\ProgramData\standkit\venv\Scripts\pip install standkit</div></div>
     в верхнем регистре, где всё, кроме букв и цифр, заменено на <code>_</code>.</span>
     <div class="prompt">python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # сгенерировать токен
 
-# /etc/standkit/agent.env — chmod 600, владелец standkit
+# /etc/standkit/agent.env — chmod 600, владелец = пользователь, под которым идёт агент
 STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_TOKEN=&lt;control-токен&gt;
 STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_READONLY_TOKEN=&lt;readonly-токен&gt;</div>
-    <span class="tmuted">Если на хосте есть рабочий keyring и вы запускаете агента из-под своей сессии — можно положить
-    туда: <code>python -c "import getpass; from standkit.secrets import set_secret; set_secret('standkit:client-uat:agent-token', getpass.getpass())"</code>
+    <div class="twrap" style="margin:8px 0">
+    <table>
+      <tr><th style="width:42%">Ссылка на секрет в реестре</th><th>Переменная окружения</th></tr>
+      <tr><td><code>standkit:survey9:db</code></td><td><code>STANDKIT_SECRET__STANDKIT_SURVEY9_DB</code></td></tr>
+      <tr><td><code>standkit:survey9:agent-token</code></td><td><code>STANDKIT_SECRET__STANDKIT_SURVEY9_AGENT_TOKEN</code></td></tr>
+      <tr><td><code>standkit:client-uat:agent-readonly-token</code></td><td><code>STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_READONLY_TOKEN</code></td></tr>
+    </table>
+    </div>
+    <span class="tmuted"><b>Три грабли подряд, все живые.</b> (1) Забывают префикс <code>STANDKIT_SECRET__</code> —
+    имя выглядит правильным, а на старте <code>SecretError</code>. (2) Владелец <code>agent.env</code> должен совпадать
+    с пользователем службы: файл 600 под <code>root</code> и агент под <code>ubuntu</code> дают
+    <code>Permission denied</code> (<code>sudo chown ubuntu:ubuntu /etc/standkit/agent.env</code>).
+    (3) Имя переменной, посчитанное через <code>echo … | tr</code>, получает лишний <code>_</code> на конце из-за
+    перевода строки — используйте <code>printf '%s'</code> или просто впишите имя руками.</span>
+    <span class="tmuted">Keyring на headless-хосте обычно нерабочий (нет DBus и кошелька) — <b>для сервера основной путь именно env</b>.
+    На десктопе можно положить в keyring: <code>python -c "import getpass; from standkit.secrets import set_secret; set_secret('standkit:client-uat:agent-token', getpass.getpass())"</code>
     (нужно дополнение <code>[secrets]</code>).</span></div>
 
   <div class="st"><b>Выпустить сертификаты</b>
@@ -1046,7 +1169,10 @@ sudo chmod 600 /opt/standkit/tls/*.key && sudo chown standkit:standkit /opt/stan
 
   <div class="st"><b>Проверить запуск руками</b>
     <span class="tmuted">Сначала убедитесь, что агент поднимается и видит стенды, и только потом оформляйте службу.
-    Все ключи — <code>--help</code>.</span>
+    <b><code>--token-ref</code> обязателен</b> — без него argparse просто откажет, это самая частая первая ошибка.
+    Каталоги по умолчанию — <code>~/.standkit/run</code>, <code>~/.standkit/logs</code>, <code>~/.standkit/audit.log</code>:
+    у службы свой <code>$HOME</code>, поэтому <code>--run-dir</code>/<code>--log-dir</code>/<code>--audit-log</code>
+    задавайте явно. Все ключи — <code>--help</code>.</span>
     <div class="prompt">sudo -u standkit env $(cat /etc/standkit/agent.env | xargs) \
   /opt/standkit/venv/bin/python -m standkit_agent \
     --host 0.0.0.0 --port 8765 \
@@ -1077,12 +1203,18 @@ ExecStart=/opt/standkit/venv/bin/python -m standkit_agent \
     --tls-cert /opt/standkit/tls/agent.crt \
     --tls-key /opt/standkit/tls/agent.key \
     --tls-client-ca /opt/standkit/tls/clients-ca.crt \
+    --run-dir /opt/standkit/run \
+    --log-dir /opt/standkit/logs \
     --audit-log /opt/standkit/logs/audit.log
 Restart=on-failure
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/opt/standkit/run /opt/standkit/logs</div>
+    <span class="tmuted">В <code>ExecStart</code> — только абсолютные пути: у службы нет ни <code>~</code>, ни вашего
+    <code>PATH</code>. <code>User=</code> должен совпадать с владельцем <code>agent.env</code>, иначе
+    <code>Permission denied</code> на файле 600. Каталоги <code>--run-dir</code>/<code>--log-dir</code> задаём явно —
+    иначе агент уйдёт в <code>$HOME</code> сервисной учётки, которого при <code>ProtectHome=yes</code> фактически нет.</span>
     <div class="prompt">sudo cp standkit-agent.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now standkit-agent
@@ -1094,10 +1226,20 @@ systemctl status standkit-agent</div>
 
   <div class="st"><b>Открыть доступ и проверить с машины оператора</b>
     <span class="tmuted">Firewall: входящий порт агента — только для адресов управляющего контура, не «любой адрес».
-    Проверять лучше readonly-токеном, чтобы ничего не запустить:</span>
-    <div class="prompt">curl --cacert agent.crt --cert client.crt --key client.key \
+    Проверять лучше readonly-токеном, чтобы ничего не запустить.</span>
+    <div class="prompt">sudo ufw allow from &lt;IP оператора&gt; to any port 8765 proto tcp
+
+# Linux / macOS
+curl --cacert agent.crt --cert client.crt --key client.key \
      -H "Authorization: Bearer &lt;readonly-токен&gt;" \
-     https://client-host:8765/stands</div></div>
+     https://client-host:8765/stands</div>
+    <span class="tmuted"><b>В PowerShell <code>curl</code> — это алиас <code>Invoke-WebRequest</code></b>, флаги
+    <code>-s -H</code> он не понимает и падает с <code>ParameterBindingException</code>. Нужен либо настоящий
+    <code>curl.exe</code>, либо родная команда:</span>
+    <div class="prompt">curl.exe -s -H "Authorization: Bearer &lt;токен&gt;" https://client-host:8765/stands
+
+Invoke-RestMethod -Uri https://client-host:8765/stands `
+    -Headers @{ Authorization = "Bearer &lt;токен&gt;" }</div></div>
 </div>
 </div>
 
@@ -1141,7 +1283,13 @@ systemctl status standkit-agent</div>
       <tr><td><code>POST /stand/{имя}/adopt</code></td><td>control</td><td>усыновить процесс, поднятый вне диспетчера</td></tr>
     </table>
     </div>
-    <p class="tmuted">Мониторингу отдавайте <b>readonly</b>-токен: он видит статусы и логи, но ничего не запускает и не гасит.</p>
+    <p class="tmuted"><b>Эндпоинта <code>/health</code> у агента нет</b> — не ищите. Живость проверяется
+    <code>GET /stands</code> с токеном; без заголовка <code>Authorization</code> любой маршрут ответит отказом.
+    Мониторингу отдавайте <b>readonly</b>-токен: он видит статусы и логи, но ничего не запускает и не гасит.</p>
+    <p class="tmuted"><b>409 <code>adopt_required</code> — это фича, а не ошибка.</b> Так агент отвечает на
+    <code>stop</code>/<code>restart</code> стенда, поднятого мимо диспетчера: он возвращает описание найденного
+    процесса-кандидата и <b>ничего не трогает</b>. Согласие передаётся явно — повторить с <code>?force=1</code>
+    либо вызвать <code>POST /stand/&lt;имя&gt;/adopt</code>. Тихого <code>kill</code> по номеру порта не бывает.</p>
   </div>
 </div>
 
@@ -1263,6 +1411,30 @@ systemctl status standkit-agent</div>
   <tr><td>Агент пишет, что секрет не найден (служба)</td>
       <td>У сервисной учётной записи нет доступа к keyring — типично для headless-хоста</td>
       <td>Передать токен переменной <code>STANDKIT_SECRET__…</code> через <code>EnvironmentFile</code> (chmod 600) — см. <a href="#remote">Удалённые стенды</a></td></tr>
+  <tr><td><code>SecretError</code> при, казалось бы, верной ссылке</td>
+      <td>Забыт префикс <code>STANDKIT_SECRET__</code> либо лишний <code>_</code> в конце от <code>echo … | tr</code></td>
+      <td>Сверить имя по таблице в разделе <a href="#remote">Удалённые стенды</a>; вместо <code>echo</code> — <code>printf '%s'</code></td></tr>
+  <tr><td><code>/etc/standkit/agent.env: Permission denied</code></td>
+      <td>Файл 600 принадлежит root, а служба идёт под другим пользователем</td>
+      <td><code>sudo chown &lt;пользователь службы&gt; /etc/standkit/agent.env</code></td></tr>
+  <tr><td><code>the following arguments are required: --token-ref</code></td>
+      <td>У агента нет значения по умолчанию для control-токена</td>
+      <td>Добавить <code>--token-ref standkit:&lt;стенд&gt;:agent-token</code></td></tr>
+  <tr><td><code>No module named 'standkit_agent'</code> в скрипте</td>
+      <td>Скрипт запущен системным <code>python3</code>, а пакет стоит в venv/pipx</td>
+      <td>Звать питон окружения: <code>/opt/standkit/venv/bin/python</code> или <code>~/.local/share/pipx/venvs/standkit/bin/python</code></td></tr>
+  <tr><td><code>RegistryError: Стенд не найден</code></td>
+      <td>Регистрация не выполнялась — или ушла в другой файл реестра</td>
+      <td>Проверить путь: агенту всегда задавать <code>--registry</code> явно; рецепт регистрации — в разделе <a href="#registry">Реестр стендов</a></td></tr>
+  <tr><td><code>http: down</code> при живом стенде</td>
+      <td><code>stand_host=0.0.0.0</code>, порт не опубликован наружу — или стенд за HTTPS</td>
+      <td>Взять адрес обращения с хоста и левый порт из <code>docker ps</code>; для HTTPS — известное ограничение, см. <a href="#hosting">Виды хостинга</a></td></tr>
+  <tr><td>Статус не изменился после правки реестра</td>
+      <td>Агент читает <code>projects.json</code> при старте</td>
+      <td><code>sudo systemctl restart standkit-agent</code></td></tr>
+  <tr><td><code>409 adopt_required</code> от агента</td>
+      <td>Стенд поднят вне диспетчера — согласия на усыновление не было</td>
+      <td>Это штатный отказ: повторить с <code>?force=1</code> или вызвать <code>/adopt</code></td></tr>
   <tr><td><code>No module named standkit_hub</code></td>
       <td>Пакет поставлен в другой интерпретатор или в venv, который не активирован</td>
       <td>Ставить тем же питоном, которым запускаете: <code>python -m pip install standkit</code></td></tr>
@@ -1417,6 +1589,10 @@ python -m pip show standkit</div>
   <div class="tile warn">
     <h3><span class="badge b-warn">🟡 каркас / заглушки</span></h3>
     <ul>
+      <li><b>HTTP-проба не знает про HTTPS:</b> URL строится жёстко со схемой <code>http://</code> и проверяется
+        цепочка сертификатов, поэтому стенд за TLS всегда показывает <code>http: down</code></li>
+      <li><b>Нет CLI регистрации стенда</b> — только кнопка в дашборде, правка <code>projects.json</code>
+        или <code>Registry.add_existing()</code> из Python</li>
       <li>Глубокие пробы БД и Redis (<code>SELECT 1</code> / <code>PING</code>) — пока только проверка порта</li>
       <li>Живой follow лога — сейчас периодический tail</li>
       <li>UI-индикатор <code>host_kind</code> в таблице</li>
@@ -1473,7 +1649,7 @@ python -m pip show standkit</div>
       BPMkitStand — о документе
       <button class="mclose" id="modalClose" title="Закрыть">✕</button>
     </h2>
-    <div class="mver">Кукбук диспетчера стендов · версия документа 1.0 · август 2026 · описывает standkit 0.6.x</div>
+    <div class="mver">Кукбук диспетчера стендов · версия документа 1.1 · август 2026 · описывает standkit 0.6.x</div>
 
     <div class="mrow"><span class="mk">Где лежит</span><span>В поставке — <code>standkit_hub/web/cookbook.html</code>; открывается кнопкой <b>?</b> в шапке дашборда и работает офлайн</span></div>
     <div class="mrow"><span class="mk">Создатель</span><span>Владимир Терновский</span></div>
@@ -1493,6 +1669,7 @@ python -m pip show standkit</div>
     <div class="twrap">
     <table>
       <tr><th>Версия</th><th>Дата</th><th>Изменения</th></tr>
+      <tr><td>1.1</td><td>август 2026</td><td>По итогам живой установки агента на Ubuntu 24.04: установка раздельно Windows/Linux (pipx/venv, PEP 668), обновление диспетчера, регистрация стенда без CLI, правило адреса для Docker-стендов, формула имени переменной секрета, служба systemd/NSSM, известное ограничение HTTPS-пробы, кукбук встроен в дашборд (кнопка «?»), настоящие скриншоты.</td></tr>
       <tr><td>1.0</td><td>август 2026</td><td>Первая версия кукбука: обзор, установка, дашборд, реестр, виды хостинга, удалённые стенды и агент, безопасность, траблшутинг, границы.</td></tr>
     </table>
     </div>
