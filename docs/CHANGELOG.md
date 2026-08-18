@@ -3,7 +3,7 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/); версии —
 [SemVer](https://semver.org/lang/ru/). Даты — 2026 год.
 
-## [Unreleased]
+## [0.7.0] — 2026-08-18
 
 ### Добавлено
 - **Кукбук `standkit_hub/web/cookbook.html`.** Standalone-документ в фирменном стиле BPMkit
@@ -335,6 +335,7 @@
 - Первый публичный релиз ядра `standkit` + агента `standkit_agent` + веб-дашборда
   `standkit_hub` на PyPI; фронт-README, `docs/REMOTE_STANDS.md`, скриншоты.
 
+[0.7.0]: https://pypi.org/project/standkit/0.7.0/
 [0.6.1]: https://pypi.org/project/standkit/0.6.1/
 [0.6.0]: https://pypi.org/project/standkit/0.6.0/
 [0.5.2]: https://pypi.org/project/standkit/0.5.2/
