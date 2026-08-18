@@ -9,7 +9,9 @@
 поведения за ним нет (или оно возвращает заглушку).
 
 Порядок дорожной карты — см. [ROADMAP.md](ROADMAP.md). Остаточная безопасность
-агента — `SECURITY.md` §6.
+агента — `SECURITY.md` §6. Отдельный список **гэпов** (код работает как задумано,
+но сценарий оператора всё равно ломается: настройка недоступна, отказ не объяснён,
+рецепт не описан) — [GAPs/](GAPs/README.md).
 
 ## Транспорты подключения к стенду
 
@@ -28,7 +30,10 @@
 |------|--------|-----------------|
 | Глубокая проба БД (`SELECT 1` через psycopg2/pyodbc) | заглушка, всегда `SKIPPED`; флаг `deep_db` из хаба не передаётся | `standkit/health.py::db_deep_check`, параметр `check_stand(deep_db=…)` |
 | Глубокая проба Redis (`PING` через redis-py) | заглушка, всегда `SKIPPED` | `standkit/health.py::redis_deep_check`, `check_stand(deep_redis=…)` |
-| `stand_scheme` / `verify_tls` в форме регистрации дашборда | поля есть в реестре и в пробе, но форма регистрации построена по фиксированному белому списку полей — задать схему можно только правкой `projects.json` | `standkit_hub/server.py::_REGISTER_ALLOWED_FIELDS`, `standkit_hub/web/app.js::_REGISTER_FIELD_NAMES` |
+| `stand_scheme` / `verify_tls` в форме регистрации дашборда | поля есть в реестре и в пробе, но форма регистрации построена по фиксированному белому списку полей — задать схему можно только правкой `projects.json`. Разобрано в [GAP-001](GAPs/GAP-001-registry-fields-out-of-hub-form.md) | `standkit_hub/server.py::_REGISTER_ALLOWED_FIELDS`, `standkit_hub/web/app.js::_REGISTER_FIELD_NAMES` |
+| Причина отказа HTTP-пробы | `down` возвращается без текста: «порт закрыт», «TLS-ошибка» и «таймаут» неразличимы в дашборде (у пробы процесса аналог есть — `details['process_reason']`). См. [GAP-002](GAPs/GAP-002-http-probe-down-not-explained.md) | `standkit/health.py::_probe_http`, `http_ok` |
+| Адрес Redis (`redis_host` / `redis_port`) | не поля модели, а нетипизированные ключи `Stand.extra`; в форме регистрации и `projects.sample.json` их нет, «не настроено» неотличимо от «не поддержано». См. [GAP-003](GAPs/GAP-003-redis-endpoint-in-extra.md) | `standkit/health.py::_probe_redis`, `standkit/models.py::Stand.extra` |
+| Имя каталога логов | зашито строкой `"logs"`; на Linux каталог BPMSoft называется `Logs` и не находится (на Windows проходит из-за регистронезависимой ФС). Плюс путь POSIX-стенда собирается `WindowsPath` на хабе. См. [GAP-006](GAPs/GAP-006-log-dir-case-and-separator.md) | `standkit_hub/logs_browser.py::raw_logs_path`, `standkit/hosting.py::IisBackend.read_logs` |
 | `last_deploy` (состояние последнего деплоя) | всегда `UNKNOWN`, источник данных не определён, в UI не выводится | `standkit/health.py::check_stand` (комментарий `last_deploy`), `standkit/models.py::StandStatus.last_deploy` |
 
 Рабочие пробы (без заглушек): процесс (pid/бэкенд), HTTP, БД/Redis по **открытому
