@@ -237,7 +237,7 @@
   </div>
   <input id="filter" type="search" placeholder="Поиск: «агент», «IIS», «Redis», «токен»…" autocomplete="off">
   <span id="filterInfo"></span>
-  <button id="docmeta" title="О документе: версия, контакты, история">версия документа 1.1<br>август 2026</button>
+  <button id="docmeta" title="О документе: версия, контакты, история">версия документа 1.2<br>август 2026</button>
   <button id="themeBtn" title="Переключить тему">☀️ Светлая</button>
 </header>
 
@@ -644,7 +644,8 @@ pipx upgrade standkit                         # Linux, установка чер
   <tr><td><b>Процесс</b></td><td>Бейдж вердикта: <span class="badge b-ok">up</span> <span class="badge b-stop">down</span>
       <span class="badge b-warn">unknown</span> (состояние выяснить не удалось) или «проверяется…» на первом опросе.
       Причина от бэкенда хостинга — во всплывающей подсказке бейджа. Во время прогрева после «Запустить» вместо бейджа — «Запускается…» со спиннером</td></tr>
-  <tr><td><b>HTTP</b></td><td>Адрес web-хоста стенда ссылкой — открывает стенд в новой вкладке. Цвет ссылки = результат HTTP-пробы</td></tr>
+  <tr><td><b>HTTP</b></td><td>Адрес web-хоста стенда ссылкой — открывает стенд в новой вкладке. Цвет ссылки = результат HTTP-пробы.
+      Схема берётся из <code>stand_scheme</code> записи: у стенда за TLS и проба, и ссылка идут на <code>https://</code></td></tr>
   <tr><td><b>БД</b></td><td><b>Имя базы</b> стенда из реестра, окрашенное по результату пробы (открыт ли TCP-порт БД)</td></tr>
   <tr><td><b>Redis</b></td><td><b>Номер базы</b> Redis стенда — тот самый, который будет очищен кнопкой 🗑. Прочерк — Redis у стенда не настроен</td></tr>
   <tr><td><b>Действия</b></td><td>Кнопки-иконки: ▶ запустить · ■ остановить · ⟳ перезапустить · 🗑 очистить Redis.
@@ -758,6 +759,9 @@ pipx upgrade standkit                         # Linux, установка чер
       <td>Чем и что запускать в режиме kestrel</td></tr>
   <tr><td><code>stand_host</code>, <code>stand_port</code></td><td><code>127.0.0.1</code>, <code>5000</code></td>
       <td>Адрес web-хоста: HTTP-проба, ссылка в таблице, поиск владельца порта при усыновлении</td></tr>
+  <tr><td><code>stand_scheme</code>, <code>verify_tls</code></td><td><code>http</code> · <code>https</code>; <code>true</code>/<code>false</code></td>
+      <td>Схема HTTP-пробы и ссылки «Открыть стенд»; для самоподписанного сертификата — <code>verify_tls: false</code>.
+      Дефолты <code>http</code>/<code>true</code> сохраняют прежнее поведение — см. <a href="#hosting">Виды хостинга</a></td></tr>
   <tr><td><code>db_type</code>, <code>db_host</code>, <code>db_port</code>, <code>db_name</code></td><td><code>postgres</code> · <code>mssql</code></td>
       <td>Куда стучаться пробой БД (в бесплатной версии — только «открыт ли порт»)</td></tr>
   <tr><td><code>redis_host</code>, <code>redis_port</code>, <code>redis_db</code></td><td>хост, порт, номер БД</td>
@@ -954,11 +958,37 @@ PY</div>
         <li>Нет <code>redis_host</code>/<code>redis_port</code> — проба честно вернёт <b>unknown</b>, а не <code>down</code>: это «не настроено», а не авария</li></ul></div>
 </div>
 
-<div class="note stopnote">🔐 <b>Известное ограничение: стенд за HTTPS.</b> HTTP-проба строит URL жёстко со схемой
-<code>http://</code> и проверяет цепочку сертификатов, поэтому стенд за TLS (тем более с самоподписанным
-сертификатом) всегда показывает <code>http: down</code> при живых <code>process</code> и <code>db</code>.
-Пока это ограничение, а не поломка вашего стенда: ориентируйтесь на остальные пробы и открывайте стенд
-в браузере вручную.</div>
+<h3 style="margin-top:20px">Стенд за TLS: <code>stand_scheme</code> и <code>verify_tls</code></h3>
+<div class="grid g2">
+  <div class="tile ok">
+    <h3><span class="ico">🔐</span>Два поля записи</h3>
+    <ul>
+      <li><code>stand_scheme</code> — <code>http</code> (по умолчанию) или <code>https</code>: схема,
+        по которой идёт HTTP-проба и строится ссылка «Открыть стенд» в таблице</li>
+      <li><code>verify_tls</code> — проверять ли цепочку сертификатов; по умолчанию <code>true</code>,
+        для <b>самоподписанного</b> сертификата дев-контура нужен <code>false</code></li>
+      <li>Дефолты полностью повторяют прежнее поведение — старые реестры править не нужно</li>
+      <li>Мусор в <code>stand_scheme</code> не роняет чтение реестра: откат на <code>http</code>,
+        а несоответствие поймает валидация записи</li>
+    </ul>
+    <div class="prompt">"stand_host": "127.0.0.1",
+"stand_port": 5001,
+"stand_scheme": "https",
+"verify_tls": false</div>
+  </div>
+  <div class="tile warn">
+    <h3><span class="ico">🩺</span>Как это выглядит без настройки</h3>
+    <ul>
+      <li>Стенд за TLS на <code>http://</code> не отвечает вовсе — проба честно возвращает <code>down</code>
+        при живых <code>process</code> и <code>db</code></li>
+      <li>С самоподписанным сертификатом и <code>verify_tls: true</code> проба падает на проверке
+        сертификата — тоже <code>down</code></li>
+      <li>Симптом один и тот же: «стенд открывается в браузере, а в дашборде красный HTTP»</li>
+      <li><code>verify_tls: false</code> ослабляет проверку <b>только</b> для <code>https://</code>-адресов —
+        на обычный <code>http</code> это не влияет</li>
+    </ul>
+  </div>
+</div>
 
 <div class="grid g3">
   <div class="tile stop">
@@ -1427,8 +1457,8 @@ Invoke-RestMethod -Uri https://client-host:8765/stands `
       <td>Регистрация не выполнялась — или ушла в другой файл реестра</td>
       <td>Проверить путь: агенту всегда задавать <code>--registry</code> явно; рецепт регистрации — в разделе <a href="#registry">Реестр стендов</a></td></tr>
   <tr><td><code>http: down</code> при живом стенде</td>
-      <td><code>stand_host=0.0.0.0</code>, порт не опубликован наружу — или стенд за HTTPS</td>
-      <td>Взять адрес обращения с хоста и левый порт из <code>docker ps</code>; для HTTPS — известное ограничение, см. <a href="#hosting">Виды хостинга</a></td></tr>
+      <td><code>stand_host=0.0.0.0</code>, порт не опубликован наружу — или стенд за TLS без <code>stand_scheme</code></td>
+      <td>Взять адрес обращения с хоста и левый порт из <code>docker ps</code>; для стенда за TLS — <code>stand_scheme: "https"</code> (и <code>verify_tls: false</code> для self-signed), см. <a href="#hosting">Виды хостинга</a></td></tr>
   <tr><td>Статус не изменился после правки реестра</td>
       <td>Агент читает <code>projects.json</code> при старте</td>
       <td><code>sudo systemctl restart standkit-agent</code></td></tr>
@@ -1589,8 +1619,6 @@ python -m pip show standkit</div>
   <div class="tile warn">
     <h3><span class="badge b-warn">🟡 каркас / заглушки</span></h3>
     <ul>
-      <li><b>HTTP-проба не знает про HTTPS:</b> URL строится жёстко со схемой <code>http://</code> и проверяется
-        цепочка сертификатов, поэтому стенд за TLS всегда показывает <code>http: down</code></li>
       <li><b>Нет CLI регистрации стенда</b> — только кнопка в дашборде, правка <code>projects.json</code>
         или <code>Registry.add_existing()</code> из Python</li>
       <li>Глубокие пробы БД и Redis (<code>SELECT 1</code> / <code>PING</code>) — пока только проверка порта</li>
@@ -1649,7 +1677,7 @@ python -m pip show standkit</div>
       BPMkitStand — о документе
       <button class="mclose" id="modalClose" title="Закрыть">✕</button>
     </h2>
-    <div class="mver">Кукбук диспетчера стендов · версия документа 1.1 · август 2026 · описывает standkit 0.6.x</div>
+    <div class="mver">Кукбук диспетчера стендов · версия документа 1.2 · август 2026 · описывает standkit 0.6.x</div>
 
     <div class="mrow"><span class="mk">Где лежит</span><span>В поставке — <code>standkit_hub/web/cookbook.html</code>; открывается кнопкой <b>?</b> в шапке дашборда и работает офлайн</span></div>
     <div class="mrow"><span class="mk">Создатель</span><span>Владимир Терновский</span></div>
@@ -1669,6 +1697,7 @@ python -m pip show standkit</div>
     <div class="twrap">
     <table>
       <tr><th>Версия</th><th>Дата</th><th>Изменения</th></tr>
+      <tr><td>1.2</td><td>август 2026</td><td>Стенд за TLS больше не ограничение: описаны поля <code>stand_scheme</code> и <code>verify_tls</code> (ядро научилось пробовать https и не спотыкаться о самоподписанный сертификат).</td></tr>
       <tr><td>1.1</td><td>август 2026</td><td>По итогам живой установки агента на Ubuntu 24.04: установка раздельно Windows/Linux (pipx/venv, PEP 668), обновление диспетчера, регистрация стенда без CLI, правило адреса для Docker-стендов, формула имени переменной секрета, служба systemd/NSSM, известное ограничение HTTPS-пробы, кукбук встроен в дашборд (кнопка «?»), настоящие скриншоты.</td></tr>
       <tr><td>1.0</td><td>август 2026</td><td>Первая версия кукбука: обзор, установка, дашборд, реестр, виды хостинга, удалённые стенды и агент, безопасность, траблшутинг, границы.</td></tr>
     </table>
