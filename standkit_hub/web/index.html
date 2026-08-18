@@ -35,6 +35,12 @@
       <button class="tab-btn" data-tab="agent">Локальный агент</button>
       <button class="tab-btn" data-tab="settings">Настройки</button>
     </nav>
+    <!-- Кукбук — обычная статика (/static/cookbook.html), один самодостаточный
+         файл со всем CSS/JS/картинками внутри: открывается и офлайн, и когда
+         диспетчер остановлен (файл можно открыть с диска). Поэтому это <a>, а
+         не кнопка с обработчиком в app.js. -->
+    <a id="help-btn" class="about-btn help-btn" href="/static/cookbook.html" target="_blank"
+       rel="noopener" title="Справка — кукбук BPMkitStand" aria-label="Справка">?</a>
     <button id="about-btn" class="about-btn" type="button" title="О программе">ⓘ</button>
     <button id="view-toggle-btn" class="view-toggle-btn" type="button" title="Компактный режим">▭</button>
     <button id="theme-toggle-btn" class="theme-toggle-btn" type="button" title="Переключить тему">🌓</button>
@@ -70,6 +76,7 @@
         </div>
         <p>BPMkitStand — свободный диспетчер стендов BPMSoft (часть экосистемы BPMkit).</p>
         <p>Версия: <span id="about-modal-version">…</span></p>
+        <p><a class="modal-note-link" href="/static/cookbook.html" target="_blank" rel="noopener">Справка — кукбук: установка, работа с дашбордом, FAQ, удалённые агенты</a></p>
         <div class="about-modal-icons">
           <div class="about-modal-icons-row">
             <a class="about-modal-icon-link" href="https://bpmkit.pro" target="_blank" rel="noopener" title="Сайт bpmkit.pro" aria-label="Сайт bpmkit.pro">

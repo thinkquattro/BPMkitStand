@@ -189,6 +189,7 @@ body {
 [data-view="compact"] .topbar h1,
 [data-view="compact"] .topbar .tabs,
 [data-view="compact"] #about-btn,
+[data-view="compact"] #help-btn,
 [data-view="compact"] .panel-toolbar #register-stand-btn,
 [data-view="compact"] .hint-text,
 [data-view="compact"] .state-panel,
@@ -265,6 +266,15 @@ body {
 
 .about-btn:hover {
   background: var(--bpmkit-bg);
+}
+
+/* Кнопка «Справка» — это ссылка (<a>), поэтому ей отдельно нужны
+   выравнивание по центру и снятие подчёркивания; остальное — от .about-btn. */
+.help-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
 }
 
 /* --- индикатор связи с хабом (точка + подпись, НЕ похож на меню) --- */
