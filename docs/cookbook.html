@@ -424,31 +424,98 @@
   </div>
 </div>
 
-<h3 style="margin-top:20px">Установка — 5 шагов</h3>
+<h3 style="margin-top:20px">Шаг 1 — поставить пакет (по-разному в Windows и Linux)</h3>
+<p class="lead">Пакет один и называется <code>standkit</code> — в нём сразу ядро, дашборд и агент,
+обязательных зависимостей у него нет. Отличается только способ установки: в Windows пакет обычно
+ставят прямо в пользовательский Python, в Linux системный Python трогать нельзя.</p>
+
+<div class="grid g2">
+  <div class="tile acc">
+    <h3><span class="ico">🪟</span>Windows</h3>
+    <ul>
+      <li>Python 3.10+ с python.org; при установке отметьте <b>«Add python.exe to PATH»</b></li>
+      <li>Ставим обычным pip:</li>
+    </ul>
+    <div class="prompt">pip install standkit</div>
+    <ul>
+      <li>С дополнениями (хранилище секретов + нативное окно):</li>
+    </ul>
+    <div class="prompt">pip install "standkit[secrets,desktop]"</div>
+    <ul>
+      <li>Запуск: <code>standkit-hub</code>; если консоль его не видит — <code>py -m standkit_hub</code></li>
+      <li>Ярлык на рабочий стол: <code>standkit-hub --install-shortcut</code></li>
+    </ul>
+  </div>
+  <div class="tile acc">
+    <h3><span class="ico">🐧</span>Linux</h3>
+    <p class="tmuted">В современных дистрибутивах системный Python помечен как «externally managed» (PEP 668),
+    и обычный <code>pip install</code> в него откажет с <code>error: externally-managed-environment</code>.
+    Это не про standkit — так ведут себя все пакеты. Ставим в изолированное окружение.</p>
+    <p><b>Вариант A — pipx</b> (рекомендуется: изоляция + команды сразу в <code>PATH</code>):</p>
+    <div class="prompt">sudo apt install pipx        # Debian/Ubuntu; иначе: python3 -m pip install --user pipx
+pipx ensurepath              # добавляет ~/.local/bin в PATH — нужен новый вход в shell
+pipx install "standkit[secrets]"
+standkit-hub</div>
+    <p><b>Вариант B — venv</b> (если pipx нет или окружение нужно своё):</p>
+    <div class="prompt">python3 -m venv ~/.venvs/standkit
+~/.venvs/standkit/bin/pip install "standkit[secrets]"
+~/.venvs/standkit/bin/standkit-hub</div>
+    <p class="tmuted">Дополнение <code>[desktop]</code> (нативное окно) на Linux требует WebKitGTK в системе;
+    без него просто пользуйтесь браузером.</p>
+  </div>
+</div>
+
+<div class="note">🖧 <b>Дашборд на headless-сервере.</b> Хаб слушает только <code>127.0.0.1</code> и это правильно:
+не открывайте его порт наружу. Запустите <code>standkit-hub --no-browser</code>, а с рабочей машины
+пробросьте порт по SSH — <code>ssh -L 8770:127.0.0.1:8770 user@host</code> — и откройте
+<code>http://127.0.0.1:8770</code> у себя. URL с сессионным токеном возьмите из вывода хаба на сервере.</div>
+
+<h3 style="margin-top:20px">Шаги 2–5 — одинаково в обеих ОС</h3>
 <div class="tile">
 <div class="steps">
-  <div class="st"><b>Поставьте пакет с PyPI</b>
-    <span class="tmuted">Пакет называется <code>standkit</code> — в нём сразу ядро, дашборд и агент. Зависимостей у ядра нет.</span>
-    <div class="prompt">pip install standkit</div>
-    <span class="tmuted">Опциональные дополнения: <code>standkit[secrets]</code> — хранилище секретов (keyring),
-    <code>standkit[desktop]</code> — нативное окно вместо браузера. Ставятся вместе: <code>pip install "standkit[secrets,desktop]"</code>.</span></div>
   <div class="st"><b>Запустите дашборд</b>
-    <span class="tmuted">Хаб слушает <code>127.0.0.1:8770</code>, печатает URL с сессионным токеном и открывает браузер.</span>
-    <div class="prompt">standkit-hub</div>
-    <span class="tmuted">Если консоль отвечает «команда не распознана» — тот же запуск модулем работает всегда:
-    <code>python -m standkit_hub</code> (см. <a href="#trouble">Траблшутинг</a>).</span></div>
+    <span class="tmuted">Хаб слушает <code>127.0.0.1:8770</code>, печатает URL с сессионным токеном и открывает браузер.
+    Если команда «не распознана» — тот же запуск модулем работает всегда: <code>python -m standkit_hub</code>
+    (разбор — в разделе <a href="#trouble">Траблшутинг</a>).</span>
+    <div class="prompt">standkit-hub</div></div>
   <div class="st"><b>Зарегистрируйте стенды</b>
     <span class="tmuted">Кнопка «Зарегистрировать стенд» на вкладке «Стенды» — или правка <code>projects.json</code> руками
-    (раздел <a href="#registry">Реестр стендов</a>). Регистрируется <b>уже существующий</b> стенд: каталог, БД и дистрибутив должны быть готовы.</span></div>
-  <div class="st"><b>Задайте секреты — в терминале</b>
-    <span class="tmuted">Пароли БД и токены агентов не хранятся в реестре — только ссылки на них. Значение задаётся отдельной командой
-    (или кнопкой «Задать секрет…» в настройках).</span>
-    <div class="prompt">python -m standkit.secrets set standkit:my-stand:db</div></div>
-  <div class="st"><b>Сделайте ярлык</b>
-    <span class="tmuted">Кнопка «Создать ярлык на рабочем столе» в «Настройках» — или ключом запуска. В Chrome/Edge дашборд
-    дополнительно ставится как приложение (PWA): своё окно, иконка в панели задач, место в Alt+Tab.</span>
-    <div class="prompt">standkit-hub --install-shortcut</div></div>
+    (раздел <a href="#registry">Реестр стендов</a>). Регистрируется <b>уже существующий</b> стенд: каталог, БД и дистрибутив
+    должны быть готовы заранее.</span></div>
+  <div class="st"><b>Задайте секреты</b>
+    <span class="tmuted">В реестре хранятся только ссылки на секреты. Самый простой путь — кнопка «Задать секрет…»
+    в «Настройках» дашборда. Из терминала (нужно дополнение <code>[secrets]</code>) — так значение не попадёт в историю команд:</span>
+    <div class="prompt">python -c "import getpass; from standkit.secrets import set_secret; set_secret('standkit:my-stand:db', getpass.getpass('Значение: '))"</div>
+    <span class="tmuted">На машине без keyring (headless-сервер, служба) секрет задаётся переменной окружения — см. плитку «Секреты» ниже.</span></div>
+  <div class="st"><b>Сделайте ярлык и проверьте</b>
+    <span class="tmuted">Ярлык: <code>standkit-hub --install-shortcut</code>. В Chrome/Edge дашборд дополнительно ставится
+    как приложение (PWA): своё окно, иконка в панели задач, место в Alt+Tab. Дальше — «Первая проверка» ниже.</span></div>
 </div>
+</div>
+
+<h3 style="margin-top:20px">Секреты: три источника, приоритет сверху вниз</h3>
+<div class="grid g3">
+  <div class="tile ok"><h3><span class="ico">🌱</span>1. Переменная окружения</h3>
+    <ul>
+      <li>Имя — <code>STANDKIT_SECRET__</code> + ссылка на секрет в верхнем регистре, все не-буквенно-цифровые символы заменены на <code>_</code></li>
+      <li><code>standkit:client-uat:agent-token</code> →<br><code>STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_TOKEN</code></li>
+      <li>Единственный рабочий путь на headless-хосте и для службы</li>
+    </ul>
+  </div>
+  <div class="tile"><h3><span class="ico">🔐</span>2. Системный keyring</h3>
+    <ul>
+      <li>Нужен extra <code>standkit[secrets]</code></li>
+      <li>Задать: кнопка «Задать секрет…» в дашборде или однострочник выше</li>
+      <li>Служба под сервисной учёткой без сессии до keyring обычно не достучится</li>
+    </ul>
+  </div>
+  <div class="tile warn"><h3><span class="ico">📄</span>3. Открытое поле в реестре</h3>
+    <ul>
+      <li>Явный фолбэк (например <code>db_password</code>) — сознательно наименьший приоритет</li>
+      <li>Для прод-контуров не использовать</li>
+      <li class="tmuted">⚠️ Отдельного CLI (<code>python -m standkit.secrets …</code>) в пакете <b>нет</b> — такая команда молча ничего не делает</li>
+    </ul>
+  </div>
 </div>
 
 <div class="grid g2">
@@ -478,17 +545,20 @@
     <h3><span class="ico">⬆️</span>Как обновиться</h3>
     <ol>
       <li>Остановите работающий диспетчер: <code>Ctrl+C</code> в его консоли (закрытие окна браузера процесс не останавливает)</li>
-      <li>Обновите пакет:
-        <div class="prompt">pip install -U standkit</div></li>
+      <li>Обновите пакет — командой того способа, которым ставили:
+        <div class="prompt">pip install -U standkit                       # Windows / обычный pip
+pipx upgrade standkit                         # Linux, установка через pipx
+~/.venvs/standkit/bin/pip install -U standkit # Linux, установка в venv</div></li>
       <li>Запустите заново <code>standkit-hub</code> и обновите вкладку — <code>Ctrl+F5</code>, чтобы браузер взял свежую статику</li>
-      <li>Проверьте версию: кнопка <b>ⓘ</b> в шапке → «О программе» (или <code>pip show standkit</code>)</li>
+      <li>Проверьте версию: кнопка <b>ⓘ</b> в шапке → «О программе» (или <code>pip show standkit</code> / <code>pipx list</code>)</li>
     </ol>
   </div>
   <div class="tile">
     <h3><span class="ico">🧭</span>Что важно знать</h3>
     <ul>
       <li><b>Ваши данные не трогаются:</b> реестр стендов, конфиг дашборда и секреты живут в профиле пользователя, а не внутри пакета</li>
-      <li><b>Агентов обновляйте вместе с хабом</b> — на каждом хосте тем же <code>pip install -U standkit</code> и рестартом службы</li>
+      <li><b>Агентов обновляйте вместе с хабом</b> — на каждом хосте тем же обновлением пакета плюс рестарт службы
+        (<code>sudo systemctl restart standkit-agent</code> / <code>nssm restart standkit-agent</code>)</li>
       <li>Ярлык и установленное PWA-приложение пересоздавать не нужно</li>
       <li>Что изменилось — <code>docs/CHANGELOG.md</code> в репозитории</li>
       <li>Свежий <code>main</code> до релиза (только если нужна ещё не выпущенная правка):
@@ -638,9 +708,11 @@
     <ul>
       <li>В реестре <b>нет паролей и токенов</b> — только ссылки на секреты (<code>secret_ref_*</code>, <code>agent_secret_ref</code>)</li>
       <li>Значение живёт в хранилище машины и задаётся отдельно</li>
-      <li>Порядок поиска значения: переменная окружения → keyring → фолбэк</li>
+      <li>Порядок поиска значения: переменная окружения <code>STANDKIT_SECRET__…</code> → keyring → открытый фолбэк из реестра</li>
+      <li>Задать: кнопка «Задать секрет…» в «Настройках» дашборда или однострочник (нужен extra <code>[secrets]</code>):</li>
     </ul>
-    <div class="prompt">python -m standkit.secrets set standkit:my-stand:db</div>
+    <div class="prompt">python -c "import getpass; from standkit.secrets import set_secret; set_secret('standkit:my-stand:db', getpass.getpass('Значение: '))"</div>
+    <p class="tmuted">Подробнее — плитки «Секреты» в разделе <a href="#start">Установка</a>.</p>
   </div>
   <div class="tile warn">
     <h3><span class="ico">➕</span>Регистрация ≠ провижининг</h3>
@@ -867,42 +939,161 @@
 это <b>поверхность удалённого исполнения кода по дизайну</b>. Никогда не выставляйте его в недоверенную сеть
 открытым HTTP. Только TLS с клиентской аутентификацией (mTLS) — либо loopback внутри VPN / SSH-туннеля.</div>
 
+<h3 style="margin-top:20px">Где что лежит на хосте агента</h3>
+<div class="grid g2">
+  <div class="tile">
+    <h3><span class="ico">📄</span>Реестр стендов агента</h3>
+    <ul>
+      <li>Агент читает <b>свой</b> <code>projects.json</code> — в нём перечислены стенды <b>этого</b> хоста, и они остаются
+        <code>transport: "local"</code>: агент поднимает их у себя. Удалённым стенд становится только в реестре оператора</li>
+      <li>Путь задаётся флагом <code>--registry</code>. Без флага действует тот же порядок, что у дашборда:
+        <code>BPMSOFT_PROJECTS_FILE</code> → профиль пользователя → <code>./projects.json</code></li>
+      <li><b>Для службы всегда задавайте <code>--registry</code> абсолютным путём:</b> у сервисной учётной записи
+        свой профиль, и «тот самый» файл из вашей домашней папки она не увидит</li>
+      <li>Реестр агента и реестр оператора — <b>разные файлы</b>, синхронизировать их не нужно</li>
+    </ul>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🗂️</span>Рекомендуемая раскладка</h3>
+    <div class="prompt">Linux
+/opt/standkit/venv/            # окружение с пакетом standkit
+/opt/standkit/projects.json    # реестр стендов этого хоста
+/opt/standkit/tls/agent.crt    # серверный сертификат агента
+/opt/standkit/tls/agent.key    # ключ, chmod 600, владелец — сервисный аккаунт
+/opt/standkit/tls/clients-ca.crt  # CA клиентских сертификатов (mTLS)
+/opt/standkit/logs/audit.log   # аудит-лог
+/opt/standkit/run/             # pid-файлы стендов
+
+Windows
+C:\ProgramData\standkit\projects.json
+C:\ProgramData\standkit\tls\...
+C:\ProgramData\standkit\logs\audit.log</div>
+    <p class="tmuted">Каталоги должны принадлежать сервисной учётной записи агента, а не root/Администратору.</p>
+  </div>
+</div>
+
 <h3 style="margin-top:20px">Установка агента — на каждом хосте стенда</h3>
 <div class="tile">
 <div class="steps">
-  <div class="st"><b>Поставить пакет</b>
-    <span class="tmuted">Тот же пакет, что у оператора, — агент входит в него. Нужен Python 3.10+ и <code>dotnet</code> для запуска стендов.</span>
-    <div class="prompt">pip install standkit</div></div>
-  <div class="st"><b>Подготовить реестр на хосте агента</b>
-    <span class="tmuted">Тот же формат <code>projects.json</code>, но перечислены стенды <b>этого</b> хоста, и они остаются
-    <code>transport: "local"</code> — агент поднимает их у себя локально. Удалённым стенд становится только в реестре оператора.</span></div>
-  <div class="st"><b>Задать токены как секреты</b>
+  <div class="st"><b>Поставить пакет в изолированное окружение</b>
+    <span class="tmuted">Тот же пакет <code>standkit</code>, что у оператора, — агент входит в него. Нужен Python 3.10+
+    и <code>dotnet</code> для запуска стендов (для <code>iis</code>/<code>docker</code>/<code>k8s</code> — соответствующий CLI).
+    Системный Python в Linux не трогаем: службе нужен предсказуемый путь к интерпретатору, поэтому для неё —
+    именно venv, а не pipx.</span>
+    <div class="prompt">Linux
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin standkit
+sudo mkdir -p /opt/standkit/{tls,logs,run}
+sudo python3 -m venv /opt/standkit/venv
+sudo /opt/standkit/venv/bin/pip install standkit
+sudo chown -R standkit:standkit /opt/standkit
+
+Windows (PowerShell от администратора)
+python -m venv C:\ProgramData\standkit\venv
+C:\ProgramData\standkit\venv\Scripts\pip install standkit</div></div>
+
+  <div class="st"><b>Положить реестр стендов этого хоста</b>
+    <span class="tmuted">Файл <code>/opt/standkit/projects.json</code> (Windows — <code>C:\ProgramData\standkit\projects.json</code>).
+    Достаточно стендов этой машины; секретов в нём нет — только ссылки.</span>
+    <div class="prompt">{
+  "default": "",
+  "projects": {
+    "client-uat": {
+      "transport": "local",
+      "stand_dir": "/opt/bpmsoft/client-uat",
+      "stand_dll": "BPMSoft.WebHost.dll",
+      "dotnet": "dotnet",
+      "stand_host": "0.0.0.0",
+      "stand_port": 5000,
+      "db_type": "postgres",
+      "db_host": "127.0.0.1",
+      "db_port": 5432,
+      "db_name": "client_uat",
+      "secret_ref_db": "standkit:client-uat:db"
+    }
+  }
+}</div></div>
+
+  <div class="st"><b>Задать токены агента</b>
     <span class="tmuted">Токены не передаются в командной строке открытым текстом — только ссылкой на секрет.
-    Разные токены на управление и на чтение.</span>
-    <div class="prompt">python -c "import secrets;print(secrets.token_urlsafe(32))"
-python -m standkit.secrets set standkit:client-uat:agent-token
-python -m standkit.secrets set standkit:client-uat:agent-readonly-token</div></div>
+    Заведите разные токены для управления и для чтения. На сервере без keyring (обычный случай)
+    значение задаётся <b>переменной окружения</b>; имя — <code>STANDKIT_SECRET__</code> плюс ссылка
+    в верхнем регистре, где всё, кроме букв и цифр, заменено на <code>_</code>.</span>
+    <div class="prompt">python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # сгенерировать токен
+
+# /etc/standkit/agent.env — chmod 600, владелец standkit
+STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_TOKEN=&lt;control-токен&gt;
+STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_READONLY_TOKEN=&lt;readonly-токен&gt;</div>
+    <span class="tmuted">Если на хосте есть рабочий keyring и вы запускаете агента из-под своей сессии — можно положить
+    туда: <code>python -c "import getpass; from standkit.secrets import set_secret; set_secret('standkit:client-uat:agent-token', getpass.getpass())"</code>
+    (нужно дополнение <code>[secrets]</code>).</span></div>
+
   <div class="st"><b>Выпустить сертификаты</b>
-    <span class="tmuted">Агент только потребляет готовые PEM — выпуск и ротация на вашей PKI. Минимальный самоподписанный
-    вариант для закрытого контура:</span>
+    <span class="tmuted">Нужны для доступа по сети: серверный сертификат агента и, крайне желательно, CA клиентских
+    сертификатов для mTLS. Агент только потребляет готовые PEM — выпуск и ротация на вашей PKI.
+    Минимальный самоподписанный вариант для закрытого контура:</span>
     <div class="prompt">openssl req -x509 -newkey rsa:4096 -nodes -days 365 \
-    -keyout agent.key -out agent.crt -subj "/CN=client-host"
+    -keyout /opt/standkit/tls/agent.key -out /opt/standkit/tls/agent.crt \
+    -subj "/CN=client-host"
 openssl req -x509 -newkey rsa:4096 -nodes -days 365 \
-    -keyout clients-ca.key -out clients-ca.crt -subj "/CN=BPMkitStand clients CA"</div></div>
-  <div class="st"><b>Запустить агента</b>
-    <span class="tmuted">Для прод-доступа TLS и mTLS обязательны. Все ключи — <code>python -m standkit_agent --help</code>.</span>
-    <div class="prompt">python -m standkit_agent --host 0.0.0.0 --port 8765 \
+    -keyout /opt/standkit/tls/clients-ca.key -out /opt/standkit/tls/clients-ca.crt \
+    -subj "/CN=BPMkitStand clients CA"
+sudo chmod 600 /opt/standkit/tls/*.key && sudo chown standkit:standkit /opt/standkit/tls/*</div>
+    <span class="tmuted"><code>CN</code> серверного сертификата — то имя хоста, по которому к агенту будет ходить дашборд.</span></div>
+
+  <div class="st"><b>Проверить запуск руками</b>
+    <span class="tmuted">Сначала убедитесь, что агент поднимается и видит стенды, и только потом оформляйте службу.
+    Все ключи — <code>--help</code>.</span>
+    <div class="prompt">sudo -u standkit env $(cat /etc/standkit/agent.env | xargs) \
+  /opt/standkit/venv/bin/python -m standkit_agent \
+    --host 0.0.0.0 --port 8765 \
     --registry /opt/standkit/projects.json \
     --token-ref standkit:client-uat:agent-token \
     --readonly-token-ref standkit:client-uat:agent-readonly-token \
-    --tls-cert /etc/standkit/agent.crt \
-    --tls-key /etc/standkit/agent.key \
-    --tls-client-ca /etc/standkit/clients-ca.crt \
-    --audit-log /var/log/standkit/audit.log</div></div>
-  <div class="st"><b>Оформить как службу</b>
-    <span class="tmuted">Чтобы агент пережил перезагрузку: готовый least-privilege юнит systemd для Linux
-    (<code>standkit_agent/deploy/standkit-agent.service</code>) и заметки по службе Windows
-    (<code>standkit_agent/deploy/windows-service.md</code>).</span></div>
+    --tls-cert /opt/standkit/tls/agent.crt \
+    --tls-key /opt/standkit/tls/agent.key \
+    --tls-client-ca /opt/standkit/tls/clients-ca.crt \
+    --audit-log /opt/standkit/logs/audit.log</div>
+    <span class="tmuted">Для локальной отладки достаточно loopback без TLS:
+    <code>python -m standkit_agent --registry ./projects.json --token-ref standkit:client-uat:agent-token</code>.</span></div>
+
+  <div class="st"><b>Оформить службой</b>
+    <span class="tmuted"><b>Linux:</b> в пакете есть готовый least-privilege юнит — в репозитории
+    <code>standkit_agent/deploy/standkit-agent.service</code> (в установленный пакет он не входит, возьмите из репозитория
+    или напишите по образцу ниже). Подставьте свои пути, добавьте <code>EnvironmentFile</code> с токенами и включите службу.</span>
+    <div class="prompt">[Service]
+Type=simple
+User=standkit
+Group=standkit
+WorkingDirectory=/opt/standkit
+EnvironmentFile=/etc/standkit/agent.env
+ExecStart=/opt/standkit/venv/bin/python -m standkit_agent \
+    --host 0.0.0.0 --port 8765 \
+    --registry /opt/standkit/projects.json \
+    --token-ref standkit:client-uat:agent-token \
+    --tls-cert /opt/standkit/tls/agent.crt \
+    --tls-key /opt/standkit/tls/agent.key \
+    --tls-client-ca /opt/standkit/tls/clients-ca.crt \
+    --audit-log /opt/standkit/logs/audit.log
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/standkit/run /opt/standkit/logs</div>
+    <div class="prompt">sudo cp standkit-agent.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now standkit-agent
+systemctl status standkit-agent</div>
+    <span class="tmuted"><b>Windows:</b> проще всего через NSSM под <b>выделенной</b> учётной записью (никогда не под
+    <code>LocalSystem</code>): <code>nssm install standkit-agent C:\ProgramData\standkit\venv\Scripts\python.exe -m standkit_agent --registry C:\ProgramData\standkit\projects.json --token-ref standkit:client-uat:agent-token …</code>,
+    затем <code>nssm set standkit-agent ObjectName .\standkit-agent &lt;пароль&gt;</code>. Учётной записи нужно право
+    «Log on as a service»; полные заметки — <code>standkit_agent/deploy/windows-service.md</code>.</span></div>
+
+  <div class="st"><b>Открыть доступ и проверить с машины оператора</b>
+    <span class="tmuted">Firewall: входящий порт агента — только для адресов управляющего контура, не «любой адрес».
+    Проверять лучше readonly-токеном, чтобы ничего не запустить:</span>
+    <div class="prompt">curl --cacert agent.crt --cert client.crt --key client.key \
+     -H "Authorization: Bearer &lt;readonly-токен&gt;" \
+     https://client-host:8765/stands</div></div>
 </div>
 </div>
 
@@ -1059,6 +1250,15 @@ openssl req -x509 -newkey rsa:4096 -nodes -days 365 \
   <tr><td><code>standkit-hub</code>: «не является внутренней или внешней командой» / <code>command not found</code></td>
       <td>Каталог, куда pip кладёт консольные команды (<code>Scripts</code>), не в <code>PATH</code></td>
       <td>Запускать модулем: <code>python -m standkit_hub</code>. Разбор — плитка ниже</td></tr>
+  <tr><td>Linux: <code>error: externally-managed-environment</code> при <code>pip install</code></td>
+      <td>Системный Python защищён от установки пакетов (PEP 668) — так во всех свежих дистрибутивах</td>
+      <td>Ставить в изолированное окружение: <code>pipx install "standkit[secrets]"</code> или venv (см. <a href="#start">Установка</a>). Не ломать защиту флагом <code>--break-system-packages</code></td></tr>
+  <tr><td>Linux: поставил через pipx, команды нет</td>
+      <td><code>~/.local/bin</code> не в <code>PATH</code></td>
+      <td><code>pipx ensurepath</code> и <b>новый</b> вход в shell</td></tr>
+  <tr><td>Агент пишет, что секрет не найден (служба)</td>
+      <td>У сервисной учётной записи нет доступа к keyring — типично для headless-хоста</td>
+      <td>Передать токен переменной <code>STANDKIT_SECRET__…</code> через <code>EnvironmentFile</code> (chmod 600) — см. <a href="#remote">Удалённые стенды</a></td></tr>
   <tr><td><code>No module named standkit_hub</code></td>
       <td>Пакет поставлен в другой интерпретатор или в venv, который не активирован</td>
       <td>Ставить тем же питоном, которым запускаете: <code>python -m pip install standkit</code></td></tr>
