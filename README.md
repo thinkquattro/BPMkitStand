@@ -134,7 +134,7 @@ BPMkitStand использует тот же реестр, что и MCP BPMkit 
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/adr/](docs/adr/) · [docs/CHANGELOG.md](docs/CHANGELOG.md) | разработчик |
 | [docs/ROADMAP.md](docs/ROADMAP.md) — крупные работы · [docs/BACKLOG.md](docs/BACKLOG.md) — заглушки и заделы в коде · [docs/GAPs/](docs/GAPs/README.md) — код прав, а сценарий оператора ломается | планирование |
 
-> Статус: `standkit` — молодой проект (0.7.x). Ядро/агент/хаб работоспособны, но
+> Статус: `standkit` — молодой проект (0.8.x). Ядро/агент/хаб работоспособны, но
 > ряд возможностей — это **каркас/заделы** (например, глубокие пробы БД/Redis,
 > транспорты ssh/winrm, живая приёмка Docker/k8s/IIS). Что именно ещё не
 > дописано — прозрачно перечислено в [docs/BACKLOG.md](docs/BACKLOG.md).
