@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from standkit.platform import run_console
+
 _APP_NAME = "BPMkit Диспетчер"
 _WINDOWS_SHORTCUT_NAME = "BPMkit Диспетчер.lnk"
 _WINDOWS_ICON_ASSET = "bpmkit-icon.ico"
@@ -113,7 +115,10 @@ def _install_windows() -> ShortcutResult:
     script = build_windows_shortcut_script(lnk_path, target, icon_path, Path.home())
 
     try:
-        proc = subprocess.run(
+        # run_console, а не голый subprocess.run: установку ярлыка запускают в
+        # т.ч. из хаба под pythonw (окно «Настройки»), и PowerShell мигнул бы
+        # консолью прямо в лицо пользователю (тот же класс, что GAP-138).
+        proc = run_console(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True,
             text=True,

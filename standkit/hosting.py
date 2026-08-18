@@ -6,7 +6,9 @@ standkit / IIS Application Pool / Docker-контейнер), ортогонал
 (docs/adr/0001-hosting-backends.md).
 
 Только стандартная библиотека Python (``subprocess``, ``shutil``,
-``pathlib``) — как и весь пакет ``standkit``.
+``pathlib``) — как и весь пакет ``standkit``. Внешние утилиты запускаются
+ТОЛЬКО через ``standkit.platform.run_console`` (скрытое консольное окно на
+Windows, GAP-138), а не через ``subprocess.run`` напрямую.
 
 Соглашения об ошибках:
   - ``start``/``stop``/``restart``/``read_logs`` бросают ``HostingError`` с
@@ -41,6 +43,7 @@ from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
 from standkit.models import HostKind, Stand
+from standkit.platform import run_console
 
 # Таймаут внешних вызовов (appcmd/docker) по умолчанию — операции над
 # App Pool/контейнером обычно быстрые; значение с запасом, чтобы не резать
@@ -191,9 +194,13 @@ def _decode_console(data) -> str:
 def _run(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
     """Выполняет внешнюю команду, оборачивая ошибки спавна/таймаута в ``HostingError``.
     Захватывает вывод БАЙТАМИ и декодирует (см. ``_decode_console``) — надёжнее,
-    чем ``text=True, encoding='utf-8'``, для консольных утилит в OEM-кодировке."""
+    чем ``text=True, encoding='utf-8'``, для консольных утилит в OEM-кодировке.
+    Запуск — через ``platform.run_console`` (на Windows добавляет
+    ``CREATE_NO_WINDOW``): поллер хаба зовёт appcmd из процесса без своей
+    консоли, и голый ``subprocess.run`` мигал бы окном на каждый вызов
+    (GAP-138)."""
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        proc = run_console(cmd, capture_output=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         raise HostingError(f"Не удалось выполнить команду {cmd!r}: {exc}") from exc
     return subprocess.CompletedProcess(
@@ -315,7 +322,7 @@ def _service_state(name: str) -> Optional[str]:
     if sys.platform != "win32":
         return None
     try:
-        proc = subprocess.run(["sc", "query", name], capture_output=True, timeout=5)
+        proc = run_console(["sc", "query", name], capture_output=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
     text = _decode_console(proc.stdout).upper()

@@ -62,6 +62,14 @@ standkit_hub     — MIT, stdlib-only локальный веб-дашборд (
   ветки для `sys.platform == "win32"` (скрытое консольное окно,
   `CREATE_NO_WINDOW` + отдельная группа процессов) и POSIX
   (`start_new_session=True`, эквивалент `setsid`).
+- Запуск ВНЕШНИХ КОНСОЛЬНЫХ УТИЛИТ (`appcmd`, `sc`, `docker`, `kubectl`,
+  `taskkill`, `tasklist`, `powershell`) — ТОЛЬКО через
+  `standkit/platform.py::run_console`, который на win32 добавляет тот же
+  `CREATE_NO_WINDOW`. Прямой `subprocess.run` в остальных модулях пакета
+  запрещён и стережётся тестом `tests/test_no_window.py`: у родителя без
+  своей консоли (`pythonw`, служба, фоновый поллер хаба) каждый такой вызов
+  рождает на экране мигающее чёрное окно, а из терминала дефект не виден
+  (GAP-138: поллер опрашивал IIS-стенд парой `appcmd` раз в ~12 с).
 - `standkit_agent` — только `stdlib` (`http.server`, `subprocess`, `socket`,
   `urllib`), потому что стенды BPMSoft на .NET штатно живут и под Linux, а
   агент должен разворачиваться на голом хосте без сборки колёс под
