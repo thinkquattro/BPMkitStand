@@ -594,6 +594,24 @@ exited`, а не на «слушаю».
 
 Лечение: `sudo chown -R standkit:standkit /opt/standkit/run /opt/standkit/logs`.
 
+**`OSError: [Errno 98] Address already in use`** — порт уже занят: чаще всего
+ранее запущенным вручную агентом, который вы забыли остановить.
+
+```console
+[standkit-agent] слушаю 127.0.0.1:8765 (tls=off), реестр=..., стендов=1
+Traceback (most recent call last):
+  ...
+OSError: [Errno 98] Address already in use
+```
+
+Здесь та же ловушка, что и выше: строка «слушаю …» напечатана, хотя сокет
+открыть не удалось. Найдите владельца порта и остановите его:
+
+```bash
+ss -ltnp | grep 8765
+pkill -f 'standkit_agent'      # если это ваш ручной запуск
+```
+
 ### 7.4. Проверка после перезагрузки
 
 ```console
@@ -810,6 +828,7 @@ sudo tail -f /opt/standkit/logs/<имя-стенда>.log   # лог стенд�
 | `http: down`, `process: ok` после пересоздания контейнера | сменился опубликованный порт | обновить `stand_port`, рестарт агента |
 | `process_reason: ... permission denied ... docker.sock` | сервисный пользователь не в группе `docker` | `usermod -aG docker standkit` (осознавая, что это ≈ root) |
 | `409 adopt_required` | стенд поднят вне диспетчера | проверить кандидата, затем `adopt?force=1` |
+| `OSError: [Errno 98] Address already in use` | порт занят другим экземпляром агента | `ss -ltnp \| grep 8765`, остановить лишний процесс или взять другой `--port` |
 | `429 too many failed attempts` | сработал lockout | подождать окно или `systemctl restart standkit-agent` |
 | `curl: (60) SSL certificate problem` | клиент не доверяет сертификату агента | `--cacert agent.crt` или добавить CA в доверенные |
 | `curl: (60) SSL: no alternative certificate subject name` | обращаетесь по имени, которого нет в SAN | выпустить сертификат с нужным SAN |
