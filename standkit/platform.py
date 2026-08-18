@@ -2,6 +2,14 @@
 OS-абстракция запуска процессов: скрытый (headless, без консольного окна)
 процесс на Windows, отсоединённый (setsid) процесс на Linux.
 
+Два входа наружу, и оба скрывают консольное окно на Windows:
+``spawn_hidden`` — ДОЛГОЖИВУЩИЙ фоновый процесс (стенд, агент), ``run_console``
+— КОРОТКАЯ внешняя консольная утилита (appcmd/sc/docker/kubectl/taskkill/
+powershell), результат которой нужен здесь и сейчас. Прямой ``subprocess.run``
+в остальных модулях пакета запрещён (GAP-138): без ``CREATE_NO_WINDOW``
+родитель без собственной консоли — ``pythonw``, служба — рождает мигающее
+чёрное окно на каждый вызов.
+
 Никакого хардкода путей вида ``C:\\...`` — все пути принимаются и возвращаются
 как ``pathlib.Path``. Модуль не знает ничего про BPMSoft — только про то, как
 корректно поднять/остановить/проверить произвольный процесс кроссплатформенно.
@@ -45,6 +53,39 @@ class ProcessError(Exception):
     """Ошибки запуска/остановки/проверки процесса."""
 
 
+# Флаг Windows: дочерний процесс НЕ получает своей консоли. Продублирован
+# числом, потому что вне Windows атрибута ``subprocess.CREATE_NO_WINDOW`` нет
+# вовсе (до реального запуска с этим флагом там дело всё равно не доходит —
+# см. ``run_console``), а ветка кода должна оставаться проверяемой тестом.
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+
+def run_console(cmd: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
+    """
+    ЕДИНАЯ точка запуска ВНЕШНИХ КОНСОЛЬНЫХ утилит (``appcmd``, ``sc``,
+    ``docker``, ``kubectl``, ``taskkill``, ``tasklist``, ``powershell``): на
+    Windows всегда добавляет ``creationflags=CREATE_NO_WINDOW``.
+
+    Зачем. Родитель, у которого своей консоли НЕТ (``pythonw.exe``, служба,
+    фоновый поллер хаба), заставляет Windows выдать консоль каждому
+    консольному ребёнку — на экране это всплывающее и тут же исчезающее чёрное
+    окно (плюс `conhost.exe`/`OpenConsole.exe` в списке процессов). Из
+    обычного терминала дефект не виден: там ребёнок наследует консоль
+    родителя. Ровно так GAP-138 и дожил до владельца: поллер хаба раз в ~12 с
+    опрашивал IIS-стенд двумя ``appcmd`` — два мигающих окна.
+
+    Поэтому НИ ОДИН модуль пакета не зовёт ``subprocess.run`` напрямую: флаг
+    ставится здесь, в одном месте. Регресс стережёт тест
+    ``tests/test_no_window.py`` (статическая проверка исходников).
+
+    ``creationflags`` вызывающего не затирается, а дополняется битом.
+    Возвращает то же, что ``subprocess.run`` (тесты подменяют именно его).
+    """
+    if sys.platform == "win32":
+        kwargs["creationflags"] = int(kwargs.get("creationflags") or 0) | CREATE_NO_WINDOW
+    return subprocess.run(cmd, **kwargs)
+
+
 def spawn_hidden(cmd: Sequence[str], cwd: Path, log_path: Path) -> int:
     """
     Запускает процесс в фоне, без видимого консольного окна (Windows) /
@@ -70,7 +111,7 @@ def spawn_hidden(cmd: Sequence[str], cwd: Path, log_path: Path) -> int:
         # Скрытое окно + отдельная группа процессов, чтобы CTRL-C консоли
         # родителя (если он в консоли) не убивал дочерний процесс стенда.
         creationflags = 0
-        creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        creationflags |= CREATE_NO_WINDOW
         creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
         popen_kwargs["creationflags"] = creationflags
     else:
@@ -168,11 +209,16 @@ def _is_alive_windows(pid: int) -> bool:
             ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
     except Exception:
         # Фолбэк на tasklist, если ctypes-путь недоступен по какой-то причине.
+        # Через run_console — иначе фолбэк сам мигал бы консольным окном
+        # (GAP-138); проверка кода возврата не нужна, важно лишь наличие pid
+        # в выводе.
         try:
-            out = subprocess.check_output(
-                ["tasklist", "/FI", f"PID eq {pid}"], text=True, stderr=subprocess.DEVNULL
+            proc = run_console(
+                ["tasklist", "/FI", f"PID eq {pid}"],
+                capture_output=True,
+                text=True,
             )
-            return str(pid) in out
+            return str(pid) in (proc.stdout or "")
         except Exception:
             return False
 
@@ -204,7 +250,7 @@ def _taskkill(pid: int, *, force: bool) -> None:
     if force:
         args.append("/F")
     try:
-        subprocess.run(
+        run_console(
             args,
             check=False,
             stdout=subprocess.DEVNULL,
