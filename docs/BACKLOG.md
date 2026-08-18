@@ -28,6 +28,7 @@
 |------|--------|-----------------|
 | Глубокая проба БД (`SELECT 1` через psycopg2/pyodbc) | заглушка, всегда `SKIPPED`; флаг `deep_db` из хаба не передаётся | `standkit/health.py::db_deep_check`, параметр `check_stand(deep_db=…)` |
 | Глубокая проба Redis (`PING` через redis-py) | заглушка, всегда `SKIPPED` | `standkit/health.py::redis_deep_check`, `check_stand(deep_redis=…)` |
+| `stand_scheme` / `verify_tls` в форме регистрации дашборда | поля есть в реестре и в пробе, но форма регистрации построена по фиксированному белому списку полей — задать схему можно только правкой `projects.json` | `standkit_hub/server.py::_REGISTER_ALLOWED_FIELDS`, `standkit_hub/web/app.js::_REGISTER_FIELD_NAMES` |
 | `last_deploy` (состояние последнего деплоя) | всегда `UNKNOWN`, источник данных не определён, в UI не выводится | `standkit/health.py::check_stand` (комментарий `last_deploy`), `standkit/models.py::StandStatus.last_deploy` |
 
 Рабочие пробы (без заглушек): процесс (pid/бэкенд), HTTP, БД/Redis по **открытому

@@ -11,6 +11,9 @@
       "dotnet": "dotnet",
       "stand_host": "127.0.0.1",
       "stand_port": 5000,
+      "_comment_scheme": "Схема health-пробы и ссылки «Открыть стенд». http (по умолчанию) — стенд без TLS.",
+      "stand_scheme": "http",
+      "verify_tls": true,
 
       "db_type": "postgres",
       "db_host": "127.0.0.1",
@@ -117,6 +120,9 @@
       "stand_dir": "/opt/bpmsoft/example-docker",
       "stand_host": "127.0.0.1",
       "stand_port": 5000,
+      "_comment_scheme": "Стенд за TLS: схема https обязательна, иначе проба всегда даст down. verify_tls: false нужен для self-signed сертификата — типовой случай дев-контуров BPMSoft.",
+      "stand_scheme": "https",
+      "verify_tls": false,
 
       "db_type": "postgres",
       "db_host": "127.0.0.1",

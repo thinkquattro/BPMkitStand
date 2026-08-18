@@ -210,3 +210,49 @@ def test_stand_from_dict_k8s_empty_namespace_defaults_to_empty_string():
     data = {"stand_dir": "/opt/x", "host_kind": "k8s", "k8s_deployment": "dep1"}
     stand = Stand.from_dict("demo", data)
     assert stand.k8s_namespace == ""
+
+
+def test_validate_rejects_unknown_stand_scheme():
+    stand = Stand(name="s", stand_dir="/opt/x", stand_scheme="ftp")
+    errors = stand.validate()
+    assert any("stand_scheme" in e for e in errors)
+
+
+def test_validate_accepts_http_and_https():
+    for scheme in ("http", "https", "HTTPS"):
+        stand = Stand(name="s", stand_dir="/opt/x", stand_scheme=scheme)
+        assert not [e for e in stand.validate() if "stand_scheme" in e]
+
+
+def test_scheme_and_verify_survive_registry_round_trip():
+    data = {
+        "stand_dir": "/opt/x",
+        "stand_host": "127.0.0.1",
+        "stand_port": 5010,
+        "stand_scheme": "https",
+        "verify_tls": False,
+    }
+    stand = Stand.from_dict("tls", data)
+    assert stand.stand_scheme == "https"
+    assert stand.verify_tls is False
+    dumped = stand.to_dict()
+    assert dumped["stand_scheme"] == "https"
+    assert dumped["verify_tls"] is False
+    assert Stand.from_dict("tls", dumped).verify_tls is False
+
+
+def test_scheme_defaults_preserve_old_registries():
+    stand = Stand.from_dict("legacy", {"stand_dir": "/opt/x"})
+    assert stand.stand_scheme == "http"
+    assert stand.verify_tls is True
+
+
+def test_verify_tls_reads_string_booleans_from_hand_edited_registry():
+    assert Stand.from_dict("s", {"stand_dir": "/opt/x", "verify_tls": "false"}).verify_tls is False
+    assert Stand.from_dict("s", {"stand_dir": "/opt/x", "verify_tls": "true"}).verify_tls is True
+    # мусор — не роняем чтение реестра, остаёмся на безопасном дефолте
+    assert Stand.from_dict("s", {"stand_dir": "/opt/x", "verify_tls": "ага"}).verify_tls is True
+
+
+def test_unknown_scheme_from_registry_falls_back_to_http():
+    assert Stand.from_dict("s", {"stand_dir": "/opt/x", "stand_scheme": "ftp"}).stand_scheme == "http"

@@ -459,8 +459,10 @@ def _stand_entry(name: str, stand: Stand, status) -> dict:
     # существует (см. logs_browser.resolve_logs_dir). Используется, чтобы
     # дизейблить соответствующий пункт сплит-меню "Открыть папку логов".
     bpmkit_logs_available = logs_dir is not None
+    # Схему берём из записи: стенд за TLS по http:// не откроется, а ссылка
+    # «Открыть стенд» в дашборде вела бы в никуда (см. Stand.stand_scheme).
     http_url = (
-        f"http://{stand.stand_host}:{stand.stand_port}"
+        f"{(stand.stand_scheme or 'http').lower()}://{stand.stand_host}:{stand.stand_port}"
         if stand.stand_host and stand.stand_port
         else None
     )
