@@ -92,8 +92,11 @@ TLS, TLS 1.2+/mTLS, скоупы control/readonly, lockout по IP, аудит.
 Нужен Python 3.10+.
 
 ```bash
-pip install "git+https://github.com/thinkquattro/BPMkitStand.git"
+pip install standkit
 ```
+
+Обновление — `pip install -U standkit`. Свежий `main` до релиза (если нужна ещё не выпущенная
+правка) — `pip install --force-reinstall "git+https://github.com/thinkquattro/BPMkitStand.git"`.
 
 Запуск дашборда:
 
@@ -118,6 +121,7 @@ BPMkitStand использует тот же реестр, что и MCP BPMkit 
 
 ## Документация проекта
 
+- [docs/cookbook.html](docs/cookbook.html) — **кукбук**: обзор, установка, дашборд, реестр стендов, виды хостинга, удалённые стенды и агент, безопасность, траблшутинг. Один standalone-файл, открывается в браузере.
 - [docs/ROADMAP.md](docs/ROADMAP.md) — дорожная карта приложения (что сделано / ближайшее / бэклог).
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — история изменений по версиям.
 - [docs/BACKLOG.md](docs/BACKLOG.md) — честный список «упомянуто в коде, но не реализовано» (заделы/заглушки) со ссылками на код.
