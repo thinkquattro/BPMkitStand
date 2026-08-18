@@ -86,11 +86,28 @@ BPMkitStand управляет удалёнными стендами через 
 
 ### 1. Поставить пакет
 
+Нужен Python 3.10+ и установленный `dotnet` (для запуска стендов BPMSoft).
+
+Агент оформляется службой, поэтому ему нужен предсказуемый путь к интерпретатору —
+ставим в выделенный venv, а не в системный Python (в свежих дистрибутивах Linux он
+защищён PEP 668 и `pip install` в него откажет с `error: externally-managed-environment`):
+
 ```bash
-pip install "git+https://github.com/thinkquattro/BPMkitStand.git"
+# Linux
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin standkit
+sudo mkdir -p /opt/standkit/{tls,logs,run}
+sudo python3 -m venv /opt/standkit/venv
+sudo /opt/standkit/venv/bin/pip install standkit
+sudo chown -R standkit:standkit /opt/standkit
 ```
 
-Нужен Python 3.10+ и установленный `dotnet` (для запуска стендов BPMSoft).
+```powershell
+# Windows (от администратора)
+python -m venv C:\ProgramData\standkit\venv
+C:\ProgramData\standkit\venv\Scripts\pip install standkit
+```
+
+Свежий `main` до релиза — `pip install "git+https://github.com/thinkquattro/BPMkitStand.git"`.
 
 ### 2. Подготовить реестр на хосте агента
 
@@ -129,11 +146,35 @@ pip install "git+https://github.com/thinkquattro/BPMkitStand.git"
 (Secret-first). Задайте control-токен (и, при желании, отдельный readonly):
 
 ```bash
-# сгенерировать надёжный токен, например:  python -c "import secrets;print(secrets.token_urlsafe(32))"
-python -m standkit.secrets set standkit:client-uat:agent-token
-# опционально — токен только для чтения (мониторинг без управления):
-python -m standkit.secrets set standkit:client-uat:agent-readonly-token
+# сгенерировать надёжный токен:
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
+
+Дальше значение нужно положить туда, откуда его возьмёт `standkit.secrets`. Порядок
+разрешения — переменная окружения → keyring → явный фолбэк.
+
+**Служба на headless-хосте — переменная окружения** (keyring под сервисной учётной записью
+без сессии обычно недоступен). Имя переменной = `STANDKIT_SECRET__` + ссылка на секрет
+в верхнем регистре, где всё, кроме букв и цифр, заменено на `_`:
+
+```bash
+# /etc/standkit/agent.env — chmod 600, владелец standkit; подключается в unit через EnvironmentFile
+STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_TOKEN=<control-токен>
+STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_READONLY_TOKEN=<readonly-токен>
+```
+
+**Машина с рабочим keyring** (нужно дополнение `standkit[secrets]`) — значение вводится
+из stdin, чтобы не попасть в историю команд:
+
+```bash
+python -c "import getpass; from standkit.secrets import set_secret; \
+    set_secret('standkit:client-uat:agent-token', getpass.getpass('Токен: '))"
+```
+
+> ⚠️ Отдельного CLI (`python -m standkit.secrets set …`) в пакете **нет** — модуль без
+> `__main__`, такая команда молча завершается с кодом 0 и ничего не задаёт. До 18.08.2026
+> этот раздел ошибочно предлагал именно её. Статус CLI-обёртки — [BACKLOG.md](BACKLOG.md),
+> раздел «Секреты».
 
 ### 4. Выпустить сертификаты (для прод/удалённого доступа)
 
@@ -209,10 +250,12 @@ python -m standkit_agent --host 0.0.0.0 --port 8765 \
 }
 ```
 
-Затем на стороне оператора задайте секрет с тем же токеном, что и на агенте:
+Затем на стороне оператора задайте секрет с тем же токеном, что и на агенте, — кнопкой
+«Задать секрет…» в «Настройках» дашборда либо тем же однострочником:
 
 ```bash
-python -m standkit.secrets set standkit:client-uat:agent-token
+python -c "import getpass; from standkit.secrets import set_secret; \
+    set_secret('standkit:client-uat:agent-token', getpass.getpass('Токен: '))"
 ```
 
 Запустите дашборд — удалённый стенд появится в общем списке рядом с локальными, в колонке
