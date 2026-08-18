@@ -40,8 +40,11 @@ HTTP/RPC-сервер агента — STDLIB-ONLY (http.server, ssl), ника�
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import re
+import socket
 import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -353,6 +356,55 @@ def make_handler(
     return Handler
 
 
+
+# Таймаут пробы «порт уже кем-то слушается» перед bind'ом на Windows (см.
+# ``_windows_port_is_taken``). Проба идёт на loopback/локальный адрес и должна
+# быть заведомо дешевле любого сетевого RTT — это не health-чек, а проверка
+# «кто-то уже сидит на этом порту прямо здесь».
+_WINDOWS_PORT_PROBE_TIMEOUT_SEC = 0.4
+
+# Адреса-джокеры: слушать на них можно, а «постучаться» — нет. Подменяем на
+# конкретный loopback того же семейства.
+_WILDCARD_TO_LOOPBACK = {"0.0.0.0": "127.0.0.1", "": "127.0.0.1", "::": "::1"}
+
+
+def _windows_port_is_taken(host: str, port: int, *, timeout: float = _WINDOWS_PORT_PROBE_TIMEOUT_SEC) -> bool:
+    """
+    Слушает ли кто-то уже ``host:port``? Проба ДО bind'а, только для Windows.
+
+    ЗАЧЕМ. ``ThreadingHTTPServer.allow_reuse_address = 1``, то есть сокет
+    создаётся с ``SO_REUSEADDR``. На POSIX это лишь разрешает переиспользовать
+    порт, оставшийся в TIME_WAIT, и занятый порт честно даёт ``EADDRINUSE``. На
+    **Windows** семантика другая: ``SO_REUSEADDR`` позволяет второму процессу
+    занять УЖЕ СЛУШАЕМЫЙ порт — bind проходит успешно, исключения нет, и два
+    агента оказываются на одном порту, а входящие соединения распределяются
+    между ними непредсказуемо. Для агента, который по этому порту запускает и
+    останавливает процессы на хосте, тихое раздвоение недопустимо.
+
+    Та же грабля уже разобрана для дашборда — см.
+    ``standkit_hub.server.probe_hub_instance``; там она вскрылась как «второй
+    хаб на том же 8770». Здесь проба проще: агенту не нужно опознавать «свой»
+    процесс, любой слушатель на этом порту — повод отказаться, а не занимать
+    порт вторым.
+
+    ``SO_REUSEADDR`` при этом НЕ отключается: без него Windows отказывает в
+    bind'е, пока на порту висят соединения в TIME_WAIT, и быстрый перезапуск
+    службы («nssm restart») ломался бы уже по-настоящему.
+
+    Проба консервативна: любой сбой (таймаут, отказ, DNS) — ``False``, то есть
+    «порт свободен», и дальше решает настоящий bind. Ложный отказ старта хуже,
+    чем потерянная подсказка.
+    """
+    if os.name != "nt" or not port:
+        return False
+    target = _WILDCARD_TO_LOOPBACK.get(host, host)
+    try:
+        with socket.create_connection((target, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def run_server(
     registry: Registry,
     authenticator: Authenticator,
@@ -415,6 +467,13 @@ def run_server(
         max_body_bytes=max_body_bytes,
         max_logs_n=max_logs_n,
     )
+    # На Windows занятый порт сам по себе bind НЕ ломает (SO_REUSEADDR, см.
+    # _windows_port_is_taken) — поэтому спрашиваем заранее и отказываем тем же
+    # OSError(EADDRINUSE), который на POSIX прилетел бы из bind'а. Так отказ
+    # выглядит одинаково на обеих ОС, а __main__ печатает одну понятную строку
+    # (см. _describe_startup_oserror).
+    if _windows_port_is_taken(host, port):
+        raise OSError(errno.EADDRINUSE, "Address already in use")
     # Сокет привязывается здесь, в конструкторе ThreadingHTTPServer
     # (socketserver.TCPServer делает bind+listen): всё, что может помешать
     # старту — занятый порт (EADDRINUSE), нехватка прав (EACCES), битый

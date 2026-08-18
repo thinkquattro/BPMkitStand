@@ -23,6 +23,8 @@ import errno
 import os
 from pathlib import Path
 
+import threading
+
 import pytest
 
 from standkit_agent import __main__ as agent_main
@@ -454,20 +456,45 @@ def test_busy_port_never_prints_listening(agent_env, tmp_path, capsys):
     """
     import socket
 
+    # SO_REUSEADDR у держателя НЕ ставим сознательно: на Windows именно он
+    # разрешает второму процессу занять уже слушаемый порт, и тест перестал бы
+    # проверять то, ради чего написан (см. server._windows_port_is_taken).
     holder = socket.socket()
-    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     holder.bind(("127.0.0.1", 0))
     holder.listen(1)
     busy_port = holder.getsockname()[1]
+
+    # main() здесь настоящий и на регрессии УХОДИТ В serve_forever навсегда
+    # (именно так это и всплыло на Windows: SO_REUSEADDR позволял занять
+    # слушаемый порт, агент стартовал вторым и подвешивал весь прогон).
+    # Поэтому вызов — в демон-потоке со сторожевым таймером: регрессия должна
+    # падать тестом, а не вешать набор.
+    result: dict = {}
+
+    def _run() -> None:
+        try:
+            result["rc"] = agent_main.main(
+                _argv(agent_env, run_dir=tmp_path / "run", log_dir=tmp_path / "logs", audit_log=tmp_path / "audit.log")
+                + ["--port", str(busy_port)]
+            )
+        except BaseException as exc:  # noqa: BLE001 — переносим в основной поток
+            result["exc"] = exc
+
+    worker = threading.Thread(target=_run, daemon=True)
     try:
-        rc = agent_main.main(
-            _argv(agent_env, run_dir=tmp_path / "run", log_dir=tmp_path / "logs", audit_log=tmp_path / "audit.log")
-            + ["--port", str(busy_port)]
-        )
+        worker.start()
+        worker.join(timeout=30)
         captured = capsys.readouterr()
     finally:
         holder.close()
 
+    assert not worker.is_alive(), (
+        "агент не отказался стартовать на занятом порту, а ушёл в serve_forever — "
+        "на Windows это тихий перехват чужого порта (см. server._windows_port_is_taken)"
+    )
+    if "exc" in result:
+        raise result["exc"]
+    rc = result["rc"]
     assert rc == 1
     line = _single_error_line(captured)
     assert f"127.0.0.1:{busy_port}" in line
@@ -486,8 +513,10 @@ def test_run_server_calls_on_ready_only_after_successful_bind():
     from standkit_agent.security import Authenticator
     from standkit_agent.server import run_server
 
+    # SO_REUSEADDR у держателя НЕ ставим сознательно: на Windows именно он
+    # разрешает второму процессу занять уже слушаемый порт, и тест перестал бы
+    # проверять то, ради чего написан (см. server._windows_port_is_taken).
     holder = socket.socket()
-    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     holder.bind(("127.0.0.1", 0))
     holder.listen(1)
     busy_port = holder.getsockname()[1]
