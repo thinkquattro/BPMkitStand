@@ -4,23 +4,43 @@
 ``<extra["docs_folder"]>/logs``, НЕ ``extra["logs_path"]``), листинг файлов,
 выбор "основного" (самого свежего) лога, санитайзинг имени файла (защита от
 traversal), open_folder (не должен падать при отсутствии утилиты/каталога).
+
+Отдельный блок — GAP-006: имя каталога логов резолвится БЕЗ УЧЁТА РЕГИСТРА
+("Logs"), явный ``Stand.logs_dir`` переопределяет поиск, а путь POSIX-стенда
+в сообщениях не собирается разделителями хоста хаба.
 """
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
 
-from standkit.models import Stand
+from standkit.models import Stand, Transport
 from standkit_hub.logs_browser import (
     list_log_files,
+    logs_unavailable_reason,
     open_folder,
     pick_primary_log,
     raw_logs_path,
     resolve_logs_dir,
     sanitize_log_filename,
 )
+
+def _is_listable(path) -> bool:
+    """
+    Можно ли ПЕРЕЧИСЛИТЬ каталог по факту: снятое право чтения ограничивает
+    только обычного пользователя на POSIX (под root его игнорирует
+    CAP_DAC_OVERRIDE, на Windows chmod на каталог почти не влияет). Тесты ниже
+    поэтому не помечены ``skipif`` — они формулируют инвариант, верный в обоих
+    случаях, иначе на root-CI просто не исполнялись бы.
+    """
+    try:
+        os.listdir(path)
+    except OSError:
+        return False
+    return True
 
 
 def _stand_with_stand_dir_logs(stand_dir) -> Stand:
@@ -342,3 +362,191 @@ def test_pick_primary_log_since_mtime_ignores_old(tmp_path):
     # только старый файл: с cutoff «за сегодня» → None; без cutoff → он.
     assert pick_primary_log(tmp_path, since_mtime=time.time() - 3600) is None
     assert pick_primary_log(tmp_path) == old
+
+
+# --------------------------------------------------------------------------
+# GAP-006: регистр имени каталога, явный logs_dir, разделители в сообщениях
+# --------------------------------------------------------------------------
+
+
+def test_resolve_logs_dir_stand_finds_capitalized_logs(tmp_path):
+    # BPMSoft раскладывает логи в "Logs"; на Linux жёсткое "logs" не находило
+    # каталог, на Windows (регистронезависимая ФС) — это проверка регрессии.
+    logs_dir = tmp_path / "Logs"
+    logs_dir.mkdir()
+    stand = _stand_with_stand_dir_logs(tmp_path)
+    assert resolve_logs_dir(stand, source="stand") == logs_dir
+
+
+def test_resolve_logs_dir_bpmkit_finds_capitalized_logs(tmp_path):
+    logs_dir = tmp_path / "Logs"
+    logs_dir.mkdir()
+    stand = _stand_with_docs_folder(tmp_path)
+    assert resolve_logs_dir(stand, source="bpmkit") == logs_dir
+
+
+def test_resolve_logs_dir_stand_explicit_logs_dir_overrides_search(tmp_path):
+    (tmp_path / "Logs").mkdir()
+    custom = tmp_path / "custom-logs"
+    custom.mkdir()
+    stand = Stand(name="s", stand_dir=str(tmp_path), logs_dir=str(custom))
+    assert resolve_logs_dir(stand, source="stand") == custom
+
+
+def test_resolve_logs_dir_stand_explicit_logs_dir_missing_is_none(tmp_path):
+    (tmp_path / "Logs").mkdir()
+    stand = Stand(name="s", stand_dir=str(tmp_path), logs_dir=str(tmp_path / "нет"))
+    assert resolve_logs_dir(stand, source="stand") is None
+
+
+def test_raw_logs_path_stand_uses_explicit_logs_dir(tmp_path):
+    # В сообщении должен быть тот путь, который реально проверялся.
+    stand = Stand(name="s", stand_dir=str(tmp_path), logs_dir="/srv/bpmsoft/logs-custom")
+    assert raw_logs_path(stand, source="stand") == "/srv/bpmsoft/logs-custom"
+
+
+def test_raw_logs_path_posix_stand_keeps_forward_slashes():
+    # Путь удалённого (POSIX) стенда собирается на хабе, который может быть
+    # под Windows: WindowsPath превращал его в \mnt\composers\... — тест
+    # обязан проходить на обеих ОС, поэтому проверяем именно разделители.
+    stand = Stand(
+        name="remote",
+        transport=Transport.AGENT,
+        agent_url="https://stand-a:8765",
+        stand_dir="/mnt/composers/bpmsoft/stand-a/app",
+    )
+    raw = raw_logs_path(stand, source="stand")
+    assert raw == "/mnt/composers/bpmsoft/stand-a/app/logs"
+    assert "\\" not in raw
+
+
+def test_raw_logs_path_bpmkit_posix_keeps_forward_slashes():
+    stand = Stand(name="remote", stand_dir="/opt/s", extra={"docs_folder": "/srv/projects/demo"})
+    raw = raw_logs_path(stand, source="bpmkit")
+    assert raw == "/srv/projects/demo/logs"
+    assert "\\" not in raw
+
+
+def test_raw_logs_path_windows_style_path_keeps_backslashes():
+    # Обратный случай: путь в windows-стиле не должен «попозиксеть» и не должен
+    # приезжать смесью разделителей на Linux-хабе (было: C:\BPMSoft\stand/logs).
+    stand = Stand(name="s", stand_dir="C:\\BPMSoft\\stand")
+    raw = raw_logs_path(stand, source="stand")
+    assert raw == "C:\\BPMSoft\\stand\\logs"
+    assert "/" not in raw
+
+
+def test_raw_logs_path_windows_drive_only_path_uses_backslash():
+    # Буква диска без обратных слэшей в исходном пути — всё равно Windows-путь.
+    stand = Stand(name="s", stand_dir="D:/BPMSoft/stand")
+    assert raw_logs_path(stand, source="stand") == "D:\\BPMSoft\\stand\\logs"
+
+
+def test_raw_logs_path_unc_path_stays_unc():
+    stand = Stand(name="s", stand_dir="\\\\srv\\share\\stand")
+    raw = raw_logs_path(stand, source="stand")
+    assert raw == "\\\\srv\\share\\stand\\logs"
+    assert "/" not in raw
+
+
+def test_raw_logs_path_bpmkit_windows_style_keeps_backslashes():
+    stand = Stand(name="s", stand_dir="/opt/s", extra={"docs_folder": "C:\\projects\\demo"})
+    raw = raw_logs_path(stand, source="bpmkit")
+    assert raw == "C:\\projects\\demo\\logs"
+    assert "/" not in raw
+
+
+# --- logs_unavailable_reason: четыре ветки ---
+
+
+def test_logs_unavailable_reason_path_not_set():
+    stand = Stand(name="s", stand_dir="")
+    assert logs_unavailable_reason(stand, "stand") == "путь не задан"
+
+
+def test_logs_unavailable_reason_agent_stand_does_not_lie_about_remote_fs():
+    stand = Stand(
+        name="remote",
+        transport=Transport.AGENT,
+        agent_url="https://stand-a:8765",
+        stand_dir="/mnt/composers/bpmsoft/stand-a/app",
+    )
+    reason = logs_unavailable_reason(stand, "stand")
+    assert "каталог не найден" not in reason
+    assert "на хосте стенда" in reason
+    assert reason.endswith("/mnt/composers/bpmsoft/stand-a/app/logs")
+
+
+def test_logs_unavailable_reason_local_stand_says_dir_not_found(tmp_path):
+    stand = Stand(name="s", stand_dir=str(tmp_path))
+    reason = logs_unavailable_reason(stand, "stand")
+    assert reason.startswith("каталог не найден — ")
+    assert str(tmp_path) in reason
+
+
+def test_logs_unavailable_reason_unknown_source_raises():
+    with pytest.raises(ValueError):
+        logs_unavailable_reason(Stand(name="s", stand_dir="/opt/s"), "nope")
+
+
+def test_logs_unavailable_reason_permission_branch_message(monkeypatch, tmp_path):
+    """
+    Каталог стенда есть, но перечислить его нельзя (нет права чтения), а
+    подкаталог логов назван не ``logs``/``Logs`` — значит прямые проверки его
+    не нашли, а листинг запрещён. «Каталог не найден» здесь было бы неверным
+    диагнозом: мы просто не смогли посмотреть.
+    """
+    from standkit_hub import logs_browser as _lb
+
+    monkeypatch.setattr(_lb, "scan_denied", lambda base: True)
+    stand = Stand(name="s", stand_dir=str(tmp_path))
+    reason = logs_unavailable_reason(stand, "stand")
+
+    assert reason.startswith("нет прав на чтение каталога ")
+    assert str(tmp_path) in reason
+    assert "каталог не найден" not in reason
+
+
+def test_logs_unavailable_reason_on_real_non_listable_dir(tmp_path):
+    """То же на настоящем каталоге без права чтения (там, где ОС это позволяет)."""
+    base = tmp_path / "stand"
+    base.mkdir()
+    (base / "ЖурналыСтенда").mkdir()  # написание, которого нет среди прямых проверок
+    os.chmod(base, 0o311)  # -wx: пройти можно, перечислить нельзя (владельцу — тоже)
+    try:
+        stand = Stand(name="s", stand_dir=str(base))
+        assert resolve_logs_dir(stand, "stand") is None
+        reason = logs_unavailable_reason(stand, "stand")
+        listable = _is_listable(base)
+    finally:
+        os.chmod(base, 0o755)
+
+    if listable:  # root / Windows: перечисление доступно, каталога логов и правда нет
+        assert reason.startswith("каталог не найден — ")
+    else:
+        assert reason.startswith("нет прав на чтение каталога ")
+        assert str(base) in reason
+
+
+def test_non_listable_stand_dir_with_logs_subdir_still_resolves(tmp_path):
+    # Обратная сторона той же ситуации: каталог с типовым именем находится
+    # даже без права листинга — до этой ветки дело не доходит.
+    base = tmp_path / "stand"
+    base.mkdir()
+    (base / "Logs").mkdir()
+    os.chmod(base, 0o311)
+    try:
+        assert resolve_logs_dir(Stand(name="s", stand_dir=str(base)), "stand") == base / "Logs"
+    finally:
+        os.chmod(base, 0o755)
+
+
+def test_logs_unavailable_reason_permission_branch_not_used_for_explicit_logs_dir(tmp_path, monkeypatch):
+    # При явном logs_dir перебора каталога нет вовсе — причина обязана остаться
+    # прежней («каталог не найден»), даже если stand_dir нечитаем.
+    from standkit_hub import logs_browser as _lb
+
+    monkeypatch.setattr(_lb, "scan_denied", lambda base: True)
+    stand = Stand(name="s", stand_dir=str(tmp_path), logs_dir=str(tmp_path / "нет-такого"))
+    reason = logs_unavailable_reason(stand, "stand")
+    assert reason.startswith("каталог не найден — ")

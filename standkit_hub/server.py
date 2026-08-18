@@ -120,14 +120,30 @@ _REGISTER_ALLOWED_FIELDS = {
     "transport",
     "host_kind",
     "stand_dir",
+    "logs_dir",
     "stand_host",
     "stand_port",
+    # Схема пробы/ссылки «Открыть стенд» и проверка сертификата. Появились в
+    # модели в 0.7.0, но в белый список тогда сознательно не попали, и стенд за
+    # TLS настраивался только правкой projects.json руками (GAP-001).
+    "stand_scheme",
+    "verify_tls",
     "db_type",
     "db_host",
     "db_port",
     "db_name",
+    # Адрес Redis: до 0.8.0 жил нетипизированными ключами в extra, в форме его
+    # не было вовсе, и «не настроено» было неотличимо от «не поддержано» (GAP-003).
+    "redis_host",
+    "redis_port",
     "agent_url",
     "agent_secret_ref",
+    # Доверие к сертификату АГЕНТА (канал «хаб → агент»), не путать с
+    # stand_scheme/verify_tls выше — те про пробу самого стенда. Без этой пары
+    # агент с самоподписанным сертификатом подключался только через
+    # SSL_CERT_FILE в окружении процесса хаба (GAP-008).
+    "agent_ca",
+    "agent_verify_tls",
     "iis_site",
     "iis_app_pool",
     "docker_container",
@@ -275,8 +291,13 @@ def _redis_from_registry(stand: Stand) -> Optional[dict]:
     if db is None:
         return None
 
-    host = stand.extra.get("redis_host") or nested.get("host") or "127.0.0.1"
-    port_raw = stand.extra.get("redis_port")
+    # Поля модели в приоритете, ``extra`` — фолбэк для реестров, заполненных до
+    # 0.8.0 (тогда redis_host/redis_port были нетипизированными ключами extra,
+    # см. GAP-003). Тот же порядок, что в standkit.health::_probe_redis.
+    host = stand.redis_host or stand.extra.get("redis_host") or nested.get("host") or "127.0.0.1"
+    port_raw = stand.redis_port or None
+    if port_raw is None:
+        port_raw = stand.extra.get("redis_port")
     if port_raw is None:
         port_raw = nested.get("port")
     try:
@@ -470,9 +491,21 @@ def _stand_entry(name: str, stand: Stand, status) -> dict:
         "name": name,
         "transport": stand.transport.value,
         "status": status_dict,
-        "http": {"url": http_url, "state": http_state},
+        # ``reason`` у http/redis — тот же приём, что у process.reason: без него
+        # наружу уходил голый "down"/"—", и оператор не мог отличить закрытый
+        # порт от TLS-ошибки, а «не настроено» от «настроено, но недоступно»
+        # (GAP-002, GAP-003). Источник — StandStatus.details, см. health.check_stand.
+        "http": {
+            "url": http_url,
+            "state": http_state,
+            "reason": (status.details.get("http_reason") if status else None),
+        },
         "db": {"name": stand.db_name or None, "state": db_state},
-        "redis": {"number": _redis_number(stand), "state": redis_state},
+        "redis": {
+            "number": _redis_number(stand),
+            "state": redis_state,
+            "reason": (status.details.get("redis_reason") if status else None),
+        },
         "process": {
             "state": process_state,
             "transport": stand.transport.value,
@@ -938,8 +971,11 @@ def make_handler(
             label = _LOG_SOURCE_LABELS[source]
             logs_dir = logs_browser.resolve_logs_dir(stand, source=source)
             if logs_dir is None:
-                raw = logs_browser.raw_logs_path(stand, source)
-                detail = "путь не задан" if not raw else f"каталог не найден — {raw}"
+                # Для transport=agent каталог живёт на ЧУЖОЙ файловой системе,
+                # и локальная проверка «не найден» технически верна, но
+                # бесполезна — logs_unavailable_reason говорит это прямо
+                # (GAP-006, п.4).
+                detail = logs_browser.logs_unavailable_reason(stand, source)
                 self._send_json(
                     200,
                     {
@@ -1258,7 +1294,7 @@ def make_handler(
                     continue  # пустые строки не пишем поверх дефолтов Stand
                 data[key] = value
 
-            for int_field in ("stand_port", "db_port"):
+            for int_field in ("stand_port", "db_port", "redis_port"):
                 if int_field in data:
                     try:
                         data[int_field] = int(data[int_field])
@@ -1266,6 +1302,32 @@ def make_handler(
                         errors.append(f"{int_field} должен быть числом")
                         bad_fields.append(int_field)
                         data.pop(int_field, None)
+
+            # Булевы поля формы (обе «галочки проверки сертификата»: verify_tls
+            # — проба СТЕНДА, agent_verify_tls — канал до АГЕНТА). Чекбокс
+            # присылает настоящий JSON-bool (см. app.js::collectRegisterPayload),
+            # но реестр правят и внешние инструменты: принимаем "true"/"false"
+            # строкой, а всё остальное — явная ошибка, а не молчаливый дефолт
+            # true (иначе оператор решит, что проверку он выключил, а он нет).
+            for bool_field in ("verify_tls", "agent_verify_tls"):
+                if bool_field not in data:
+                    continue
+                raw_verify = data[bool_field]
+                if isinstance(raw_verify, bool):
+                    continue
+                if isinstance(raw_verify, str) and raw_verify.strip().lower() in (
+                    "true", "false", "1", "0", "yes", "no", "y", "n",
+                ):
+                    data[bool_field] = raw_verify.strip().lower() in ("true", "1", "yes", "y")
+                else:
+                    errors.append(f"{bool_field} должен быть true или false")
+                    bad_fields.append(bool_field)
+                    data.pop(bool_field, None)
+
+            if "stand_scheme" in data and str(data["stand_scheme"]).lower() not in ("http", "https"):
+                errors.append(f"недопустимое значение stand_scheme: {data['stand_scheme']!r}")
+                bad_fields.append("stand_scheme")
+                data.pop("stand_scheme", None)
 
             valid_transports = {t.value for t in Transport}
             if "transport" in data and data["transport"] not in valid_transports:

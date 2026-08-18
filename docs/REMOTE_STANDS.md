@@ -113,7 +113,9 @@ python -m venv C:\ProgramData\standkit\venv
 C:\ProgramData\standkit\venv\Scripts\pip install standkit
 ```
 
-Свежий `main` до релиза — `pip install "git+https://github.com/thinkquattro/BPMkitStand.git"`.
+Конкретная версия (в том числе откат) — `pip install "standkit==0.6.1"`; список выпусков —
+на [PyPI](https://pypi.org/project/standkit/). **Версия агента и версия хаба могут различаться**
+— HTTP-контракт обратно совместим (проверено: хаб 0.6.1 ↔ агент 0.7.0).
 
 ### 2. Подготовить реестр на хосте агента
 

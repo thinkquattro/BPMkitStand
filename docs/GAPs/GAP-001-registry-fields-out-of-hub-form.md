@@ -3,7 +3,17 @@
 - **Область:** хаб (форма регистрации), реестр
 - **Приоритет:** высокий
 - **Заведён:** 18.08.2026 (живая приёмка агента на Linux)
-- **Статус:** открыт
+- **Статус:** ✅ закрыт — 0.8.0 (не выпущено), PR #PRNUM
+- **Как закрыт:** `stand_scheme` (select `http`/`https`) и `verify_tls` (чекбокс,
+  виден только при `https`) добавлены в оба белых списка
+  (`standkit_hub/web/app.js::_REGISTER_FIELD_NAMES`,
+  `standkit_hub/server.py::_REGISTER_ALLOWED_FIELDS`) и в разметку формы.
+  `collectRegisterPayload` получил ветку для чекбокса (`input.checked`) и
+  правило «поле скрытого условного блока не отправляется вовсе» — выключенный
+  флаг больше не приезжает как отсутствующее поле с молчаливым дефолтом `true`.
+  Сервер валидирует `verify_tls` как булево, а `stand_scheme` — как `http`/`https`.
+  Вместе с этим из формы задаются `redis_host`/`redis_port`, `logs_dir` и
+  (см. [GAP-008](GAP-008-agent-cert-trust-on-hub.md)) `agent_ca`/`agent_verify_tls`.
 
 ## Симптом
 

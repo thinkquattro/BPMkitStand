@@ -45,7 +45,7 @@ import re
 import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlparse, parse_qs
 
 from standkit import health, lifecycle
@@ -369,6 +369,7 @@ def run_server(
     audit_log_path: Optional[Path] = None,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     max_logs_n: int = DEFAULT_MAX_LOGS_N,
+    on_ready: Optional[Callable[[], None]] = None,
 ) -> None:
     """
     Запускает HTTP(S)-сервер агента (блокирующий вызов — рассчитан на запуск
@@ -378,6 +379,14 @@ def run_server(
     вызывающая сторона передаёт non-loopback host без TLS и без
     ``insecure=True`` — старт прерывается ``InsecureBindError`` ДО открытия
     сокета (см. security.validate_bind_security).
+
+    ``on_ready`` — колбэк «сокет привязан», вызывается РОВНО ОДИН РАЗ после
+    фактической привязки сокета (и, при TLS, после ``wrap_socket``) и до входа
+    в ``serve_forever``. Нужен, чтобы вызывающая сторона печатала «слушаю …»
+    только тогда, когда агент действительно встал на порт: раньше эта строка
+    печаталась ДО ``run_server``, и на занятом порту оператор получал в stdout
+    «слушаю …», а в stderr — отказ старта (GAP-007). По умолчанию ``None``
+    (тесты и встраивание вызывают ``run_server`` без колбэка).
     """
     tls_enabled = bool(tls_cert and tls_key)
     _security.validate_bind_security(host, tls_enabled=tls_enabled, insecure=insecure)
@@ -406,11 +415,17 @@ def run_server(
         max_body_bytes=max_body_bytes,
         max_logs_n=max_logs_n,
     )
+    # Сокет привязывается здесь, в конструкторе ThreadingHTTPServer
+    # (socketserver.TCPServer делает bind+listen): всё, что может помешать
+    # старту — занятый порт (EADDRINUSE), нехватка прав (EACCES), битый
+    # сертификат в build_ssl_context — вылетает ДО вызова on_ready.
     httpd = ThreadingHTTPServer((host, port), handler_cls)
     if tls_enabled:
         ctx = _security.build_ssl_context(tls_cert, tls_key, tls_client_ca)
         httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     try:
+        if on_ready is not None:
+            on_ready()
         httpd.serve_forever()
     finally:
         httpd.server_close()

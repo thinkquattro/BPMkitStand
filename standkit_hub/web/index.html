@@ -148,19 +148,72 @@
             <label>Ссылка на секрет агента (agent_secret_ref)
               <input type="text" name="agent_secret_ref" />
             </label>
+            <!-- Доверие к сертификату АГЕНТА. Отдельно от verify_tls ниже, и в
+                 подсказках это сказано прямым текстом: оператор, нашедший
+                 verify_tls, обоснованно считает, что уже отключил проверку
+                 канала до агента, — на этом и построен GAP-008. -->
+            <label>Сертификат агента (agent_ca)
+              <input type="text" name="agent_ca" placeholder="/etc/standkit/agent.crt" />
+              <small class="field-hint">
+                Путь к файлу сертификата (или CA-бандлу) агента НА МАШИНЕ, где работает
+                дашборд. Нужен, если агент поднят с самоподписанным сертификатом: без
+                него канал «хаб → агент» падает с CERTIFICATE_VERIFY_FAILED.
+              </small>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" name="agent_verify_tls" checked />
+              Проверять сертификат агента (agent_verify_tls)
+            </label>
+            <small class="field-hint field-hint-warn">
+              Это НЕ то же самое, что «Проверять сертификат» (verify_tls) ниже: тот флаг
+              относится к пробе САМОГО СТЕНДА. Выключать проверку — только для
+              дев-контура; правильный путь — указать agent_ca.
+            </small>
           </div>
 
           <label>Каталог стенда (stand_dir)
             <input type="text" name="stand_dir" />
           </label>
 
+          <label>Каталог логов (logs_dir)
+            <input type="text" name="logs_dir" />
+            <small class="field-hint">
+              Необязательное: пусто — ищется подкаталог <code>logs</code> внутри каталога
+              стенда, без учёта регистра.
+            </small>
+          </label>
+
           <div class="form-row">
+            <label>Схема
+              <select name="stand_scheme">
+                <option value="http" selected>http</option>
+                <option value="https">https</option>
+              </select>
+            </label>
             <label>Host
               <input type="text" name="stand_host" value="127.0.0.1" />
             </label>
             <label>Port
               <input type="number" name="stand_port" min="1" max="65535" value="5000" />
             </label>
+          </div>
+
+          <!-- Проверка сертификата имеет смысл ТОЛЬКО при stand_scheme=https:
+               при http флаг ничего не значит и только путает оператора,
+               поэтому блок условный — по той же механике data-when-*, что у
+               agent_*/iis_*/docker_*/k8s_* (см.
+               app.js::updateRegisterConditionalFields). Пока блок скрыт,
+               значение чекбокса на сервер не уходит вовсе и остаётся дефолт
+               модели verify_tls=true. -->
+          <div class="register-conditional" data-when-scheme="https" hidden>
+            <label class="checkbox-label">
+              <input type="checkbox" name="verify_tls" checked />
+              Проверять сертификат (verify_tls)
+            </label>
+            <small class="field-hint field-hint-warn">
+              Выключение — послабление для дев-контуров с self-signed сертификатом.
+              Для прод-стендов флаг должен оставаться включённым.
+            </small>
           </div>
 
           <!-- Стенд, развёрнутый в IIS мимо диспетчера, в реестре не имеет ни
@@ -219,6 +272,22 @@
           <label>DB name
             <input type="text" name="db_name" />
           </label>
+
+          <div class="form-row">
+            <label>Redis host
+              <input type="text" name="redis_host" />
+            </label>
+            <label>Redis port
+              <input type="number" name="redis_port" min="1" max="65535" />
+            </label>
+          </div>
+          <small class="field-hint">
+            Адрес — <strong>с точки зрения хоста, где выполняется проба</strong> (ядро на
+            этой машине либо агент на хосте стенда), а не машины оператора. Redis внутри
+            compose без проброса порта наружу даст <code>down</code>, а не
+            <code>unknown</code>. Задавать нужно оба поля сразу: половина пары —
+            ошибка регистрации.
+          </small>
         </div>
         <div class="modal-footer">
           <button type="button" id="register-modal-cancel-btn" class="secondary">Отмена</button>

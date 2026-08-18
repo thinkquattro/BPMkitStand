@@ -21,7 +21,8 @@
 |---|---|---|---|
 | `iis` | `iis_site` | одно из двух (`iis_site` и/или `iis_app_pool`) | имя IIS-сайта |
 | `iis` | `iis_app_pool` | одно из двух | имя Application Pool (приоритетно для recycle/state) |
-| `iis` | `iis_stdout_log_dir` | опционально | папка stdout-логов ASP.NET Core (иначе `<stand_dir>\logs`) |
+| `iis` | `iis_stdout_log_dir` | опционально | папка stdout-логов ASP.NET Core (иначе — подкаталог `logs` внутри `stand_dir`, имя ищется **без учёта регистра**: BPMSoft на Linux пишет в `Logs`) |
+| любой | `logs_dir` | опционально | явный каталог логов, если он лежит не подкаталогом `stand_dir`. Приоритет ниже `iis_stdout_log_dir` для `host_kind=iis` |
 | `docker` | `docker_container` | контейнер ИЛИ compose-пара | имя/ID контейнера (одиночный режим) |
 | `docker` | `docker_compose_file` | вместе с `docker_compose_service` | путь к compose-файлу |
 | `docker` | `docker_compose_service` | вместе с `docker_compose_file` | имя сервиса в compose |

@@ -6,16 +6,24 @@
 ДВА ИСТОЧНИКА логов на стенд (``source``, см. ``resolve_logs_dir``):
 
 - ``"stand"`` — логи самого стенда (платформа BPMSoft), пишет их движок,
-  каталог ``<stand.stand_dir>/logs`` (папка ``logs`` в корне стенда). Это
+  каталог логов в корне стенда: явный ``Stand.logs_dir``, если задан, иначе
+  подкаталог ``logs``/``Logs``/… внутри ``stand.stand_dir``, найденный БЕЗ
+  УЧЁТА РЕГИСТРА (общий резолв ``standkit.logs.stand_logs_dir``). Это
   ближе всего к тому, что видно в PS-окне/консоли самого стенда — дефолт
   для панели "Текущее состояние".
 - ``"bpmkit"`` — логи BPMkit-ПРОЕКТА (scaffold, ``project_scaffold``): не
   логи стенда и НЕ ``Stand.extra["logs_path"]`` (та запись указывает на тот
   же каталог, что и ``"stand"``, — путать источники не нужно), а подпапка
   ``logs`` внутри папки проекта ``Stand.extra["docs_folder"]``
-  (``<docs_folder>/logs``). Туда пишутся логи разработки поверх стенда;
-  если ``docs_folder`` в записи стенда не задан (провижининг без
-  project_scaffold), источник недоступен целиком.
+  (``<docs_folder>/logs``, имя подкаталога — тоже без учёта регистра). Туда
+  пишутся логи разработки поверх стенда; если ``docs_folder`` в записи
+  стенда не задан (провижининг без project_scaffold), источник недоступен
+  целиком.
+
+Имя каталога логов НИГДЕ здесь не зашито строкой — оно резолвится по факту
+через ``standkit.logs`` (единая логика с ``standkit.hosting.IisBackend``,
+см. GAP-006): BPMSoft пишет в ``Logs``, и на регистрозависимой ФС жёсткое
+``"logs"`` давало «каталог не найден» при живых логах.
 
 Важно отличать оба источника от ``standkit.lifecycle.log_path``/
 ``standkit.logs`` (см. ``standkit_hub.server._api_stand_logs``) — тот лог
@@ -35,10 +43,11 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 
-from standkit.models import Stand
+from standkit.logs import LOGS_DIR_NAME, find_logs_subdir, scan_denied, stand_logs_dir
+from standkit.models import Stand, Transport
 
 # Допустимые значения ``source`` — единственный источник истины для валидации
 # как здесь, так и в standkit_hub.server (query-параметр ``source``).
@@ -47,20 +56,64 @@ LOG_SOURCES = ("stand", "bpmkit")
 DEFAULT_LOG_SOURCE = "stand"
 
 
+def _looks_windows_path(base: str) -> bool:
+    """Признак Windows-пути: есть обратный слэш (в т.ч. UNC ``\\\\server\\share``)
+    либо путь начинается с буквы диска (``C:``)."""
+    if "\\" in base:
+        return True
+    return len(base) >= 2 and base[1] == ":" and base[0].isalpha()
+
+
+def _join_for_display(base: str, name: str) -> str:
+    """
+    Склеивает ``<base>/<name>`` ДЛЯ ПОКАЗА пользователю, сохраняя стиль
+    разделителей исходного пути — В ОБЕ СТОРОНЫ.
+
+    Зачем не просто ``Path(base) / name``: путь стенда с ``transport=agent``
+    описывает файловую систему УДАЛЁННОГО хоста, а собирается он на машине
+    хаба, и стили разделителей у них могут не совпадать. ``pathlib.Path`` —
+    это всегда путь ТЕКУЩЕЙ ОС, поэтому оба направления давали кашу:
+
+    - POSIX-путь стенда на Windows-хабе → ``\\mnt\\composers\\…`` (GAP-006);
+    - Windows-путь стенда на Linux-хабе → ``C:\\BPMSoft\\stand/logs`` —
+      смесь разделителей, которую оператор не может скопировать никуда.
+
+    Поэтому стиль выбирается ПО САМОМУ ПУТИ, а не по ОС хаба: похоже на
+    Windows (буква диска или обратные слэши) — ``PureWindowsPath``; начинается
+    со слэша — ``PurePosixPath``; всё прочее (относительные пути) — как раньше,
+    через ``Path``, в нативном для текущей ОС стиле.
+    """
+    if _looks_windows_path(base):
+        return str(PureWindowsPath(base) / name)
+    if base.startswith("/"):
+        return str(PurePosixPath(base) / name)
+    return str(Path(base) / name)
+
+
 def raw_logs_path(stand: Stand, source: str = DEFAULT_LOG_SOURCE) -> Optional[str]:
     """
     "Сырой" (не проверенный на существование) путь к каталогу логов для
     выбранного источника — используется только для человекочитаемых сообщений
     ("каталог не найден — <путь>"), когда ``resolve_logs_dir`` вернул ``None``.
 
+    Для источника "stand" отдаёт явный ``stand.logs_dir``, если он задан в
+    реестре (иначе сообщение показывало бы не тот путь, который на самом деле
+    проверялся), иначе — ``<stand_dir>/logs`` с ИМЕНЕМ ПО УМОЛЧАНИЮ: реального
+    каталога нет ни в каком регистре, показывать нечего кроме ожидаемого имени.
+
+    Разделители — в стиле исходного пути (см. ``_join_for_display``), чтобы
+    POSIX-путь удалённого стенда не превращался в ``\\mnt\\…`` на Windows-хабе.
+
     Бросает ``ValueError`` на неизвестный ``source`` — та же дисциплина, что
     и у ``resolve_logs_dir``.
     """
     if source == "stand":
-        return str(Path(stand.stand_dir) / "logs") if stand.stand_dir else None
+        if stand.logs_dir:
+            return stand.logs_dir
+        return _join_for_display(stand.stand_dir, LOGS_DIR_NAME) if stand.stand_dir else None
     if source == "bpmkit":
         docs_folder = stand.extra.get("docs_folder")
-        return str(Path(docs_folder) / "logs") if docs_folder else None
+        return _join_for_display(docs_folder, LOGS_DIR_NAME) if docs_folder else None
     raise ValueError(f"неизвестный источник логов: {source!r}")
 
 
@@ -68,29 +121,83 @@ def resolve_logs_dir(stand: Stand, source: str = DEFAULT_LOG_SOURCE) -> Optional
     """
     Резолвит каталог логов стенда для выбранного источника:
 
-    - ``source="stand"`` (по умолчанию) — ``<stand.stand_dir>/logs``;
-    - ``source="bpmkit"`` — ``<stand.extra["docs_folder"]>/logs`` (логи
-      BPMkit-проекта, папка ``logs`` внутри project-scaffold, НЕ
+    - ``source="stand"`` (по умолчанию) — явный ``stand.logs_dir``, иначе
+      подкаталог ``logs`` внутри ``stand.stand_dir``, найденный без учёта
+      регистра (``standkit.logs.stand_logs_dir``);
+    - ``source="bpmkit"`` — подкаталог ``logs`` внутри
+      ``stand.extra["docs_folder"]``, тоже без учёта регистра (логи
+      BPMkit-проекта, папка внутри project-scaffold, НЕ
       ``stand.extra["logs_path"]``).
 
-    Возвращает ``None``, если путь не задан (для "stand" — пуст сам
-    ``stand_dir``; для "bpmkit" — не задан ``docs_folder``), либо не
-    существует, либо указывает не на каталог —
-    вызывающая сторона (хаб) обязана отдать понятное сообщение "лог
-    недоступен", а не падать с исключением.
+    Возвращает ``None``, если путь не задан (для "stand" — пусты и
+    ``logs_dir``, и ``stand_dir``; для "bpmkit" — не задан ``docs_folder``),
+    либо каталога нет, либо путь указывает не на каталог — вызывающая сторона
+    (хаб) обязана отдать понятное сообщение "лог недоступен" (см.
+    ``logs_unavailable_reason``), а не падать с исключением.
 
     Бросает ``ValueError`` на неизвестный ``source`` — это ошибка вызывающего
     кода (например, невалидированный query-параметр), а не штатная ситуация
     "лога нет"; HTTP-слой (``standkit_hub.server``) обязан провалидировать
     ``source`` ДО вызова и вернуть 400, не давая исключению дойти сюда.
     """
+    if source == "stand":
+        return stand_logs_dir(stand)
+    if source == "bpmkit":
+        docs_folder = stand.extra.get("docs_folder")
+        return find_logs_subdir(docs_folder) if docs_folder else None
+    raise ValueError(f"неизвестный источник логов: {source!r}")
+
+
+def _scan_base(stand: Stand, source: str) -> Optional[str]:
+    """
+    Каталог, СОДЕРЖИМОЕ которого перебирает резолв логов для этого источника
+    ("stand" — корень стенда, "bpmkit" — папка проекта). ``None``, если
+    перебора не будет: у "stand" задан явный ``logs_dir`` — он используется
+    как есть, без поиска подкаталога.
+    """
+    if source == "stand":
+        return None if stand.logs_dir else (stand.stand_dir or None)
+    if source == "bpmkit":
+        return stand.extra.get("docs_folder") or None
+    raise ValueError(f"неизвестный источник логов: {source!r}")
+
+
+def logs_unavailable_reason(stand: Stand, source: str = DEFAULT_LOG_SOURCE) -> str:
+    """
+    Человекочитаемая причина, почему каталог логов недоступен — текст для
+    сообщения хаба "лог недоступен (источник «…»: <причина>)". Вызывать
+    имеет смысл только после ``resolve_logs_dir(...) is None``.
+
+    Четыре ветки:
+
+    1. путь вообще не задан в записи стенда → "путь не задан";
+    2. ``transport=agent`` → каталог логов принадлежит файловой системе
+       УДАЛЁННОГО хоста, а хаб проверяет существование локально: на своей
+       машине он такого пути не увидит никогда. Писать в этом случае "каталог
+       не найден" — врать про чужую ФС, поэтому причина формулируется честно;
+    3. каталог стенда есть, но его НЕЛЬЗЯ ПЕРЕЧИСЛИТЬ (нет права чтения —
+       типичный ``chmod 0711`` на ``/opt/<app>``) → так и говорим. Подкаталог
+       с точным именем ``logs``/``Logs`` в такой ситуации всё равно находится
+       (прямая проверка пути, см. ``standkit.logs.find_logs_subdir``), значит
+       сюда мы попадаем, только когда каталог логов назван иначе: "не найден"
+       было бы неверным диагнозом — мы просто не смогли посмотреть;
+    4. иначе (локальный стенд) → "каталог не найден — <путь>".
+
+    Путь берётся из ``raw_logs_path`` (стиль разделителей — как в записи
+    стенда). Как и она, бросает ``ValueError`` на неизвестный ``source``.
+    """
     raw = raw_logs_path(stand, source)
     if not raw:
-        return None
-    p = Path(raw)
-    if not p.exists() or not p.is_dir():
-        return None
-    return p
+        return "путь не задан"
+    if stand.transport == Transport.AGENT:
+        return f"каталог логов живёт на хосте стенда; хаб проверяет его локально и потому не видит — {raw}"
+    base = _scan_base(stand, source)
+    if base and scan_denied(base):
+        return (
+            f"нет прав на чтение каталога {base} — перечислить его содержимое "
+            f"и найти подкаталог логов не удалось (ожидался {raw})"
+        )
+    return f"каталог не найден — {raw}"
 
 
 def start_of_today_ts() -> float:

@@ -881,12 +881,20 @@ class IisBackend:
     def read_logs(
         self, stand: Stand, n: int = 100, *, log_dir: Optional[Path] = None
     ) -> Optional[list[str]]:
-        directory = (
+        from standkit import logs as _logs  # локальный импорт — избегаем цикла
+
+        # Приоритет прежний: явный iis_stdout_log_dir из реестра сильнее любого
+        # автопоиска. Без него — ОБЩИЙ резолв (standkit.logs.stand_logs_dir):
+        # он учитывает stand.logs_dir и ищет подкаталог логов по факту, без
+        # учёта регистра. Жёсткое ``stand_dir / "logs"`` тут не годилось: на
+        # POSIX-контуре каталог называется "Logs", и read_logs возвращал None
+        # при живых логах (GAP-006).
+        directory: Optional[Path] = (
             Path(stand.iis_stdout_log_dir)
             if stand.iis_stdout_log_dir
-            else Path(stand.stand_dir) / "logs"
+            else _logs.stand_logs_dir(stand)
         )
-        if not directory.exists() or not directory.is_dir():
+        if directory is None or not directory.exists() or not directory.is_dir():
             return None
         log_files = sorted(directory.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not log_files:
@@ -903,8 +911,6 @@ class IisBackend:
             )
         if not log_files:
             return None
-        from standkit import logs as _logs  # локальный импорт — избегаем цикла
-
         return _logs.tail(log_files[0], n)
 
 

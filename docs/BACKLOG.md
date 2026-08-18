@@ -30,14 +30,19 @@
 |------|--------|-----------------|
 | Глубокая проба БД (`SELECT 1` через psycopg2/pyodbc) | заглушка, всегда `SKIPPED`; флаг `deep_db` из хаба не передаётся | `standkit/health.py::db_deep_check`, параметр `check_stand(deep_db=…)` |
 | Глубокая проба Redis (`PING` через redis-py) | заглушка, всегда `SKIPPED` | `standkit/health.py::redis_deep_check`, `check_stand(deep_redis=…)` |
-| `stand_scheme` / `verify_tls` в форме регистрации дашборда | поля есть в реестре и в пробе, но форма регистрации построена по фиксированному белому списку полей — задать схему можно только правкой `projects.json`. Разобрано в [GAP-001](GAPs/GAP-001-registry-fields-out-of-hub-form.md) | `standkit_hub/server.py::_REGISTER_ALLOWED_FIELDS`, `standkit_hub/web/app.js::_REGISTER_FIELD_NAMES` |
-| Причина отказа HTTP-пробы | `down` возвращается без текста: «порт закрыт», «TLS-ошибка» и «таймаут» неразличимы в дашборде (у пробы процесса аналог есть — `details['process_reason']`). См. [GAP-002](GAPs/GAP-002-http-probe-down-not-explained.md) | `standkit/health.py::_probe_http`, `http_ok` |
-| Адрес Redis (`redis_host` / `redis_port`) | не поля модели, а нетипизированные ключи `Stand.extra`; в форме регистрации и `projects.sample.json` их нет, «не настроено» неотличимо от «не поддержано». См. [GAP-003](GAPs/GAP-003-redis-endpoint-in-extra.md) | `standkit/health.py::_probe_redis`, `standkit/models.py::Stand.extra` |
-| Имя каталога логов | зашито строкой `"logs"`; на Linux каталог BPMSoft называется `Logs` и не находится (на Windows проходит из-за регистронезависимой ФС). Плюс путь POSIX-стенда собирается `WindowsPath` на хабе. См. [GAP-006](GAPs/GAP-006-log-dir-case-and-separator.md) | `standkit_hub/logs_browser.py::raw_logs_path`, `standkit/hosting.py::IisBackend.read_logs` |
 | `last_deploy` (состояние последнего деплоя) | всегда `UNKNOWN`, источник данных не определён, в UI не выводится | `standkit/health.py::check_stand` (комментарий `last_deploy`), `standkit/models.py::StandStatus.last_deploy` |
 
 Рабочие пробы (без заглушек): процесс (pid/бэкенд), HTTP, БД/Redis по **открытому
-TCP-порту** — их достаточно для дашборда.
+TCP-порту** — их достаточно для дашборда. Причина отказа HTTP-пробы и состояние
+Redis теперь объясняются словами (`details['http_reason']` / `['redis_reason']`),
+а не только цветом.
+
+**Снято отсюда в 0.8.0** (было в этом разделе, закрыто — см. [GAPs/](GAPs/README.md)):
+`stand_scheme`/`verify_tls` и `redis_host`/`redis_port` в форме регистрации
+([GAP-001](GAPs/GAP-001-registry-fields-out-of-hub-form.md),
+[GAP-003](GAPs/GAP-003-redis-endpoint-in-extra.md)), причина отказа HTTP-пробы
+([GAP-002](GAPs/GAP-002-http-probe-down-not-explained.md)), регистр имени
+каталога логов ([GAP-006](GAPs/GAP-006-log-dir-case-and-separator.md)).
 
 ## Жизненный цикл (kestrel)
 
@@ -82,7 +87,7 @@ TCP-порту** — их достаточно для дашборда.
 
 | Пункт | Статус |
 |------|--------|
-| **Агент на Linux** | **первая живая установка 18.08.2026** — Ubuntu 24.04 (`BPM-docker-test`), стенд `survey9` в Docker: установка через pipx, регистрация стенда из Python (`Registry.add_existing`), секреты через `STANDKIT_SECRET__*`, служба systemd, проверка API токеном. Вскрыла: жёсткую схему `http://` в HTTP-пробе (строка выше), отсутствие CLI регистрации (строка выше) и набор типовых ошибок оператора (PEP 668, забытый префикс секрета, владелец `agent.env`, `stand_host=0.0.0.0`, чтение реестра только при старте) — всё разобрано в кукбуке |
+| **Агент на Linux** | **первая живая установка 18.08.2026** — Ubuntu 24.04, стенд в Docker за self-signed HTTPS: установка через pipx, регистрация стенда из Python (`Registry.add_existing`), секреты через `STANDKIT_SECRET__*`, служба systemd, проверка API токеном. Вскрыла: жёсткую схему `http://` в HTTP-пробе (строка выше), отсутствие CLI регистрации (строка выше) и набор типовых ошибок оператора (PEP 668, забытый префикс секрета, владелец `agent.env`, `stand_host=0.0.0.0`, чтение реестра только при старте) — всё разобрано в кукбуке |
 | **Docker** бэкенд (одиночный контейнер + compose) | **живая приёмка проведена 17.08.2026** на Docker Engine 29.6.1: 50 проверок основного цикла (start/stop/restart по фактическому `State.StartedAt`, логи, health, идемпотентность, негативы, работа без `docker` в PATH) + 6 проверок граничных состояний (paused, crash-loop, exited, подстрочные имена сервисов, кириллица в логах). Вскрыла два ложных «стенд жив» — исправлены в этой же ветке (см. CHANGELOG) |
 | **k8s** бэкенд | **живая приёмка проведена 17.08.2026** на кластере k3s 1.30 (k3d): 28 проверок — scale/rollout restart с проверкой пересоздания подов, `readyReplicas`, `k8s_replicas`, логи, NodePort-проба, негативы по деплойменту/namespace/контексту/PATH. Вскрыла ложное «жив» при нуле реплик — исправлено |
 | **IIS** бэкенд | **живая приёмка проведена 17.08.2026** на настоящем стенде BPMSoft 1.9.1.2 (.NET Framework + PostgreSQL) в IIS 10 / .NET Framework 4.8: сайт `iis19` (порт 5081) + вложенное приложение `/0` + сайт-сосед на ТОМ ЖЕ пуле; 66 живых проверок (окружение и автодетект 13, жизненный цикл site-scoped 17, `w3wp` 7, логи 4, отсутствие elevation 10 + 4 кросс-платформенных, ручки хаба 6, граничные состояния канала управления 5). Вскрыла 4 дефекта (пул при автодетекте, `state:Unknown`, ложный диагноз «нет прав», логи в подпапках-датах) — исправлены в этой же ветке, см. CHANGELOG |

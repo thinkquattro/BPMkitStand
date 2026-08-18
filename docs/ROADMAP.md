@@ -5,7 +5,8 @@
 ссылками на код — [BACKLOG.md](BACKLOG.md). Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md).
 Решения — [adr/](adr/). История изменений — [CHANGELOG.md](CHANGELOG.md).
 
-Текущая версия на PyPI: **0.5.2**. Python ≥ 3.10, ядро и агент — stdlib-only.
+Текущая версия на PyPI: **0.7.0** ([все выпуски](https://pypi.org/project/standkit/)).
+Python ≥ 3.10, ядро и агент — stdlib-only. Карта документации — [README.md](README.md).
 
 ## ✅ Сделано
 
