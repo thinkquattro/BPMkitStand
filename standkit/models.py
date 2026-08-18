@@ -99,6 +99,13 @@ class Stand:
     dotnet: str = "dotnet"
     stand_host: str = "127.0.0.1"
     stand_port: int = 5000
+    # Схема health-пробы стенда. Стенды за TLS (типовой дев-контур BPMSoft за
+    # nginx/Kestrel с HTTPS) на http:// не отвечают вовсе, и проба врала «down»
+    # на живом стенде. Дефолт "http" полностью повторяет прежнее поведение.
+    stand_scheme: str = "http"
+    # Проверять ли цепочку сертификатов при stand_scheme=https. Для self-signed
+    # на дев-контурах — false, иначе проба падает на SSLCertVerificationError.
+    verify_tls: bool = True
 
     # --- База данных ---
     db_type: str = "postgres"
@@ -139,6 +146,10 @@ class Stand:
                 kwargs["transport"] = _coerce_transport(value)
             elif key == "host_kind":
                 kwargs["host_kind"] = _coerce_host_kind(value)
+            elif key == "stand_scheme":
+                kwargs["stand_scheme"] = _coerce_scheme(value)
+            elif key == "verify_tls":
+                kwargs["verify_tls"] = _coerce_bool(value, default=True)
             elif key in known:
                 kwargs[key] = value
             elif key == "name":
@@ -173,6 +184,8 @@ class Stand:
             errors.append("name не может быть пустым")
         if not self.stand_dir:
             errors.append("stand_dir не может быть пустым")
+        if str(self.stand_scheme).lower() not in ("http", "https"):
+            errors.append("stand_scheme должен быть http или https")
         if self.transport == Transport.AGENT:
             if not self.agent_url:
                 errors.append("transport=agent требует agent_url")
@@ -191,6 +204,30 @@ class Stand:
             if not self.k8s_deployment:
                 errors.append("host_kind=k8s требует k8s_deployment")
         return errors
+
+
+def _coerce_scheme(value: Any) -> str:
+    """
+    Приводит схему health-пробы к "http"/"https". Мусор из реестра не роняет
+    чтение — откатываемся на "http", а несоответствие поймает validate().
+    """
+    text = str(value).strip().lower()
+    return text if text in ("http", "https") else "http"
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    """
+    Терпимо читает булево из JSON: настоящий bool, а также строки вида
+    "true"/"false"/"1"/"0" (реестр правят руками и внешние инструменты).
+    """
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "y"):
+        return True
+    if text in ("false", "0", "no", "n"):
+        return False
+    return default
 
 
 def _coerce_transport(value: Any) -> Transport:

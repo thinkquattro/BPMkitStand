@@ -18,6 +18,7 @@ psycopg2/pyodbc/redis-py в обязательные зависимости яд
 from __future__ import annotations
 
 import socket
+import ssl
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -84,17 +85,35 @@ def process_running(
     return False
 
 
-def http_ok(url: str, *, timeout: float = HTTP_PROBE_TIMEOUT_SEC) -> bool:
+def http_ok(
+    url: str,
+    *,
+    timeout: float = HTTP_PROBE_TIMEOUT_SEC,
+    verify: bool = True,
+) -> bool:
     """
     Проверяет, отвечает ли HTTP(S)-эндпоинт (любой код ответа < 500 считается
     "живым" — стенд может честно отдавать 401/403 до логина, это не авария).
 
-    Сетевые ошибки (отказано в соединении, DNS, таймаут) → False, без исключений
-    наружу — это намеренно проба, а не операция, которая должна падать.
+    ``verify=False`` отключает проверку цепочки сертификатов — и ТОЛЬКО для
+    ``https://``-адресов. Это осознанное послабление для дев-контуров с
+    self-signed сертификатом: без него проба живого стенда за TLS падает в
+    SSLCertVerificationError и показывает ложный "down". Контекст строится
+    публичным ``ssl.create_default_context()`` с явным отключением проверок,
+    а не приватным ``ssl._create_unverified_context()``.
+
+    Сетевые ошибки (отказано в соединении, DNS, таймаут, невалидный
+    сертификат при verify=True) → False, без исключений наружу — это намеренно
+    проба, а не операция, которая должна падать.
     """
+    context = None
+    if not verify and url.lower().startswith("https://"):
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
     try:
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
             return resp.status < 500
     except urllib.error.HTTPError as exc:
         # Сервер ответил (пусть и ошибкой) — значит, живой.
@@ -206,8 +225,13 @@ def check_stand(
     def _probe_http() -> ProbeState:
         if not (stand.stand_host and stand.stand_port):
             return ProbeState.UNKNOWN
-        url = f"http://{stand.stand_host}:{stand.stand_port}{http_path}"
-        return ProbeState.OK if http_ok(url) else ProbeState.DOWN
+        scheme = (stand.stand_scheme or "http").lower()
+        url = f"{scheme}://{stand.stand_host}:{stand.stand_port}{http_path}"
+        return (
+            ProbeState.OK
+            if http_ok(url, verify=stand.verify_tls)
+            else ProbeState.DOWN
+        )
 
     def _probe_db() -> ProbeState:
         if not (stand.db_host and stand.db_port):
