@@ -8,7 +8,8 @@ projects.sample.json в корне репозитория) плюс универ
 - "local" — стенд поднимается локально текущим процессом standkit (subprocess,
   см. standkit.platform / standkit.lifecycle);
 - "agent" — стенд управляется через удалённый standkit_agent по HTTP
-  (используются agent_url / agent_secret_ref);
+  (используются agent_url / agent_secret_ref, а для TLS-канала до агента —
+  agent_ca / agent_verify_tls);
 - "ssh" / "winrm" — зарезервировано под будущие транспорты, СХЕМОЙ допускается,
   логика НЕ реализована (бэклог, см. docs/ARCHITECTURE.md).
 """
@@ -75,6 +76,25 @@ class Stand:
     transport: Transport = Transport.LOCAL
     agent_url: Optional[str] = None
     agent_secret_ref: Optional[str] = None
+    # Доверие к TLS-сертификату АГЕНТА — канал «хаб → агент» (standkit_hub.client).
+    #
+    # ЭТО НЕ ТО ЖЕ САМОЕ, что stand_scheme/verify_tls ниже: те описывают
+    # health-пробу САМОГО СТЕНДА (хаб/агент стучится в web-хост BPMSoft), а
+    # эта пара — управляющее HTTPS-соединение хаба с демоном standkit_agent.
+    # Пути разные, сертификаты разные, и оператор, выключивший verify_tls,
+    # ничего не менял для канала до агента (GAP-008: ровно на этом он и
+    # спотыкается — «я же снял проверку, почему всё равно
+    # CERTIFICATE_VERIFY_FAILED»).
+    #
+    # agent_ca — путь к сертификату агента (или CA-бандлу, которым он подписан)
+    # НА МАШИНЕ, где работает хаб; штатный способ доверять самоподписанному
+    # сертификату из кукбука по развёртыванию агента.
+    agent_ca: Optional[str] = None
+    # agent_verify_tls=False — осознанное отключение проверки цепочки для
+    # канала до агента (дев-контур). Отдельным флагом, а не «пустой agent_ca
+    # значит не проверять»: молчаливое отключение TLS-проверки по умолчанию —
+    # худшее, что можно сделать с управляющим каналом.
+    agent_verify_tls: bool = True
 
     # --- Хостинг стенда (см. ADR-0001, standkit.hosting) ---
     host_kind: HostKind = HostKind.KESTREL
@@ -95,6 +115,11 @@ class Stand:
 
     # --- Процесс стенда ---
     stand_dir: str = ""
+    # Явный каталог логов стенда. Пусто — резолвится по факту внутри stand_dir
+    # (см. standkit.logs.stand_logs_dir): имя подкаталога сравнивается БЕЗ
+    # УЧЁТА РЕГИСТРА, потому что BPMSoft на Linux пишет в "Logs", а на Windows
+    # регистронезависимая ФС всё это время прощала жёсткое "logs".
+    logs_dir: str = ""
     stand_dll: str = "BPMSoft.WebHost.dll"
     dotnet: str = "dotnet"
     stand_host: str = "127.0.0.1"
@@ -115,6 +140,13 @@ class Stand:
     db_user: str = ""
     db_password: str = ""
     secret_ref_db: Optional[str] = None
+
+    # --- Redis ---
+    # Адрес Redis С ТОЧКИ ЗРЕНИЯ ХОСТА, где выполняется проба (ядро или агент),
+    # а не с машины оператора. До 0.8.0 эти ключи жили нетипизированными в
+    # ``extra`` — чтение оттуда сохранено как фолбэк для старых реестров.
+    redis_host: str = ""
+    redis_port: int = 0
 
     # --- Администратор стенда ---
     admin_user: str = "Supervisor"
@@ -150,6 +182,15 @@ class Stand:
                 kwargs["stand_scheme"] = _coerce_scheme(value)
             elif key == "verify_tls":
                 kwargs["verify_tls"] = _coerce_bool(value, default=True)
+            elif key == "agent_verify_tls":
+                # Тем же терпимым чтением, что verify_tls: реестр правят руками,
+                # и "false" строкой должно означать false, а мусор — безопасный
+                # дефолт True (проверять), а не молчаливое отключение проверки.
+                kwargs["agent_verify_tls"] = _coerce_bool(value, default=True)
+            elif key == "redis_port":
+                # Реестр правят руками и внешние инструменты: "6379" строкой —
+                # частый случай. Мусор превращается в 0, и его ловит validate().
+                kwargs["redis_port"] = _coerce_int(value, default=0)
             elif key in known:
                 kwargs[key] = value
             elif key == "name":
@@ -189,6 +230,7 @@ class Stand:
         if self.transport == Transport.AGENT:
             if not self.agent_url:
                 errors.append("transport=agent требует agent_url")
+        errors.extend(self._validate_agent_trust())
         if self.host_kind == HostKind.IIS:
             if not (self.iis_site or self.iis_app_pool):
                 errors.append("host_kind=iis требует iis_site и/или iis_app_pool")
@@ -203,6 +245,66 @@ class Stand:
         if self.host_kind == HostKind.K8S:
             if not self.k8s_deployment:
                 errors.append("host_kind=k8s требует k8s_deployment")
+        errors.extend(self._validate_redis())
+        return errors
+
+    def _validate_agent_trust(self) -> list[str]:
+        """
+        Проверки пары ``agent_ca``/``agent_verify_tls`` (доверие к сертификату
+        АГЕНТА, GAP-008).
+
+        Что здесь СОЗНАТЕЛЬНО не проверяется и почему:
+
+        1. Существование файла ``agent_ca``. ``validate()`` — чистая проверка
+           записи, она не ходит в файловую систему НИГДЕ (``stand_dir``,
+           ``distrib_dir``, ``logs_dir`` тоже не проверяются на существование),
+           и вызывается она в том числе на машине, где этого файла и не должно
+           быть: одна и та же запись реестра живёт и на хосте агента, и у
+           оператора, а путь к сертификату актуален только для машины хаба.
+           Проверка тут ломала бы ``Registry.update`` на ровном месте. Отказ
+           обязан быть понятным в момент РЕАЛЬНОГО обращения — за это отвечает
+           ``standkit_hub.client``: он называет путь в тексте ошибки.
+        2. ``agent_ca`` при ``transport != agent`` — не ошибка. Запись
+           переключают между local и agent туда-обратно, и терять уже
+           введённый путь (или падать из-за него) вреднее, чем держать
+           неиспользуемое поле; ровно так же ведут себя ``iis_*``/``docker_*``
+           при другом ``host_kind``.
+
+        А вот сочетание «``agent_ca`` задан + ``agent_url`` без https» — именно
+        ошибка, а не «просто не применится»: молча проигнорированная настройка
+        это и есть механика GAP-008 (оператор задал поле, поверил, что оно
+        подействовало, и ищет причину в другом месте).
+        """
+        errors: list[str] = []
+        url = str(self.agent_url or "").strip().lower()
+        if self.agent_ca and url and not url.startswith("https://"):
+            errors.append(
+                "agent_ca имеет смысл только при agent_url на https:// — "
+                "по http канал до агента не шифруется и сертификат не проверяется"
+            )
+        return errors
+
+    def _validate_redis(self) -> list[str]:
+        """
+        Пара ``redis_host``/``redis_port`` валидна только целиком: половина
+        пары раньше давала молчаливый ``unknown`` в дашборде, и оператор не мог
+        отличить «не настроено» от «настроено с опечаткой» (GAP-003).
+        """
+        errors: list[str] = []
+        host = str(self.redis_host or "").strip()
+        port = _coerce_int(self.redis_port, default=0)
+        # Ветки ВЗАИМОИСКЛЮЧАЮЩИЕ и упорядочены от частного к общему: оператор
+        # должен получить ОДИН точный диагноз. Раньше сочетание «redis_host
+        # задан + redis_port = -1» давало сразу две пересекающиеся строки («без
+        # корректного redis_port» и «должен быть в диапазоне»), и было
+        # непонятно, это одна проблема или две.
+        if port and not 0 < port < 65536:
+            # Сам порт невалиден — это и есть диагноз, независимо от host.
+            errors.append("redis_port должен быть в диапазоне 1–65535")
+        elif host and port <= 0:
+            errors.append("redis_host задан без корректного redis_port (1–65535)")
+        elif port > 0 and not host:
+            errors.append("redis_port задан без redis_host")
         return errors
 
 
@@ -228,6 +330,16 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
     if text in ("false", "0", "no", "n"):
         return False
     return default
+
+
+def _coerce_int(value: Any, *, default: int) -> int:
+    """Терпимо читает целое из JSON (реестр правят руками): "6379" → 6379, мусор → default."""
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def _coerce_transport(value: Any) -> Transport:

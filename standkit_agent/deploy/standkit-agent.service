@@ -45,7 +45,21 @@ ExecStart=/opt/standkit/venv/bin/python -m standkit_agent \
     --tls-cert /opt/standkit/tls/agent.crt \
     --tls-key /opt/standkit/tls/agent.key \
     --tls-client-ca /opt/standkit/tls/clients-ca.crt \
+    --run-dir /opt/standkit/run \
+    --log-dir /opt/standkit/logs \
     --audit-log /opt/standkit/logs/audit.log
+# ПРИМЕЧАНИЕ (важно, иначе служба не стартует): --run-dir, --log-dir и
+# --audit-log заданы ЯВНО и все три — это обязательное условие служебного
+# запуска, а не стилистика. По умолчанию агент берёт ~/.standkit/run,
+# ~/.standkit/logs и ~/.standkit/audit.log, а у сервисного аккаунта,
+# созданного по инструкции выше (useradd --system --no-create-home), домашнего
+# каталога просто нет: $HOME указывает в никуда, и дефолты заведомо нерабочие.
+# Сверху то же самое обеспечивает ProtectHome=yes ниже — /home для процесса
+# недоступен даже при существующем домашнем каталоге. Все три пути должны
+# входить в ReadWritePaths (см. ниже). Если какой-то из путей окажется
+# недоступен на запись, агент откажет в старте одной строкой в journalctl
+# ("Отказ старта: каталог ... недоступен на запись пользователю ...") ещё до
+# открытия сокета, а не упадёт traceback'ом на первом же запросе.
 # ПРИМЕЧАНИЕ: --host 127.0.0.1 — secure default. Для удалённого доступа с
 # другого хоста управляющего контура — TLS/mTLS обязателен (см. флаги выше);
 # если вместо этого используется reverse-proxy/VPN-туннель на loopback,
@@ -66,6 +80,9 @@ PrivateTmp=yes
 # ПОДСТАВИТЬ: реальные пути — рабочий каталог агента, run/log каталоги,
 # каталог(и) стенда(ов) из реестра (для start/stop через subprocess/pidfile),
 # каталог TLS-сертификатов (если ключ читается, не обязательно писать).
+# Значения обязаны совпадать с --run-dir/--log-dir/--audit-log в ExecStart:
+# путь, не попавший сюда, для процесса read-only (ProtectSystem=strict), и
+# preflight агента честно откажет в старте.
 ReadWritePaths=/opt/standkit/run /opt/standkit/logs /opt/standkit/projects.json
 
 # Ни один процесс агента не должен трогать физические/виртуальные устройства.

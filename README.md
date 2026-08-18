@@ -96,8 +96,9 @@ TLS, TLS 1.2+/mTLS, скоупы control/readonly, lockout по IP, аудит.
 pip install standkit
 ```
 
-Обновление — `pip install -U standkit`. Свежий `main` до релиза (если нужна ещё не выпущенная
-правка) — `pip install --force-reinstall "git+https://github.com/thinkquattro/BPMkitStand.git"`.
+Обновление — `pip install -U standkit`. Конкретная версия (в том числе откат) —
+`pip install "standkit==0.6.1"`; полный список выпусков — на
+[PyPI](https://pypi.org/project/standkit/).
 
 Запуск дашборда:
 
@@ -122,14 +123,18 @@ BPMkitStand использует тот же реестр, что и MCP BPMkit 
 
 ## Документация проекта
 
-- [standkit_hub/web/cookbook.html](standkit_hub/web/cookbook.html) — **кукбук**: обзор, установка (отдельно Windows и Linux), обновление, дашборд, реестр стендов, виды хостинга, удалённые стенды и агент-демон, безопасность, траблшутинг. Один standalone-файл: в работающем диспетчере открывается кнопкой «?» в шапке, без него — прямо с диска в браузере.
-- [docs/ROADMAP.md](docs/ROADMAP.md) — дорожная карта приложения (что сделано / ближайшее / бэклог).
-- [docs/CHANGELOG.md](docs/CHANGELOG.md) — история изменений по версиям.
-- [docs/BACKLOG.md](docs/BACKLOG.md) — честный список «упомянуто в коде, но не реализовано» (заделы/заглушки) со ссылками на код.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/HOSTING.md](docs/HOSTING.md) · [docs/REMOTE_STANDS.md](docs/REMOTE_STANDS.md) · [SECURITY.md](SECURITY.md)
-- Решения (ADR): [0001 — hosting backends](docs/adr/0001-hosting-backends.md) · [0002 — k8s backend](docs/adr/0002-k8s-backend.md) · [0003 — браузинг логов удалённых стендов (предложено)](docs/adr/0003-remote-log-browsing.md) · [0004 — IIS: жизненный цикл по Site](docs/adr/0004-iis-site-scoped-lifecycle.md)
+**Карта всех документов — [docs/README.md](docs/README.md)**: кому, о чём и когда открывать.
+Коротко:
 
-> Статус: `standkit` — молодой проект (0.5.x). Ядро/агент/хаб работоспособны, но
+| Документ | Для кого |
+|---|---|
+| [**Кукбук**](standkit_hub/web/cookbook.html) — обзор, установка, дашборд, реестр, хостинг, агент, безопасность, траблшутинг. Один standalone-файл: в работающем диспетчере открывается кнопкой «?» в шапке, без него — прямо с диска в браузере | оператор |
+| [docs/COOKBOOK_LINUX.md](docs/COOKBOOK_LINUX.md) — пошаговое развёртывание агента на Linux: pipx/venv, реестр, секреты, systemd, TLS/mTLS, разбор типичных ошибок с реальными сообщениями | администратор |
+| [docs/REMOTE_STANDS.md](docs/REMOTE_STANDS.md) · [docs/HOSTING.md](docs/HOSTING.md) · [SECURITY.md](SECURITY.md) | оператор / администратор |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/adr/](docs/adr/) · [docs/CHANGELOG.md](docs/CHANGELOG.md) | разработчик |
+| [docs/ROADMAP.md](docs/ROADMAP.md) — крупные работы · [docs/BACKLOG.md](docs/BACKLOG.md) — заглушки и заделы в коде · [docs/GAPs/](docs/GAPs/README.md) — код прав, а сценарий оператора ломается | планирование |
+
+> Статус: `standkit` — молодой проект (0.7.x). Ядро/агент/хаб работоспособны, но
 > ряд возможностей — это **каркас/заделы** (например, глубокие пробы БД/Redis,
 > транспорты ssh/winrm, живая приёмка Docker/k8s/IIS). Что именно ещё не
 > дописано — прозрачно перечислено в [docs/BACKLOG.md](docs/BACKLOG.md).

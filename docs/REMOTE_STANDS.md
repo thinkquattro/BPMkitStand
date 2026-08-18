@@ -86,6 +86,10 @@ BPMkitStand управляет удалёнными стендами через 
 
 Выполняется **на каждом хосте стенда**.
 
+> **Linux:** подробный разбор с реальными выводами команд, systemd-юнитом, TLS/mTLS
+> и таблицей типичных ошибок — [COOKBOOK_LINUX.md](COOKBOOK_LINUX.md). Ниже —
+> краткая версия для обеих платформ.
+
 ### 1. Поставить пакет
 
 Нужен Python 3.10+ и установленный `dotnet` (для запуска стендов BPMSoft).
@@ -109,7 +113,9 @@ python -m venv C:\ProgramData\standkit\venv
 C:\ProgramData\standkit\venv\Scripts\pip install standkit
 ```
 
-Свежий `main` до релиза — `pip install "git+https://github.com/thinkquattro/BPMkitStand.git"`.
+Конкретная версия (в том числе откат) — `pip install "standkit==0.6.1"`; список выпусков —
+на [PyPI](https://pypi.org/project/standkit/). **Версия агента и версия хаба могут различаться**
+— HTTP-контракт обратно совместим (проверено: хаб 0.6.1 ↔ агент 0.7.0).
 
 ### 2. Подготовить реестр на хосте агента
 

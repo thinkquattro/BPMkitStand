@@ -663,6 +663,75 @@ def test_iis_read_logs_prefers_flat_log_over_subfolders(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# IIS: каталог логов резолвится без учёта регистра (GAP-006)
+# --------------------------------------------------------------------------
+
+
+def test_iis_read_logs_finds_logs_dir_ignoring_case(tmp_path):
+    # Без iis_stdout_log_dir каталог ищется внутри stand_dir ПО ФАКТУ: BPMSoft
+    # пишет в "Logs", и жёсткое stand_dir/"logs" на регистрозависимой ФС
+    # возвращало None при живых логах. На Windows — проверка регрессии.
+    stand_dir = tmp_path / "stand"
+    log_dir = stand_dir / "Logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "stdout.log").write_text("из Logs\n", encoding="utf-8")
+    stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1", stand_dir=str(stand_dir))
+    assert IisBackend().read_logs(stand, 10) == ["из Logs"]
+
+
+def test_iis_read_logs_finds_lowercase_logs_dir(tmp_path):
+    # Обратная сторона того же фикса: контуры с каталогом в нижнем регистре
+    # должны продолжать работать (никакой замены "logs" → "Logs").
+    stand_dir = tmp_path / "stand"
+    log_dir = stand_dir / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "stdout.log").write_text("из logs\n", encoding="utf-8")
+    stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1", stand_dir=str(stand_dir))
+    assert IisBackend().read_logs(stand, 10) == ["из logs"]
+
+
+def test_iis_read_logs_finds_dated_subfolder_in_capitalized_logs_dir(tmp_path):
+    # Оба фикса вместе: каталог "Logs" + подпапки-даты, без iis_stdout_log_dir.
+    stand_dir = tmp_path / "stand"
+    day_dir = stand_dir / "Logs" / "2026_08_17"
+    day_dir.mkdir(parents=True)
+    (day_dir / "Application.log").write_text("app line 1\napp line 2\n", encoding="utf-8")
+    stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1", stand_dir=str(stand_dir))
+    assert IisBackend().read_logs(stand, 10) == ["app line 1", "app line 2"]
+
+
+def test_iis_read_logs_explicit_stdout_dir_wins_over_stand_dir_logs(tmp_path):
+    # Приоритет iis_stdout_log_dir над автопоиском внутри stand_dir сохранён.
+    stand_dir = tmp_path / "stand"
+    (stand_dir / "Logs").mkdir(parents=True)
+    (stand_dir / "Logs" / "stdout.log").write_text("не тот каталог\n", encoding="utf-8")
+    explicit = tmp_path / "iis-stdout"
+    explicit.mkdir()
+    (explicit / "stdout.log").write_text("тот самый\n", encoding="utf-8")
+    stand = _make_stand(
+        host_kind=HostKind.IIS,
+        iis_app_pool="pool1",
+        stand_dir=str(stand_dir),
+        iis_stdout_log_dir=str(explicit),
+    )
+    assert IisBackend().read_logs(stand, 10) == ["тот самый"]
+
+
+def test_iis_read_logs_uses_explicit_stand_logs_dir(tmp_path):
+    # Явный Stand.logs_dir из реестра — между iis_stdout_log_dir и автопоиском.
+    stand_dir = tmp_path / "stand"
+    (stand_dir / "Logs").mkdir(parents=True)
+    (stand_dir / "Logs" / "stdout.log").write_text("не тот каталог\n", encoding="utf-8")
+    custom = tmp_path / "куда-надо"
+    custom.mkdir()
+    (custom / "stdout.log").write_text("из logs_dir\n", encoding="utf-8")
+    stand = _make_stand(
+        host_kind=HostKind.IIS, iis_app_pool="pool1", stand_dir=str(stand_dir), logs_dir=str(custom)
+    )
+    assert IisBackend().read_logs(stand, 10) == ["из logs_dir"]
+
+
+# --------------------------------------------------------------------------
 # DockerBackend
 # --------------------------------------------------------------------------
 

@@ -263,11 +263,18 @@
     const form = document.getElementById("register-form");
     const transport = form.elements.namedItem("transport").value;
     const hostKind = form.elements.namedItem("host_kind").value;
+    const scheme = form.elements.namedItem("stand_scheme").value;
     form.querySelectorAll(".register-conditional[data-when-transport]").forEach((el) => {
       el.hidden = el.dataset.whenTransport !== transport;
     });
     form.querySelectorAll(".register-conditional[data-when-host-kind]").forEach((el) => {
       el.hidden = el.dataset.whenHostKind !== hostKind;
+    });
+    // verify_tls показываем только при stand_scheme=https: на http флаг ничего
+    // не меняет и лишь путает (GAP-001). Механика — та же самая, третий
+    // атрибут data-when-*, а не отдельная ветка «на новый лад».
+    form.querySelectorAll(".register-conditional[data-when-scheme]").forEach((el) => {
+      el.hidden = el.dataset.whenScheme !== scheme;
     });
   }
 
@@ -280,6 +287,10 @@
   function openRegisterModal() {
     const overlay = document.getElementById("register-modal-overlay");
     const form = document.getElementById("register-form");
+    // reset() возвращает КАЖДОЕ поле к его разметочному дефолту — в том числе
+    // select схемы (http) и чекбокс verify_tls (checked). Пересчёт условных
+    // блоков строго ПОСЛЕ reset: иначе видимость осталась бы от прошлого
+    // открытия и не совпала бы со значениями в полях.
     form.reset();
     showRegisterFormError("");
     document.getElementById("iis-detect-status").textContent = "";
@@ -292,23 +303,37 @@
     document.getElementById("register-modal-overlay").hidden = true;
   }
 
-  // Поля формы, которые вообще уходят в JSON-тело запроса — только НЕПУСТЫЕ
-  // (сервер и так игнорирует пустые строки, но так тело запроса компактнее
-  // и понятнее в логах/отладке). Пароли в форме сознательно отсутствуют —
+  // Поля формы, которые вообще уходят в JSON-тело запроса. Текстовые — только
+  // НЕПУСТЫЕ (сервер и так игнорирует пустые строки, но так тело запроса
+  // компактнее и понятнее в логах/отладке); чекбоксы — всегда, настоящим
+  // boolean (см. collectRegisterPayload). Список обязан быть подмножеством
+  // server.py::_REGISTER_ALLOWED_FIELDS плюс "name" (его сервер обрабатывает
+  // отдельно, как ключ записи реестра) — согласованность держит тест
+  // tests/test_hub_register.py. Пароли в форме сознательно отсутствуют —
   // только secret_ref_* (agent_secret_ref).
   const _REGISTER_FIELD_NAMES = [
     "name",
     "transport",
     "host_kind",
     "stand_dir",
+    "logs_dir",
+    "stand_scheme",
+    "verify_tls",
     "stand_host",
     "stand_port",
     "db_type",
     "db_host",
     "db_port",
     "db_name",
+    "redis_host",
+    "redis_port",
     "agent_url",
     "agent_secret_ref",
+    // Доверие к сертификату АГЕНТА (GAP-008). Живут в условном блоке
+    // транспорта agent (data-when-transport), поэтому при transport=local не
+    // уезжают на сервер вовсе — включая чекбокс (см. ветку block.hidden ниже).
+    "agent_ca",
+    "agent_verify_tls",
     "iis_site",
     "iis_app_pool",
     "docker_container",
@@ -323,6 +348,30 @@
     _REGISTER_FIELD_NAMES.forEach((field) => {
       const input = form.elements.namedItem(field);
       if (!input) return;
+
+      // Поле из СКРЫТОГО условного блока не отправляем вовсе. Для текстовых
+      // полей (agent_*/iis_*/docker_*/k8s_*) это выходило само собой: скрытый
+      // блок обычно пуст, а пустая строка отсекается ниже. Для чекбокса так не
+      // выйдет — значение у него есть всегда, и при stand_scheme=http в реестр
+      // уезжал бы бессмысленный verify_tls. Одно правило закрывает оба случая
+      // и заодно чинит старую мелочь: заполнил IIS-поля, передумал и выбрал
+      // docker — их значения больше не едут на сервер.
+      const block = input.closest ? input.closest(".register-conditional") : null;
+      if (block && block.hidden) return;
+
+      if (input.type === "checkbox") {
+        // ГРАБЛЯ (GAP-001, п.2): у чекбокса input.value — это "on" независимо
+        // от того, снят флажок или нет. Если собирать его как строку, ветка
+        // "пустое не отправляем" ниже никогда не сработает, а СНЯТЫЙ флажок
+        // приедет как "on" — то есть «выключено» превратится во «включено».
+        // Убрать же чекбокс из тела при снятом флажке тоже нельзя: сервер
+        // применит дефолт модели (verify_tls=true) и молча вернёт проверку
+        // сертификата. Единственный правильный вариант — настоящий boolean из
+        // .checked, и БЕЗ проверки на пустоту (false — валидное значение).
+        payload[field] = input.checked;
+        return;
+      }
+
       const value = input.value.trim();
       if (!value) return;
       payload[field] = value;
@@ -393,6 +442,7 @@
 
     form.elements.namedItem("transport").addEventListener("change", updateRegisterConditionalFields);
     form.elements.namedItem("host_kind").addEventListener("change", updateRegisterConditionalFields);
+    form.elements.namedItem("stand_scheme").addEventListener("change", updateRegisterConditionalFields);
 
     form.addEventListener("submit", async (evt) => {
       evt.preventDefault();
@@ -593,26 +643,51 @@
     return escapeHtml(text).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // Причина отказа пробы, пришедшая с сервера (http.reason / redis.reason,
+  // см. GAP-002/GAP-003), показывается ровно тем же приёмом, что и
+  // process.reason в processCell: подсказка в title. Плюс класс
+  // .value-has-reason — тонкий пунктир под значением, чтобы оператор ВООБЩЕ
+  // понял, что сюда есть смысл навести мышь (голый title невидим).
+  function reasonAttrs(reason) {
+    if (!reason) return { cls: "", attr: "" };
+    return { cls: " value-has-reason", attr: ` title="${escapeAttr(reason)}"` };
+  }
+
   // Ячейка HTTP: если у стенда есть URL — отдаём кликабельную ссылку
   // (открывается в новой вкладке), иначе — прочерк. Цвет по состоянию пробы.
+  //
+  // http.reason объясняет `down` (таймаут, отказ соединения, TLS-ошибка с
+  // подсказкой «задайте stand_scheme=https») и содержит фактический URL, по
+  // которому стучались, — раньше наружу уходило одно неинформативное слово.
   function httpCell(http) {
     const url = http && http.url;
     const cls = valueClass(http && http.state);
+    // title вешаем на саму ссылку: href/target/rel не трогаем, клик и открытие
+    // в новой вкладке работают как прежде. Прочерк (url пуст) — тоже с title.
+    const reason = reasonAttrs(http && http.reason);
     if (!url) {
-      return `<span class="value-cell ${cls}">—</span>`;
+      return `<span class="value-cell ${cls}${reason.cls}"${reason.attr}>—</span>`;
     }
-    return `<a class="value-cell value-link ${cls}" href="${escapeAttr(url)}" target="_blank" rel="noopener">${escapeHtml(url)}</a>`;
+    return `<a class="value-cell value-link ${cls}${reason.cls}" href="${escapeAttr(url)}"${reason.attr} target="_blank" rel="noopener">${escapeHtml(url)}</a>`;
   }
 
   // Ячейка Redis: показывает НОМЕР базы Redis стенда (тот же, что фигурирует
   // при очистке Redis), цвет — по состоянию пробы. Прочерк, если у стенда
   // Redis не настроен.
+  //
+  // redis.reason различает «адрес Redis не задан в реестре» и «задан, но
+  // недоступен» (GAP-003, п.4) — раньше обе ситуации выглядели одинаково, с
+  // жёстко зашитым «Redis не настроен у стенда». Этот текст остался фолбэком
+  // на случай ответа без reason (старый агент или снапшот без проб).
   function redisCell(redis) {
     const num = redis && redis.number;
+    const reason = reasonAttrs(redis && redis.reason);
     if (num === null || num === undefined) {
-      return `<span class="value-cell value-muted" title="Redis не настроен у стенда">—</span>`;
+      const title = (redis && redis.reason) || "Redis не настроен у стенда";
+      return `<span class="value-cell value-muted${reason.cls}" title="${escapeAttr(title)}">—</span>`;
     }
-    return `<span class="value-cell ${valueClass(redis.state)}" title="Номер базы Redis">${escapeHtml(String(num))}</span>`;
+    const title = (redis && redis.reason) || "Номер базы Redis";
+    return `<span class="value-cell ${valueClass(redis.state)}${reason.cls}" title="${escapeAttr(title)}">${escapeHtml(String(num))}</span>`;
   }
 
   // --- иконки действий (инлайн-SVG, без внешних шрифтов/CDN) ---

@@ -7,14 +7,49 @@
 чей результат реально похож на текст), чтобы кириллица в консольном логе
 стенда не билась в мойибаке при не-UTF-8 кодировке дочернего .NET-процесса
 (типичный случай на русской Windows).
+
+Плюс резолв каталога логов (``find_logs_subdir``/``stand_logs_dir``, GAP-006):
+имя подкаталога сравнивается БЕЗ УЧЁТА РЕГИСТРА, потому что BPMSoft пишет
+логи в ``Logs``. Эти тесты сознательно НЕ помечены ``skipif`` по платформе:
+на Linux они проверяют собственно фикс, на Windows (регистронезависимая ФС,
+где жёсткое ``"logs"`` и так попадало в ``Logs``) — отсутствие регрессии.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 import time as _time
 
-from standkit.logs import _decode_bytes, extract_current_session, follow, tail
+from standkit import logs as _logs
+from standkit.logs import (
+    LOGS_DIR_NAME,
+    _decode_bytes,
+    extract_current_session,
+    find_logs_subdir,
+    follow,
+    scan_denied,
+    stand_logs_dir,
+    tail,
+)
+from standkit.models import Stand
+
+def _is_listable(path) -> bool:
+    """
+    Можно ли ПЕРЕЧИСЛИТЬ каталог здесь и сейчас — по факту, а не по
+    ``sys.platform``/``geteuid``. Снятое право чтения реально ограничивает
+    только обычного пользователя на POSIX: под root его игнорирует
+    CAP_DAC_OVERRIDE, на Windows ``chmod`` на каталог почти не влияет.
+    Тесты ниже поэтому не помечены ``skipif`` (иначе на root-CI, где обычно и
+    гоняются прогоны, они просто не исполнялись бы), а формулируют инвариант,
+    верный в обоих случаях: каталог логов с типовым именем обязан находиться
+    ВСЕГДА — при листинге через scandir и без него, только по прямому пути.
+    """
+    try:
+        os.listdir(path)
+    except OSError:
+        return False
+    return True
 
 
 # --- tail(): базовое поведение ---
@@ -218,3 +253,238 @@ def test_tail_max_bytes_reads_only_end_and_drops_partial_first_line(tmp_path):
     assert tail(p, n=5, max_bytes=size // 2) == lines[-5:]
     assert tail(p, n=3) == lines[-3:]              # без max_bytes — как раньше
     assert tail(p, n=2, max_bytes=size * 2) == lines[-2:]  # лимит больше файла
+
+
+# --------------------------------------------------------------------------
+# Резолв каталога логов: find_logs_subdir / stand_logs_dir (GAP-006)
+# --------------------------------------------------------------------------
+
+
+def _fs_is_case_insensitive(base) -> bool:
+    """
+    Определяет регистронезависимость ФС ПО ФАКТУ, а не по ``sys.platform``:
+    на Windows (и на macOS с APFS по умолчанию) каталоги ``logs`` и ``Logs``
+    физически не могут сосуществовать, и тест «приоритет точного совпадения»
+    надо формулировать иначе. Проверять платформу вместо ФС нельзя — тогда
+    тест перестанет что-либо проверять на любой нестандартной раскладке.
+    """
+    probe = base / "CaseProbe"
+    probe.mkdir()
+    insensitive = (base / "caseprobe").exists()
+    probe.rmdir()
+    return insensitive
+
+
+def test_find_logs_subdir_finds_lowercase_logs(tmp_path):
+    (tmp_path / "logs").mkdir()
+    assert find_logs_subdir(tmp_path) == tmp_path / "logs"
+
+
+def test_find_logs_subdir_finds_capitalized_logs(tmp_path):
+    # Главный случай GAP-006: BPMSoft раскладывает логи в "Logs", и на Linux
+    # жёсткое <stand_dir>/"logs" не существовало.
+    (tmp_path / "Logs").mkdir()
+    assert find_logs_subdir(tmp_path) == tmp_path / "Logs"
+
+
+def test_find_logs_subdir_finds_uppercase_logs(tmp_path):
+    (tmp_path / "LOGS").mkdir()
+    assert find_logs_subdir(tmp_path) == tmp_path / "LOGS"
+
+
+def test_find_logs_subdir_none_when_no_logs_dir(tmp_path):
+    (tmp_path / "bin").mkdir()
+    assert find_logs_subdir(tmp_path) is None
+
+
+def test_find_logs_subdir_ignores_file_named_logs(tmp_path):
+    # Файл с подходящим именем — не каталог логов.
+    (tmp_path / "logs").write_text("не каталог", encoding="utf-8")
+    assert find_logs_subdir(tmp_path) is None
+
+
+def test_find_logs_subdir_exact_case_wins_over_case_insensitive(tmp_path):
+    (tmp_path / "Logs").mkdir()
+    if _fs_is_case_insensitive(tmp_path):
+        # Регистронезависимая ФС: второго каталога быть не может — проверяем,
+        # что резолв находит единственный существующий (отсутствие регрессии).
+        assert find_logs_subdir(tmp_path) == tmp_path / "Logs"
+        return
+    (tmp_path / "logs").mkdir()
+    found = find_logs_subdir(tmp_path)
+    assert found == tmp_path / "logs"
+    assert found.name == "logs"  # именно точное совпадение, а не "Logs"
+
+
+def test_find_logs_subdir_case_insensitive_match_is_deterministic(tmp_path):
+    # Нет точного совпадения, зато есть два «почти» — результат не должен
+    # зависеть от порядка обхода каталога. Приоритет: точное имя → типовое
+    # "Logs" (так пишет BPMSoft, это одна из прямых проверок) → прочие
+    # написания по сортировке.
+    (tmp_path / "Logs").mkdir()
+    if _fs_is_case_insensitive(tmp_path):
+        assert find_logs_subdir(tmp_path) == tmp_path / "Logs"
+        return
+    (tmp_path / "LOGS").mkdir()
+    assert find_logs_subdir(tmp_path).name == "Logs"
+    assert find_logs_subdir(tmp_path).name == "Logs"  # стабильно между вызовами
+
+
+def test_find_logs_subdir_sorted_order_among_exotic_spellings(tmp_path):
+    # Ни точного "logs", ни типового "Logs" — работает регистронезависимый
+    # перебор через scandir, среди нескольких кандидатов побеждает первый по
+    # сортировке имени (детерминизм не зависит от порядка обхода ФС).
+    (tmp_path / "LOGS").mkdir()
+    if _fs_is_case_insensitive(tmp_path):
+        assert find_logs_subdir(tmp_path) == tmp_path / "LOGS"
+        return
+    (tmp_path / "lOgS").mkdir()
+    assert find_logs_subdir(tmp_path).name == "LOGS"
+    assert find_logs_subdir(tmp_path).name == "LOGS"
+
+
+def test_find_logs_subdir_missing_base_returns_none(tmp_path):
+    assert find_logs_subdir(tmp_path / "нет-такого-каталога") is None
+
+
+def test_find_logs_subdir_empty_base_returns_none():
+    # Пустая строка не должна превращаться в "." и сканировать cwd процесса.
+    assert find_logs_subdir("") is None
+
+
+def test_find_logs_subdir_base_is_a_file_returns_none(tmp_path):
+    f = tmp_path / "стенд.txt"
+    f.write_text("x", encoding="utf-8")
+    assert find_logs_subdir(f) is None
+
+
+def test_find_logs_subdir_custom_name(tmp_path):
+    (tmp_path / "Trace").mkdir()
+    assert find_logs_subdir(tmp_path, name="trace") == tmp_path / "Trace"
+    assert find_logs_subdir(tmp_path, name=LOGS_DIR_NAME) is None
+
+
+def test_stand_logs_dir_finds_capitalized_subdir(tmp_path):
+    (tmp_path / "Logs").mkdir()
+    stand = Stand(name="s", stand_dir=str(tmp_path))
+    assert stand_logs_dir(stand) == tmp_path / "Logs"
+
+
+def test_stand_logs_dir_explicit_logs_dir_wins(tmp_path):
+    (tmp_path / "Logs").mkdir()
+    custom = tmp_path / "куда-надо"
+    custom.mkdir()
+    stand = Stand(name="s", stand_dir=str(tmp_path), logs_dir=str(custom))
+    assert stand_logs_dir(stand) == custom
+
+
+def test_stand_logs_dir_explicit_missing_dir_is_none_not_fallback(tmp_path):
+    # Опечатка в реестре не должна тихо маскироваться автопоиском рядом.
+    (tmp_path / "Logs").mkdir()
+    stand = Stand(name="s", stand_dir=str(tmp_path), logs_dir=str(tmp_path / "опечатка"))
+    assert stand_logs_dir(stand) is None
+
+
+def test_stand_logs_dir_none_when_stand_dir_empty():
+    assert stand_logs_dir(Stand(name="s", stand_dir="")) is None
+
+
+def test_stand_logs_dir_none_when_no_logs_subdir(tmp_path):
+    assert stand_logs_dir(Stand(name="s", stand_dir=str(tmp_path))) is None
+
+
+# --- каталог стенда без права листинга (0o711): регрессия GAP-006 ---
+#
+# Прежний резолв (``Path(stand_dir) / "logs"`` + ``exists()``) обходился правом
+# ПРОХОДА (``--x``), а ``os.scandir`` требует ещё и права ЧТЕНИЯ (``r--``).
+# Каталог ``0711`` на ``/opt/<app>`` — обычная практика, и scandir-only
+# реализация показывала на нём «каталог не найден» при живых логах.
+
+
+def test_find_logs_subdir_in_non_listable_dir(tmp_path):
+    base = tmp_path / "stand"
+    base.mkdir()
+    (base / "Logs").mkdir()
+    # 0o311 (-wx--x--x), а не 0o711: тест запускается ОТ ВЛАДЕЛЬЦА каталога, и
+    # при 0o711 владельцу читать разрешено — ограничение не воспроизвелось бы.
+    # Боевой аналог — каталог 0711, принадлежащий другому пользователю
+    # (/opt/<app> под root, служба ходит из-под своего аккаунта).
+    os.chmod(base, 0o311)  # --x: пройти можно, перечислить нельзя
+    try:
+        assert (base / "Logs").exists()  # право прохода на месте
+        assert find_logs_subdir(base) == base / "Logs"
+    finally:
+        os.chmod(base, 0o755)
+
+
+def test_find_logs_subdir_in_non_listable_dir_lowercase(tmp_path):
+    base = tmp_path / "stand"
+    base.mkdir()
+    (base / "logs").mkdir()
+    os.chmod(base, 0o311)  # см. пояснение выше: у владельца снимаем именно право чтения
+    try:
+        assert find_logs_subdir(base) == base / "logs"
+    finally:
+        os.chmod(base, 0o755)
+
+
+def test_stand_logs_dir_in_non_listable_dir(tmp_path):
+    base = tmp_path / "stand"
+    base.mkdir()
+    (base / "Logs").mkdir()
+    os.chmod(base, 0o311)  # см. пояснение выше: у владельца снимаем именно право чтения
+    try:
+        assert stand_logs_dir(Stand(name="s", stand_dir=str(base))) == base / "Logs"
+    finally:
+        os.chmod(base, 0o755)
+
+
+def _deny_scandir(monkeypatch):
+    """Заставляет ``os.scandir`` внутри standkit.logs падать с PermissionError."""
+
+    def _boom(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(_logs.os, "scandir", _boom)
+
+
+def test_find_logs_subdir_direct_path_survives_denied_scandir(tmp_path, monkeypatch):
+    """
+    Та же ситуация без chmod — работает под root и на Windows: перечисление
+    каталога запрещено, но прямой путь ``base/Logs`` доступен.
+    """
+    (tmp_path / "Logs").mkdir()
+    _deny_scandir(monkeypatch)
+    assert find_logs_subdir(tmp_path) == tmp_path / "Logs"
+
+
+def test_find_logs_subdir_exotic_spelling_needs_scandir(tmp_path, monkeypatch):
+    # Написание, которого нет среди прямых проверок, без листинга не найти —
+    # это честный None, а не «нашли что-то похожее».
+    (tmp_path / "LOGZ").mkdir()
+    _deny_scandir(monkeypatch)
+    assert find_logs_subdir(tmp_path) is None
+
+
+def test_scan_denied_matches_real_listability(tmp_path):
+    # На обычном пользователе POSIX это проверка собственно фикса (каталог без
+    # права чтения → True), под root/на Windows — что мы не выдумываем отказ
+    # там, где перечисление на самом деле работает.
+    base = tmp_path / "stand"
+    base.mkdir()
+    os.chmod(base, 0o311)  # см. пояснение выше: у владельца снимаем именно право чтения
+    try:
+        assert scan_denied(base) is (not _is_listable(base))
+    finally:
+        os.chmod(base, 0o755)
+
+
+def test_scan_denied_reports_permission_error(tmp_path, monkeypatch):
+    _deny_scandir(monkeypatch)
+    assert scan_denied(tmp_path) is True
+
+
+def test_scan_denied_false_for_readable_missing_and_empty_base(tmp_path):
+    assert scan_denied(tmp_path) is False
+    assert scan_denied(tmp_path / "нет-такого") is False
+    assert scan_denied("") is False

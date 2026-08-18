@@ -4,6 +4,7 @@
 """
 
 import contextlib
+import http.client
 import http.server
 import os
 import shutil
@@ -11,10 +12,18 @@ import socket
 import ssl
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 
 from standkit.health import http_ok, process_alive, process_running, tcp_open
 from standkit.models import ProbeState
-from standkit.health import check_stand
+from standkit.health import (
+    HINT_SELF_SIGNED,
+    HINT_TLS_SCHEME,
+    HttpProbeResult,
+    check_stand,
+    http_probe,
+)
 from standkit.models import Stand, Transport
 
 
@@ -261,16 +270,27 @@ def _https_stand(port: int, **kwargs) -> Stand:
     )
 
 
-def test_probe_http_uses_scheme_from_registry(monkeypatch):
-    """stand_scheme=https → в http_ok уходит https://-адрес (и verify из записи)."""
-    seen = {}
+def _fake_http_probe(seen: dict, *, ok: bool = True):
+    """
+    Подменяет ``http_probe`` — именно ЕЁ вызывает ``_probe_http`` с тех пор, как
+    проба обязана объяснять отказ (GAP-002). ``http_ok`` осталась публичным
+    булевым фасадом над той же функцией, поэтому здесь перехватывается общий для
+    обеих код, а не только его булев срез.
+    """
 
-    def _fake_http_ok(url, *, timeout=None, verify=True):
+    def _probe(url, *, timeout=None, verify=True):
         seen["url"] = url
         seen["verify"] = verify
-        return True
+        return HttpProbeResult(ok=ok)
 
-    monkeypatch.setattr("standkit.health.http_ok", _fake_http_ok)
+    return _probe
+
+
+def test_probe_http_uses_scheme_from_registry(monkeypatch):
+    """stand_scheme=https → в пробу уходит https://-адрес (и verify из записи)."""
+    seen = {}
+
+    monkeypatch.setattr("standkit.health.http_probe", _fake_http_probe(seen))
     stand = _https_stand(5010, stand_scheme="https", verify_tls=False)
     status = check_stand(stand)
     assert seen["url"] == "https://127.0.0.1:5010/"
@@ -282,12 +302,7 @@ def test_probe_http_defaults_to_plain_http(monkeypatch):
     """Регресс обратной совместимости: реестр без stand_scheme → http:// и verify=True."""
     seen = {}
 
-    def _fake_http_ok(url, *, timeout=None, verify=True):
-        seen["url"] = url
-        seen["verify"] = verify
-        return True
-
-    monkeypatch.setattr("standkit.health.http_ok", _fake_http_ok)
+    monkeypatch.setattr("standkit.health.http_probe", _fake_http_probe(seen))
     stand = Stand.from_dict(
         "legacy",
         {"stand_dir": "/opt/x", "stand_host": "127.0.0.1", "stand_port": 5000},
@@ -317,3 +332,381 @@ def test_http_ok_verify_flag_does_not_affect_plain_http():
     """verify=False не меняет поведения для http://-адресов (контекст не строится)."""
     port = _find_closed_port()
     assert http_ok(f"http://127.0.0.1:{port}/", timeout=0.5, verify=False) is False
+
+
+# --- http_probe: отказ обязан объяснять себя (GAP-002) ----------------------
+#
+# Ветки классификатора проверяются подменой ``urllib.request.urlopen``: поднять
+# в тесте настоящий сломанный DNS или «TLS-порт, отвечающий не по HTTP» нельзя
+# (и не нужно — тесты не ходят наружу), а исключение прилетает ровно то же
+# самое, что и в бою. Где живой сценарий воспроизводится локально — он проверен
+# без моков (закрытый порт, self-signed сервер ниже).
+
+
+def _urlopen_raising(exc: BaseException):
+    """Фейковый urlopen, который всегда падает заданным исключением."""
+
+    def _fake(req, timeout=None, context=None):
+        raise exc
+
+    return _fake
+
+
+class _FakeResponse:
+    """Минимальный ответ urlopen: контекстный менеджер со ``.status``."""
+
+    def __init__(self, status: int):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def test_http_probe_ok_has_no_reason(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: _FakeResponse(200))
+    result = http_probe("http://127.0.0.1:5000/")
+    assert result.ok is True
+    assert result.reason == ""
+    assert result.hint == ""
+
+
+def test_http_probe_401_is_alive(monkeypatch):
+    """401 до логина — не авария: сервер ответил, значит живой."""
+    exc = urllib.error.HTTPError("http://127.0.0.1:5000/", 401, "Unauthorized", None, None)
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    assert http_probe("http://127.0.0.1:5000/").ok is True
+
+
+def test_http_probe_5xx_reports_code(monkeypatch):
+    exc = urllib.error.HTTPError("http://127.0.0.1:5000/", 502, "Bad Gateway", None, None)
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    result = http_probe("http://127.0.0.1:5000/")
+    assert result.ok is False
+    assert result.reason == "сервер ответил 502"
+
+
+def test_http_probe_5xx_without_exception_reports_code(monkeypatch):
+    """5xx может прийти и обычным ответом (если opener не поднял HTTPError)."""
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: _FakeResponse(503))
+    result = http_probe("http://127.0.0.1:5000/")
+    assert result.ok is False
+    assert result.reason == "сервер ответил 503"
+
+
+def test_http_probe_cert_verification_explains_and_hints(monkeypatch):
+    exc = urllib.error.URLError(ssl.SSLCertVerificationError("self-signed certificate"))
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    result = http_probe("https://127.0.0.1:5000/")
+    assert result.ok is False
+    assert result.reason.startswith("сертификат не прошёл проверку")
+    assert "self-signed certificate" in result.reason
+    assert result.hint == HINT_SELF_SIGNED
+
+
+def test_http_probe_ssl_handshake_error(monkeypatch):
+    exc = urllib.error.URLError(ssl.SSLError("[SSL: WRONG_VERSION_NUMBER] wrong version number"))
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    result = http_probe("https://127.0.0.1:5000/")
+    assert result.ok is False
+    assert result.reason.startswith("ошибка TLS-рукопожатия")
+    assert "WRONG_VERSION_NUMBER" in result.reason
+
+
+def test_http_probe_connection_refused_names_endpoint(monkeypatch):
+    exc = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    result = http_probe("http://10.0.0.5:5000/")
+    assert result.reason == "соединение отклонено — на 10.0.0.5:5000 никто не слушает"
+    assert result.hint == ""
+
+
+def test_http_probe_refused_on_closed_port_live():
+    """Тот же случай без моков: заведомо закрытый локальный порт."""
+    port = _find_closed_port()
+    result = http_probe(f"http://127.0.0.1:{port}/", timeout=0.5)
+    assert result.ok is False
+    assert "соединение отклонено" in result.reason
+    assert f"127.0.0.1:{port}" in result.reason
+
+
+def test_http_probe_timeout_reports_seconds(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(TimeoutError("timed out")))
+    result = http_probe("http://127.0.0.1:5000/", timeout=0.5)
+    assert result.reason == "нет ответа за 0.5 с"
+
+
+def test_http_probe_timeout_wrapped_in_urlerror(monkeypatch):
+    exc = urllib.error.URLError(socket.timeout("timed out"))
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    assert http_probe("http://127.0.0.1:5000/", timeout=2).reason == "нет ответа за 2 с"
+
+
+def test_http_probe_timeout_as_urlerror_string(monkeypatch):
+    """URLError иногда несёт таймаут не исключением, а строкой — тоже таймаут."""
+    exc = urllib.error.URLError("timed out")
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    assert http_probe("http://127.0.0.1:5000/", timeout=1.5).reason == "нет ответа за 1.5 с"
+
+
+def test_http_probe_dns_failure(monkeypatch):
+    exc = urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    result = http_probe("http://stand.invalid:5000/")
+    assert result.reason == "имя хоста не разрешается"
+
+
+def test_http_probe_remote_disconnected_hints_tls(monkeypatch):
+    """
+    Ключевой случай GAP-002: запрос по http:// ушёл в TLS-порт, сервер закрыл
+    соединение. Оператор должен получить не голый down, а «задайте
+    stand_scheme=https».
+    """
+    exc = http.client.RemoteDisconnected("Remote end closed connection without response")
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    result = http_probe("http://127.0.0.1:5000/")
+    assert result.ok is False
+    assert result.reason == "сервер ответил не по протоколу HTTP"
+    assert result.hint == HINT_TLS_SCHEME
+
+
+def test_http_probe_bad_status_line_is_caught(monkeypatch):
+    """
+    Регресс: BadStatusLine — чистый HTTPException, он НЕ наследник OSError и
+    раньше вылетал из пробы наружу необработанным.
+    """
+    exc = http.client.BadStatusLine("\x16\x03\x01\x02\x00")
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    result = http_probe("http://127.0.0.1:5000/")
+    assert result.ok is False
+    assert result.reason == "сервер ответил не по протоколу HTTP"
+    assert result.hint == HINT_TLS_SCHEME
+
+
+def test_http_probe_no_tls_hint_for_https_url(monkeypatch):
+    """Подсказка про stand_scheme=https бессмысленна, если проба уже шла по https://."""
+    exc = http.client.RemoteDisconnected("Remote end closed connection without response")
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    result = http_probe("https://127.0.0.1:5000/")
+    assert result.reason == "сервер ответил не по протоколу HTTP"
+    assert result.hint == ""
+
+
+def test_http_probe_connection_reset_over_plain_http_hints_tls(monkeypatch):
+    exc = urllib.error.URLError(ConnectionResetError(104, "Connection reset by peer"))
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    result = http_probe("http://127.0.0.1:5000/")
+    assert result.reason == "соединение сброшено сервером"
+    assert result.hint == HINT_TLS_SCHEME
+
+
+def test_http_probe_self_signed_cert_live():
+    """Без моков: живой сервер с self-signed сертификатом и verify=True."""
+    with _self_signed_https_server() as port:
+        result = http_probe(f"https://127.0.0.1:{port}/", verify=True)
+        assert result.ok is False
+        assert result.reason.startswith("сертификат не прошёл проверку")
+        assert result.hint == HINT_SELF_SIGNED
+
+
+def test_http_ok_delegates_to_http_probe(monkeypatch):
+    """Прежний публичный API сохранён: та же сигнатура, тот же bool наружу."""
+    seen = {}
+
+    def _probe(url, *, timeout=None, verify=True):
+        seen.update(url=url, timeout=timeout, verify=verify)
+        return HttpProbeResult(ok=True)
+
+    monkeypatch.setattr("standkit.health.http_probe", _probe)
+    assert http_ok("https://stand.local/", timeout=0.25, verify=False) is True
+    assert seen == {"url": "https://stand.local/", "timeout": 0.25, "verify": False}
+
+
+def test_http_ok_false_when_probe_failed(monkeypatch):
+    monkeypatch.setattr(
+        "standkit.health.http_probe",
+        lambda url, **kwargs: HttpProbeResult(ok=False, reason="сервер ответил 502"),
+    )
+    assert http_ok("http://stand.local/") is False
+
+
+def test_safe_url_drops_credentials_and_query():
+    """В причину нельзя тащить секреты: userinfo и query из URL вырезаются."""
+    from standkit.health import _safe_url
+
+    assert (
+        _safe_url("https://user:pass@stand.local:8443/health?token=secret")
+        == "https://stand.local:8443/health"
+    )
+
+
+def test_safe_url_keeps_ipv6_brackets():
+    """URL из подсказки обязан копироваться в браузер: скобки IPv6 не теряются."""
+    from standkit.health import _safe_url
+
+    assert _safe_url("http://[::1]:8080/x") == "http://[::1]:8080/x"
+    assert _safe_url("https://[2001:db8::1]/health") == "https://[2001:db8::1]:443/health"
+
+
+def test_safe_url_keeps_host_case():
+    # urlsplit().hostname приводил хост к нижнему регистру — в тексте причины
+    # должен стоять адрес ровно такой, какой оператор написал в реестре.
+    from standkit.health import _safe_url
+
+    assert _safe_url("http://Stand-A.Corp:5000/") == "http://Stand-A.Corp:5000/"
+
+
+def test_endpoint_ipv6_and_defaults():
+    from standkit.health import _endpoint
+
+    assert _endpoint("http://[::1]:8080/x") == "[::1]:8080"
+    assert _endpoint("http://[fe80::1]/x") == "[fe80::1]:80"
+    assert _endpoint("https://stand.local/health") == "stand.local:443"
+    # Порт-мусор не роняет формирование причины — подставляется дефолт схемы.
+    assert _endpoint("http://stand.local:порт/x") == "stand.local:80"
+
+
+def test_http_probe_refused_names_ipv6_endpoint_with_brackets(monkeypatch):
+    exc = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    result = http_probe("http://[::1]:5000/")
+    assert result.reason == "соединение отклонено — на [::1]:5000 никто не слушает"
+
+
+# --- details: причина доезжает до StandStatus -------------------------------
+
+
+def test_probe_http_puts_reason_and_url_into_details(monkeypatch):
+    exc = http.client.RemoteDisconnected("Remote end closed connection without response")
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    stand = Stand(
+        name="tls",
+        stand_dir="/opt/x",
+        stand_host="127.0.0.1",
+        stand_port=5001,
+        db_host="",
+        db_port=0,
+    )
+    status = check_stand(stand)
+    assert status.http == ProbeState.DOWN
+    reason = status.details["http_reason"]
+    assert "сервер ответил не по протоколу HTTP" in reason
+    assert HINT_TLS_SCHEME in reason
+    assert "(URL: http://127.0.0.1:5001/)" in reason
+
+
+def test_probe_http_no_reason_when_ok(monkeypatch):
+    monkeypatch.setattr("standkit.health.http_probe", _fake_http_probe({}))
+    stand = _https_stand(5010)
+    status = check_stand(stand)
+    assert status.http == ProbeState.OK
+    assert "http_reason" not in status.details
+
+
+def test_check_stand_collects_reasons_from_several_probes(monkeypatch):
+    """
+    Пишущих проб теперь несколько — проверяем, что сборка деталей в вызывающем
+    потоке не теряет ни одну причину.
+    """
+    exc = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raising(exc))
+    port = _find_closed_port()
+    stand = Stand(
+        name="both",
+        stand_dir="/opt/x",
+        stand_host="127.0.0.1",
+        stand_port=port,
+        db_host="",
+        db_port=0,
+    )
+    status = check_stand(stand)
+    assert "http_reason" in status.details
+    assert "redis_reason" in status.details
+
+
+# --- проба Redis: поля модели, фолбэк на extra, причина (GAP-003) -----------
+
+
+@contextlib.contextmanager
+def _listening_port():
+    """Занимает свободный порт слушающим сокетом и отдаёт его номер."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        listener.close()
+
+
+def _redis_stand(**kwargs) -> Stand:
+    """Стенд без процесса/HTTP/БД — в фокусе теста только проба Redis."""
+    return Stand(
+        name="redis",
+        stand_dir="/opt/x",
+        stand_host="",
+        stand_port=0,
+        db_host="",
+        db_port=0,
+        **kwargs,
+    )
+
+
+def test_probe_redis_ok_from_model_fields():
+    with _listening_port() as port:
+        status = check_stand(_redis_stand(redis_host="127.0.0.1", redis_port=port))
+        assert status.redis == ProbeState.OK
+        assert "redis_reason" not in status.details
+
+
+def test_probe_redis_ok_from_extra_fallback():
+    """Старые реестры держали адрес Redis в нетипизированном extra — они обязаны работать."""
+    with _listening_port() as port:
+        stand = _redis_stand(extra={"redis_host": "127.0.0.1", "redis_port": str(port)})
+        status = check_stand(stand)
+        assert status.redis == ProbeState.OK
+
+
+def test_probe_redis_model_fields_win_over_extra(monkeypatch):
+    seen = {}
+
+    def _fake_tcp_open(host, port, **kwargs):
+        seen["endpoint"] = (host, port)
+        return True
+
+    monkeypatch.setattr("standkit.health.tcp_open", _fake_tcp_open)
+    stand = _redis_stand(
+        redis_host="10.0.0.10",
+        redis_port=6379,
+        extra={"redis_host": "127.0.0.1", "redis_port": 6380},
+    )
+    status = check_stand(stand)
+    assert seen["endpoint"] == ("10.0.0.10", 6379)
+    assert status.redis == ProbeState.OK
+
+
+def test_probe_redis_unknown_explains_not_configured():
+    status = check_stand(_redis_stand())
+    assert status.redis == ProbeState.UNKNOWN
+    assert status.details["redis_reason"] == (
+        "адрес Redis не задан в реестре (redis_host/redis_port)"
+    )
+
+
+def test_probe_redis_down_explains_endpoint_and_probe_host():
+    port = _find_closed_port()
+    status = check_stand(_redis_stand(redis_host="127.0.0.1", redis_port=port))
+    assert status.redis == ProbeState.DOWN
+    reason = status.details["redis_reason"]
+    assert f"Redis не отвечает на 127.0.0.1:{port}" in reason
+    assert "с хоста, где выполняется проба" in reason
+
+
+def test_probe_redis_garbage_port_is_unknown_not_crash():
+    """Мусор в порту — «не задан», а не исключение внутри пробы."""
+    stand = _redis_stand(extra={"redis_host": "127.0.0.1", "redis_port": "шесть тысяч"})
+    status = check_stand(stand)
+    assert status.redis == ProbeState.UNKNOWN
+    assert "не задан" in status.details["redis_reason"]

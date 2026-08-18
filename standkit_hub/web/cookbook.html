@@ -36,9 +36,10 @@
   /* ── Токены бренда BPMkit ── */
   :root{
     --bg:#0A0A0F; --bg2:#111318; --panel:#141519; --panel2:#191b21;
-    --text:#F5F6F8; --muted:rgba(255,255,255,.62); --dim:rgba(255,255,255,.4);
+    --text:#F5F6F8; --muted:rgba(255,255,255,.62); --dim:rgba(255,255,255,.55);
     --line:rgba(255,255,255,.10); --line2:rgba(255,255,255,.06);
     --accent:#F9763D; --accent-dim:rgba(249,118,61,.14); --accent-line:rgba(249,118,61,.4);
+    --on-accent:#140d05;
     --code-bg:#101116; --ok:#4ecb8d; --ok-bg:rgba(78,203,141,.12);
     --warn:#e8c15a; --warn-bg:rgba(232,193,90,.12);
     --stop:#f0716b; --stop-bg:rgba(240,113,107,.12);
@@ -46,11 +47,12 @@
   }
   [data-theme="light"]{
     --bg:#f6f6f7; --bg2:#ffffff; --panel:#ffffff; --panel2:#fafafa;
-    --text:#1a1c22; --muted:#5c6068; --dim:#9a9ea6;
+    --text:#1a1c22; --muted:#5c6068; --dim:#6b6f77;
     --line:#e3e4e8; --line2:#ededf0;
-    --accent:#e55f1f; --accent-dim:rgba(233,105,44,.10); --accent-line:rgba(233,105,44,.45);
-    --code-bg:#f1f2f4; --ok:#1c8f5a; --ok-bg:rgba(28,143,90,.10);
-    --warn:#9a7414; --warn-bg:rgba(200,158,40,.12);
+    --accent:#c2410c; --accent-dim:rgba(233,105,44,.10); --accent-line:rgba(233,105,44,.45);
+    --on-accent:#ffffff;
+    --code-bg:#f1f2f4; --ok:#157a4c; --ok-bg:rgba(28,143,90,.10);
+    --warn:#8a6710; --warn-bg:rgba(200,158,40,.12);
     --stop:#c73a32; --stop-bg:rgba(199,58,50,.09);
     --shadow:0 1px 4px rgba(20,20,30,.10);
   }
@@ -63,7 +65,10 @@
   ::selection{background:rgba(249,118,61,.3)}
 
   /* ── Шапка ── */
-  header.top{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:14px;
+  /* Шапка и чип-навигация липнут ОДНИМ блоком: высота шапки меняется от ширины
+     экрана, и фиксированный top у чипов уводил их под шапку. */
+  #stickytop{position:sticky;top:0;z-index:30}
+  header.top{display:flex;align-items:center;gap:14px;
     padding:10px 18px;background:var(--bg2);border-bottom:1px solid var(--line)}
   .logo{display:flex;align-items:center;gap:10px;flex-shrink:0}
   .logo svg{display:block}
@@ -77,6 +82,7 @@
   #docmeta{margin-left:auto;font-size:11.5px;color:var(--muted);text-align:right;line-height:1.35;
     background:none;border:1px solid transparent;border-radius:9px;padding:4px 9px;cursor:pointer;font-family:inherit}
   #docmeta:hover{border-color:var(--accent-line);color:var(--accent)}
+  #docmeta .dmsep{display:none}
 
   /* ── Модальное окно «О документе» ── */
   #modalOverlay{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.55);
@@ -97,17 +103,18 @@
   #themeBtn:hover{border-color:var(--accent-line)}
 
   /* ── Чип-навигация ── */
-  #chipnav{position:sticky;top:55px;z-index:25;display:flex;flex-wrap:wrap;gap:7px;
+  #chipnav{display:flex;flex-wrap:wrap;gap:7px;
     padding:10px 18px;background:var(--bg);border-bottom:1px solid var(--line2)}
   #chipnav a{padding:6px 13px;border:1px solid var(--line);border-radius:999px;
     color:var(--text);font-size:13px;white-space:nowrap}
   #chipnav a:hover{border-color:var(--accent-line);text-decoration:none}
-  #chipnav a.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  #chipnav a.active{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
   #chipnav a.hidden{display:none}
 
   /* ── Каркас ── */
   main{max-width:1080px;margin:0 auto;padding:8px 20px 80px}
-  section.sec{margin-top:38px;scroll-margin-top:110px}
+  section.sec{margin-top:38px;scroll-margin-top:calc(var(--stack,120px) + 16px)}
+  h1{scroll-margin-top:calc(var(--stack,120px) + 16px)}
   section.sec.hidden,.tile.hidden{display:none}
   h1{font-size:26px;letter-spacing:-.5px;margin:26px 0 6px}
   h2{font-size:21px;letter-spacing:-.3px;margin:0}
@@ -120,13 +127,15 @@
 
   /* ── Сетки и плитки ── */
   .grid{display:grid;gap:12px;margin:14px 0}
-  .g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
-  .g3{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
-  .g4{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+  /* Раскрывашка не должна растягивать соседей по ряду в пустые коробки. */
+  .grid:has(> details.tile){align-items:start}
+  .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
   .tile{background:var(--panel);border:1px solid var(--line);border-radius:13px;
     padding:15px 17px;box-shadow:var(--shadow)}
-  .tile h3{display:flex;align-items:center;gap:8px}
-  .tile .ico{font-size:17px}
+  .tile h3{display:block}
+  .tile .ico{font-size:17px;margin-right:7px}
   .tile ul,.tile ol{margin:6px 0 2px;padding-left:20px}
   .tile li{margin:5px 0;font-size:14px}
   .tile li::marker{color:var(--accent)}
@@ -138,13 +147,13 @@
 
   /* раскрываемые плитки */
   details.tile{padding:0}
-  details.tile summary{list-style:none;cursor:pointer;padding:14px 17px;display:flex;
-    align-items:center;gap:10px;font-weight:600;font-size:14.5px}
+  details.tile summary{list-style:none;cursor:pointer;display:block;position:relative;
+    padding:14px 46px 14px 17px;font-weight:600;font-size:14.5px}
   details.tile summary::-webkit-details-marker{display:none}
-  details.tile summary .chev{margin-left:auto;color:var(--accent);transition:transform .15s;font-size:12px}
+  details.tile summary .chev{position:absolute;right:16px;top:14px;display:inline-block;
+    color:var(--accent);transition:transform .15s;font-size:12px}
   details.tile[open] summary .chev{transform:rotate(90deg)}
-  details.tile summary .badge{margin-left:auto}
-  details.tile summary .badge+.chev{margin-left:10px}
+  details.tile summary .badge{margin-left:8px;vertical-align:1px}
   details.tile .body{padding:0 17px 14px}
   details.tile[open]{background:var(--panel2)}
 
@@ -158,13 +167,26 @@
 
   /* ── Команды и фрагменты конфигов ── */
   .prompt{position:relative;background:var(--code-bg);border:1px solid var(--line);
-    border-left:3px solid var(--accent);border-radius:10px;padding:11px 90px 11px 14px;margin:10px 0;
-    font-family:"JetBrains Mono",Consolas,Menlo,monospace;font-size:13px;white-space:pre-wrap;color:var(--text)}
-  .copyBtn{position:absolute;top:8px;right:8px;border:1px solid var(--line);border-radius:7px;
-    background:var(--panel);color:var(--muted);font-size:11px;padding:3px 9px;cursor:pointer;font-family:Inter,sans-serif}
+    border-left:3px solid var(--accent);border-radius:10px;padding:11px 14px;margin:10px 0;
+    font-family:"JetBrains Mono",Consolas,Menlo,monospace;font-size:13px;white-space:normal;color:var(--text)}
+  /* Команда не рвётся посреди строки: скролл живёт внутри блока, а не у страницы. */
+  .prompt .pscroll{white-space:pre;overflow-x:auto;overflow-y:hidden;padding-right:78px;
+    scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+  .prompt .pscroll::-webkit-scrollbar{height:8px}
+  .prompt .pscroll::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+  #chipnav::-webkit-scrollbar{height:6px}
+  #chipnav::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+  /* уходящая под кнопку длинная строка гасится градиентом, а не обрывается стыком */
+  .prompt::after{content:"";position:absolute;z-index:1;top:1px;right:1px;width:132px;height:32px;
+    border-radius:0 9px 0 0;pointer-events:none;
+    background:linear-gradient(to right,rgba(0,0,0,0),var(--code-bg) 52%)}
+  .copyBtn{position:absolute;z-index:2;top:8px;right:8px;border:1px solid var(--line);border-radius:7px;
+    background:var(--panel);color:var(--muted);font-size:11px;padding:3px 9px;cursor:pointer;
+    font-family:Inter,sans-serif;white-space:nowrap}
   .copyBtn:hover{color:var(--accent);border-color:var(--accent-line)}
   code{background:var(--code-bg);border:1px solid var(--line2);border-radius:5px;
-    padding:1px 5px;font-size:12.5px;font-family:Consolas,Menlo,monospace}
+    padding:1px 5px;font-size:12.5px;font-family:Consolas,Menlo,monospace;
+    overflow-wrap:anywhere}
 
   /* ── Таблицы ── */
   .twrap{overflow-x:auto;margin:12px 0}
@@ -175,18 +197,18 @@
   td .y{color:var(--ok);font-weight:600}
   td .n{color:var(--dim)}
   td .p{color:var(--warn);font-weight:600}
-  td code{white-space:nowrap}
+  td code,th code{white-space:normal;overflow-wrap:anywhere}
 
   /* ── Шаги-таймлайн ── */
   .steps{counter-reset:st;display:flex;flex-direction:column;gap:0;margin:12px 0}
   .steps .st{position:relative;padding:2px 0 16px 44px}
   .steps .st::before{counter-increment:st;content:counter(st);position:absolute;left:0;top:0;
-    width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;
+    width:28px;height:28px;border-radius:50%;background:var(--accent);color:var(--on-accent);font-weight:700;
     font-size:14px;display:flex;align-items:center;justify-content:center}
   .steps .st::after{content:"";position:absolute;left:13.5px;top:30px;bottom:2px;width:1.5px;
     background:var(--line)}
   .steps .st:last-child::after{display:none}
-  .steps .st b{display:block;margin-bottom:2px}
+  .steps .st > b:first-child{display:block;margin-bottom:2px}
   .steps .st .tmuted{color:var(--muted);font-size:13.5px}
   .steps .st .prompt{margin:8px 0 0}
 
@@ -206,7 +228,7 @@
   .diagram svg{display:block;min-width:640px;width:100%;height:auto}
   .diagram .cap{font-size:12px;color:var(--muted);margin-top:8px;text-align:center}
 
-  mark.hl{background:var(--accent);color:#fff;border-radius:3px;padding:0 2px}
+  mark.hl{background:var(--accent);color:var(--on-accent);border-radius:3px;padding:0 2px}
   .note{font-size:13.5px;background:var(--accent-dim);border:1px solid var(--accent-line);
     border-radius:10px;padding:10px 14px;margin:12px 0}
   .note.stopnote{background:var(--stop-bg);border-color:var(--stop)}
@@ -214,15 +236,45 @@
   footer{margin-top:56px;padding:18px 0 6px;border-top:1px solid var(--line);
     font-size:12.5px;color:var(--muted);display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 
+  /* ── Адаптив ── */
+  @media (max-width:1000px){
+    .g4{grid-template-columns:repeat(3,minmax(0,1fr))}
+  }
+  @media (max-width:900px){
+    /* чипы одной строкой с горизонтальным скроллом — липкая стопка остаётся низкой */
+    #chipnav{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin}
+    #chipnav a{flex:0 0 auto}
+  }
+  @media (max-width:860px){
+    .g2{grid-template-columns:minmax(0,1fr)}
+    .g3,.g4{grid-template-columns:repeat(2,minmax(0,1fr))}
+  }
   @media (max-width:760px){
-    header.top{flex-wrap:wrap}
+    header.top{flex-wrap:wrap;gap:8px 12px;padding:8px 14px}
     #filter{order:5;max-width:none;flex-basis:100%}
+    #filterInfo{order:6}
+    #docmeta{line-height:1.25}
     #docmeta br{display:none}
+    #docmeta .dmsep{display:inline}
+    #chipnav{padding:8px 14px}
+    main{padding:8px 14px 60px}
+  }
+  @media (max-width:620px){
+    .g3,.g4{grid-template-columns:minmax(0,1fr)}
+    .logo svg{width:32px;height:32px}
+    .logo .sub{display:none}
+    .logo .lt{font-size:15px}
+    #docmeta{font-size:11px;padding:3px 6px;max-width:120px;white-space:normal}
+    #themeBtn{padding:6px 9px;font-size:12px}
+    header.top{gap:6px 10px;padding:7px 11px}
+    h1{font-size:22px}
+    .diagram svg{min-width:560px}
   }
 </style>
 </head>
 <body>
 
+<div id="stickytop">
 <header class="top">
   <div class="logo">
     <svg width="40" height="40" viewBox="0 0 96 96" aria-label="BPMkit">
@@ -237,7 +289,7 @@
   </div>
   <input id="filter" type="search" placeholder="Поиск: «агент», «IIS», «Redis», «токен»…" autocomplete="off">
   <span id="filterInfo"></span>
-  <button id="docmeta" title="О документе: версия, контакты, история">версия документа 1.2<br>август 2026</button>
+  <button id="docmeta" title="О документе: версия, контакты, история">версия документа 1.3<span class="dmsep"> · </span><br>август 2026</button>
   <button id="themeBtn" title="Переключить тему">☀️ Светлая</button>
 </header>
 
@@ -252,6 +304,7 @@
   <a href="#trouble">Траблшутинг</a>
   <a href="#limits">Границы</a>
 </nav>
+</div>
 
 <main>
 
@@ -448,9 +501,9 @@
   </div>
   <div class="tile acc">
     <h3><span class="ico">🐧</span>Linux</h3>
-    <p class="tmuted">В современных дистрибутивах системный Python помечен как «externally managed» (PEP 668),
-    и обычный <code>pip install</code> в него откажет с <code>error: externally-managed-environment</code>.
-    Это не про standkit — так ведут себя все пакеты. Ставим в изолированное окружение.</p>
+    <p class="tmuted">В современных дистрибутивах системный Python помечен как «externally managed» (PEP 668):
+    обычный <code>pip install</code> в него откажет с <code>error: externally-managed-environment</code>.</p>
+    <p class="tmuted">Это не про standkit — так ведут себя все пакеты. Ставим в изолированное окружение.</p>
     <p><b>Вариант A — pipx</b> (рекомендуется: изоляция + команды сразу в <code>PATH</code>):</p>
     <div class="prompt">sudo apt install pipx        # Debian/Ubuntu; иначе: python3 -m pip install --user pipx
 pipx ensurepath              # добавляет ~/.local/bin в PATH — нужен новый вход в shell
@@ -465,20 +518,50 @@ sudo ln -s ~/.venvs/standkit/bin/standkit-hub /usr/local/bin/standkit-hub</div>
     <p class="tmuted">Дополнение <code>[desktop]</code> (нативное окно) на Linux требует WebKitGTK в системе;
     без него просто пользуйтесь браузером. К уже поставленному pipx-пакету дополнение добавляется
     инъекцией: <code>pipx inject standkit keyring</code>.</p>
-    <div class="note stopnote" style="margin-top:10px">⛔ <b><code>--break-system-packages</code> на рабочем сервере — антипаттерн.</b>
-    На Debian/Ubuntu системный Python обслуживает сам <code>apt</code>; сломав его, вы теряете управление
-    пакетами машины. Флаг существует для контейнеров и одноразовых песочниц, не для хоста со стендами.</div>
-    <div class="note warnnote" style="margin-top:10px">🐍 <b>Скрипты запускайте питоном того окружения, куда поставили пакет.</b>
-    Системный <code>python3</code> модуля не видит — будет <code>No module named 'standkit_agent'</code>.
-    Для pipx это <code>~/.local/share/pipx/venvs/standkit/bin/python</code>, для venv —
-    <code>~/.venvs/standkit/bin/python</code>.</div>
+    <p class="tmuted">Разворачиваете <b>агента</b> на Linux-хосте стенда — есть отдельный подробный кукбук
+    <code>docs/COOKBOOK_LINUX.md</code>: сервисный аккаунт, systemd-юнит, TLS/mTLS, ротация токена
+    и таблица типичных ошибок с реальными сообщениями.</p>
   </div>
 </div>
 
-<div class="note">🖧 <b>Дашборд на headless-сервере.</b> Хаб слушает только <code>127.0.0.1</code> и это правильно:
-не открывайте его порт наружу. Запустите <code>standkit-hub --no-browser</code>, а с рабочей машины
-пробросьте порт по SSH — <code>ssh -L 8770:127.0.0.1:8770 user@host</code> — и откройте
-<code>http://127.0.0.1:8770</code> у себя. URL с сессионным токеном возьмите из вывода хаба на сервере.</div>
+<div class="grid g2">
+  <div class="tile stop">
+    <h3><span class="ico">⛔</span><code>--break-system-packages</code> — не на рабочем сервере</h3>
+    <p class="tmuted">На Debian/Ubuntu системный Python обслуживает сам <code>apt</code>; сломав его,
+    вы теряете управление пакетами машины.</p>
+    <p class="tmuted">Флаг существует для контейнеров и одноразовых песочниц, не для хоста со стендами.</p>
+  </div>
+  <div class="tile warn">
+    <h3><span class="ico">🐍</span>Скрипты — питоном того окружения, куда поставили пакет</h3>
+    <p class="tmuted">Системный <code>python3</code> модуля не видит — будет <code>No module named 'standkit_agent'</code>.</p>
+    <div class="prompt"># ставили через pipx
+~/.local/share/pipx/venvs/standkit/bin/python
+# ставили в venv
+~/.venvs/standkit/bin/python</div>
+  </div>
+</div>
+
+<div class="note">🖧 <b>Дашборд на headless-сервере.</b> Хаб слушает только <code>127.0.0.1</code>, и это правильно —
+порт наружу не открываем. Смотрим через SSH-проброс, в три шага.</div>
+<div class="grid g3">
+  <div class="tile">
+    <h3><span class="ico">🖥️</span>1. На сервере</h3>
+    <div class="prompt">standkit-hub --no-browser</div>
+    <p class="tmuted">URL с сессионным токеном хаб печатает в консоль — он понадобится на шаге 3.</p>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🔀</span>2. С рабочей машины</h3>
+    <div class="prompt"># с рабочей машины
+ssh -L 8770:127.0.0.1:8770 \
+    user@example-host</div>
+    <p class="tmuted">Локальный порт 8770 пробрасывается на loopback сервера.</p>
+  </div>
+  <div class="tile ok">
+    <h3><span class="ico">🌐</span>3. В браузере у себя</h3>
+    <div class="prompt">http://127.0.0.1:8770</div>
+    <p class="tmuted">Открываем тот самый URL с токеном из вывода хаба.</p>
+  </div>
+</div>
 
 <h3 style="margin-top:20px">Шаги 2–5 — одинаково в обеих ОС</h3>
 <div class="tile">
@@ -507,7 +590,8 @@ sudo ln -s ~/.venvs/standkit/bin/standkit-hub /usr/local/bin/standkit-hub</div>
 <div class="grid g3">
   <div class="tile ok"><h3><span class="ico">🌱</span>1. Переменная окружения</h3>
     <ul>
-      <li>Имя — <code>STANDKIT_SECRET__</code> + ссылка на секрет в верхнем регистре, все не-буквенно-цифровые символы заменены на <code>_</code></li>
+      <li>Имя — <code>STANDKIT_SECRET__</code> + ссылка на секрет в ВЕРХНЕМ регистре</li>
+      <li>Все не-буквенно-цифровые символы в ссылке заменяются на <code>_</code></li>
       <li><code>standkit:client-uat:agent-token</code> →<br><code>STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_TOKEN</code></li>
       <li>Единственный рабочий путь на headless-хосте и для службы</li>
     </ul>
@@ -567,13 +651,17 @@ pipx upgrade standkit                         # Linux, установка чер
     <h3><span class="ico">🧭</span>Что важно знать</h3>
     <ul>
       <li><b>Ваши данные не трогаются:</b> реестр стендов, конфиг дашборда и секреты живут в профиле пользователя, а не внутри пакета</li>
-      <li><b>Агентов обновляйте вместе с хабом</b> — на каждом хосте тем же обновлением пакета плюс рестарт службы
-        (<code>sudo systemctl restart standkit-agent</code> / <code>nssm restart standkit-agent</code>)</li>
+      <li><b>Агентов обновляйте вместе с хабом</b> — на каждом хосте тем же обновлением пакета</li>
+      <li>После обновления агента — рестарт службы: <code>sudo systemctl restart standkit-agent</code>
+        либо <code>nssm restart standkit-agent</code></li>
       <li>Ярлык и установленное PWA-приложение пересоздавать не нужно</li>
       <li>Что изменилось — <code>docs/CHANGELOG.md</code> в репозитории</li>
-      <li>Свежий <code>main</code> до релиза (только если нужна ещё не выпущенная правка):
-        <div class="prompt">pip install --force-reinstall "git+https://github.com/thinkquattro/BPMkitStand.git"</div></li>
+      <li><b>Конкретная версия и откат</b> — пакет живёт на
+        <a href="https://pypi.org/project/standkit/" target="_blank" rel="noopener">PyPI</a>, ставить из git не нужно</li>
     </ul>
+    <div class="prompt">pip install "standkit==0.6.1"          # пример: откат на конкретный выпуск
+pipx install --force "standkit==0.6.1" # то же через pipx
+pip index versions standkit            # какие версии вообще есть</div>
   </div>
 </div>
 <div class="note">🤖 <b>Не путать с обновлением MCP BPMkit.</b> Бесплатный диспетчер обновляется вручную командой выше.
@@ -645,13 +733,51 @@ pipx upgrade standkit                         # Linux, установка чер
       <span class="badge b-warn">unknown</span> (состояние выяснить не удалось) или «проверяется…» на первом опросе.
       Причина от бэкенда хостинга — во всплывающей подсказке бейджа. Во время прогрева после «Запустить» вместо бейджа — «Запускается…» со спиннером</td></tr>
   <tr><td><b>HTTP</b></td><td>Адрес web-хоста стенда ссылкой — открывает стенд в новой вкладке. Цвет ссылки = результат HTTP-пробы.
-      Схема берётся из <code>stand_scheme</code> записи: у стенда за TLS и проба, и ссылка идут на <code>https://</code></td></tr>
-  <tr><td><b>БД</b></td><td><b>Имя базы</b> стенда из реестра, окрашенное по результату пробы (открыт ли TCP-порт БД)</td></tr>
-  <tr><td><b>Redis</b></td><td><b>Номер базы</b> Redis стенда — тот самый, который будет очищен кнопкой 🗑. Прочерк — Redis у стенда не настроен</td></tr>
+      Схема берётся из <code>stand_scheme</code> записи: у стенда за TLS и проба, и ссылка идут на <code>https://</code>.
+      <b>Пунктирное подчёркивание</b> = у пробы есть что сказать: наведите мышь — в подсказке причина отказа и URL, по которому стучались</td></tr>
+  <tr><td><b>БД</b></td><td><b>Имя базы</b> стенда из реестра, окрашенное по результату пробы (открыт ли TCP-порт БД).
+      Подсказки у этой колонки нет: объяснять пока нечего — адрес задан либо не задан</td></tr>
+  <tr><td><b>Redis</b></td><td><b>Номер базы</b> Redis (<code>redis_db</code>) — тот самый, который очистит кнопка 🗑; цвет — результат пробы адреса
+      <code>redis_host</code>/<code>redis_port</code>. Прочерк — номера базы в записи нет. Подсказка при наведении различает
+      «адрес не задан» и «задан, но недоступен» — плитки ниже</td></tr>
   <tr><td><b>Действия</b></td><td>Кнопки-иконки: ▶ запустить · ■ остановить · ⟳ перезапустить · 🗑 очистить Redis.
-      Неприменимые гаснут: ▶ у запущенного, ■ и ⟳ у остановленного, 🗑 — если Redis не настроен</td></tr>
+      Неприменимые гаснут: ▶ у запущенного, ■ и ⟳ у остановленного, 🗑 — пока в записи нет <b>номера базы</b> Redis
+      (<code>redis_db</code>): очищать «какую-нибудь» базу диспетчер не станет</td></tr>
 </table>
 </div>
+
+<h3 style="margin-top:20px">Подсказка в ячейке: почему проба красная</h3>
+<p class="lead">Пунктирное подчёркивание под значением = у пробы есть причина отказа. Наведите мышь —
+диспетчер объясняет отказ словами и называет поля реестра, которыми он лечится. Раньше на этом месте
+было одно слово <code>down</code>, одинаковое для закрытого порта, таймаута и ошибки TLS.</p>
+<div class="grid g2">
+  <div class="tile warn">
+    <h3><span class="ico">🌐</span>HTTP: причина и фактический URL</h3>
+    <ul>
+      <li><b>«сервер ответил не по протоколу HTTP»</b> + <b>«похоже, стенд за TLS: задайте stand_scheme=https
+        (и verify_tls=false для self-signed)»</b> — самый частый случай: запрос по <code>http://</code> ушёл в TLS-порт</li>
+      <li><b>«соединение отклонено — на 10.0.0.10:5000 никто не слушает»</b> — порт закрыт, стенд погашен или адрес не тот</li>
+      <li><b>«сертификат не прошёл проверку: …»</b> — и подсказка снять флаг «Проверять сертификат» (<code>verify_tls=false</code>)</li>
+      <li>Реже: «нет ответа за 1.5 с», «имя хоста не разрешается», «сервер ответил 502»</li>
+      <li>Хвост подсказки — <b>URL пробы</b> (<code>URL: http://10.0.0.10:5000/</code>). Именно в нём чаще всего и ошибка;
+        секретов в нём нет — логин и query-строка вырезаются</li>
+    </ul>
+  </div>
+  <div class="tile ok">
+    <h3><span class="ico">🧠</span>Redis: «не настроено» ≠ «недоступно»</h3>
+    <ul>
+      <li><b>«адрес Redis не задан в реестре (redis_host/redis_port)»</b> — стенду просто не сказали, где Redis.
+        Это не авария, состояние честно остаётся <span class="badge b-warn">unknown</span></li>
+      <li><b>«Redis не отвечает на 10.0.0.10:6379 (адрес проверяется с хоста, где выполняется проба)»</b> —
+        адрес есть, ответа нет: вот это уже отказ</li>
+      <li>Раньше обе ситуации выглядели одинаково, и было непонятно, чинить запись реестра или сеть</li>
+      <li>Оба поля задаются в форме регистрации — см. <a href="#registry">Реестр стендов</a></li>
+    </ul>
+  </div>
+</div>
+<div class="note">💡 Подсказку формирует <b>та сторона, которая делает пробу</b>: у стенда за агентом причину считает
+агент на его хосте. Если у такого стенда подсказки нет, а у локального есть — обновлять нужно в первую очередь
+<b>агента</b>, а не дашборд.</div>
 
 <div class="grid g2">
   <div class="tile ok">
@@ -711,14 +837,19 @@ pipx upgrade standkit                         # Linux, установка чер
 <div class="grid g3">
   <div class="tile acc">
     <h3><span class="ico">📄</span>Где лежит</h3>
+    <p class="tmuted">Порядок резолва пути — первое подходящее:</p>
+    <ol>
+      <li><code>BPMSOFT_PROJECTS_FILE</code>, если файл существует</li>
+      <li>канонический путь профиля</li>
+      <li><code>./projects.json</code> в текущем каталоге</li>
+    </ol>
     <ul>
-      <li>Порядок резолва: <code>BPMSOFT_PROJECTS_FILE</code> (если файл существует) → канонический путь профиля → <code>./projects.json</code> в текущем каталоге</li>
       <li>Windows: <code>%APPDATA%\BPMkit\projects.json</code></li>
       <li>Linux: <code>$XDG_CONFIG_HOME/BPMkit/projects.json</code>, иначе <code>~/.config/BPMkit/projects.json</code></li>
       <li>Стенды — под ключом <code>projects</code>, имя записи = имя стенда</li>
-      <li><b>На чистой машине файла нет — это норма:</b> чтение несуществующего реестра даёт пустой список,
-        а сам файл (вместе с каталогом) создаётся при первой записи</li>
     </ul>
+    <p class="tmuted"><b>На чистой машине файла нет — это норма.</b> Чтение несуществующего реестра даёт пустой
+    список, а сам файл вместе с каталогом создаётся при первой записи.</p>
   </div>
   <div class="tile ok">
     <h3><span class="ico">🔐</span>Secret-first</h3>
@@ -737,11 +868,18 @@ pipx upgrade standkit                         # Linux, установка чер
       <li>Кнопка «Зарегистрировать стенд» <b>привязывает уже существующий</b> стенд к реестру</li>
       <li>Каталог, база и дистрибутив должны существовать заранее</li>
       <li>Развернуть стенд «с нуля» диспетчер не умеет — это зона BPMkit</li>
-      <li><b>Отдельной CLI-команды регистрации в пакете нет</b> — три рабочих пути: кнопка в дашборде,
-        правка <code>projects.json</code> руками по образцу <code>projects.sample.json</code>,
-        <code>Registry.add_existing()</code> из Python (рецепт ниже — для сервера без дашборда)</li>
-      <li>Обязательные поля: <code>name</code> и <code>stand_dir</code>; для <code>host_kind=docker</code> —
-        <code>docker_container</code> (или compose-пара), для <code>kestrel</code> — <code>stand_dll</code> и <code>dotnet</code></li>
+    </ul>
+    <p class="tmuted"><b>Отдельной CLI-команды регистрации в пакете нет</b> — три рабочих пути:</p>
+    <ul>
+      <li>кнопка «Зарегистрировать стенд» в дашборде</li>
+      <li>правка <code>projects.json</code> руками по образцу <code>projects.sample.json</code></li>
+      <li><code>Registry.add_existing()</code> из Python — рецепт ниже, для сервера без дашборда</li>
+    </ul>
+    <p class="tmuted">Обязательные поля:</p>
+    <ul>
+      <li>всегда — <code>name</code> и <code>stand_dir</code></li>
+      <li>при <code>host_kind=docker</code> — <code>docker_container</code> или compose-пара</li>
+      <li>при <code>kestrel</code> — <code>stand_dll</code> и <code>dotnet</code></li>
     </ul>
   </div>
 </div>
@@ -791,6 +929,148 @@ pipx upgrade standkit                         # Linux, установка чер
 <div class="note warnnote">🔁 <b>Агент читает реестр при старте.</b> Поправили <code>projects.json</code> на хосте —
 перезапустите службу агента, иначе увидите прежнюю картину и будете искать несуществующую проблему.</div>
 
+<h3 style="margin-top:20px">Модалка «Зарегистрировать стенд» — поле за полем</h3>
+<div class="note">🧭 <b>Ключевой факт — прочитать до заполнения формы.</b> Запись agent-стенда в реестре хаба —
+это <b>маршрут, а не настройки стенда</b>: половина полей либо не нужна, либо значит не то, что кажется.</div>
+<div class="grid g3">
+  <div class="tile">
+    <h3><span class="ico">📡</span>Кто на самом деле работает</h3>
+    <p class="tmuted">При <code>transport=agent</code> пробы и старт/стоп выполняет <b>агент по своей записи реестра</b>.</p>
+    <p class="tmuted">Хаб только проксирует запрос: <code>GET /stand/&lt;имя&gt;/status</code>.</p>
+  </div>
+  <div class="tile acc">
+    <h3><span class="ico">🧭</span>Зачем тогда запись у хаба</h3>
+    <p class="tmuted">Для <b>маршрутизации</b>: куда идти и каким токеном представиться.</p>
+    <p class="tmuted">Это <code>agent_url</code> и <code>agent_secret_ref</code>.</p>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🔗</span>И ещё для одной вещи</h3>
+    <p class="tmuted">Для ссылки <b>«Открыть стенд»</b> в таблице.</p>
+    <p class="tmuted">Её хаб строит сам из <code>stand_scheme</code>, <code>stand_host</code> и <code>stand_port</code>.</p>
+  </div>
+</div>
+
+<div class="grid g2">
+  <div class="tile acc">
+    <h3><span class="ico">🧩</span>Как форма себя ведёт</h3>
+    <ul>
+      <li>Постоянная часть: имя, транспорт, хостинг, каталоги, схема/host/port, БД, Redis</li>
+      <li>Условные блоки открываются по выбору списка: <code>agent_*</code> — по транспорту,
+        <code>iis_*</code>/<code>docker_*</code>/<code>k8s_*</code> — по хостингу</li>
+      <li>Чекбокс «Проверять сертификат» появляется по схеме <code>https</code></li>
+      <li><b>Скрытый блок на сервер не уходит вовсе:</b> заполнили IIS-поля, передумали и выбрали <code>docker</code> —
+        их значения в реестр не поедут</li>
+      <li>Пустое текстовое поле <b>не перетирает дефолт</b> модели: это «как по умолчанию», а не «пусто»</li>
+      <li>Паролей в форме нет по дизайну — только <code>agent_secret_ref</code>, ссылка на секрет</li>
+    </ul>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🎯</span>Минимум для стенда за агентом</h3>
+    <ul>
+      <li>Имя <span class="badge b-acc">как у агента</span> — символ в символ</li>
+      <li>Транспорт <code>agent</code>, хостинг оставить <code>kestrel</code></li>
+      <li><code>agent_url</code> + <code>agent_secret_ref</code></li>
+      <li><code>stand_dir</code> — путь на удалённом хосте</li>
+      <li>Host/Port — чтобы работала ссылка «Открыть стенд»</li>
+      <li>Блоки БД и Redis можно не трогать: их пробу делает агент</li>
+    </ul>
+  </div>
+</div>
+
+<div class="twrap">
+<table>
+  <tr><th style="width:22%">Поле формы</th><th style="width:24%">Что вписать</th><th>Зачем и чем грозит ошибка</th></tr>
+  <tr><td>Имя стенда<br><code>name</code></td><td><code>stand-a</code></td>
+      <td>Ключ записи в реестре. Для agent-стенда обязан <b>точно совпадать</b> с именем в реестре агента — оно
+      уходит прямо в URL <code>/stand/stand-a/status</code>. Допустимы буквы, цифры, <code>.</code>, <code>_</code>, <code>-</code></td></tr>
+  <tr><td>Транспорт<br><code>transport</code></td><td><code>agent</code></td>
+      <td><code>local</code> — стенд на этой же машине, всё делает ядро; <code>agent</code> — стенд на другом хосте,
+      хаб ходит к агенту по HTTP</td></tr>
+  <tr><td>Хостинг<br><code>host_kind</code></td><td><code>kestrel</code></td>
+      <td>При <code>transport=agent</code> бэкенд хостинга на стороне хаба <b>не вызывается вообще</b>. Выбрали
+      <code>docker</code>/<code>k8s</code>/<code>iis</code> «за компанию» — включится валидация и потребует профильные поля</td></tr>
+  <tr><td>Agent URL<br><code>agent_url</code> <span class="badge b-acc">при agent</span></td>
+      <td><code>http://example-host:8765</code></td>
+      <td>Схема — <b>как реально слушает агент</b>: поднят с <code>--insecure</code> → <code>http://</code>,
+      с <code>--tls-cert/--tls-key</code> → <code>https://</code>. Порт здесь агентский (8765), а не порт стенда</td></tr>
+  <tr><td>Ссылка на секрет агента<br><code>agent_secret_ref</code> <span class="badge b-acc">при agent</span></td>
+      <td><code>standkit:stand-a:agent-token</code></td>
+      <td>Пустое поле форму <b>пройдёт</b> (валидация требует только <code>agent_url</code>), но первый же запрос
+      упадёт с <code>не задан agent_url/agent_secret_ref</code>.<br>Значение токена — на стороне хаба,
+      см. <a href="#remote">Удалённые стенды</a></td></tr>
+  <tr><td>Каталог стенда<br><code>stand_dir</code></td><td><code>/opt/bpmsoft/stand-a</code></td>
+      <td>Единственное обязательное поле кроме имени (<code>stand_dir не может быть пустым</code>). Для agent-стенда
+      это путь <b>на удалённом хосте</b>: по нему работает агент, хаб в этот каталог не заглядывает</td></tr>
+  <tr><td>Каталог логов<br><code>logs_dir</code></td><td>обычно пусто</td>
+      <td>Необязательное. Пусто → берётся подкаталог <code>logs</code> внутри каталога стенда, <b>без учёта регистра</b>
+      (<code>Logs</code> и <code>LOGS</code> тоже находятся). Заполнять, только если логи вынесены за пределы каталога стенда</td></tr>
+  <tr><td>Схема<br><code>stand_scheme</code></td><td><code>http</code> · <code>https</code></td>
+      <td>Схема HTTP-пробы и ссылки «Открыть стенд». Дефолт <code>http</code>; стенд за TLS на <code>http://</code>
+      не отвечает вовсе — проба покажет ложный <code>down</code> на живом стенде</td></tr>
+  <tr><td>Проверять сертификат<br><code>verify_tls</code> <span class="badge b-acc">при https</span></td>
+      <td>галка включена</td>
+      <td>Снимать только для дев-контура с самоподписанным сертификатом. Пока выбрана схема <code>http</code>, блок скрыт
+      и на сервер не уходит вовсе — в реестре остаётся дефолт <code>true</code></td></tr>
+  <tr><td>Host / Port<br><code>stand_host</code>, <code>stand_port</code></td>
+      <td><code>example-host</code> + порт, проброшенный наружу</td>
+      <td>При <code>local</code> — адрес HTTP-пробы; при <code>agent</code> — <b>только ссылка «Открыть стенд»</b>.
+      Оставленный <code>127.0.0.1</code> означает машину оператора, и ссылка приведёт в никуда</td></tr>
+  <tr><td>IIS-сайт / Пул приложений<br><code>iis_site</code>, <code>iis_app_pool</code> <span class="badge b-acc">при iis</span></td>
+      <td>имя сайта и пула</td>
+      <td>Нужна <b>хотя бы одна</b> из двух. Кнопка «Определить автоматически» сопоставляет каталог стенда и порт
+      с реальными сайтами через <code>appcmd</code> <b>на этой машине</b> — для стенда за агентом она не поможет</td></tr>
+  <tr><td>Контейнер / Compose-файл / Compose-сервис<br><code>docker_*</code> <span class="badge b-acc">при docker</span></td>
+      <td><code>stand-a-web</code></td>
+      <td>Нужен либо <code>docker_container</code>, либо <b>пара</b> compose-файл + compose-сервис. Половина compose-пары
+      валидацию не проходит</td></tr>
+  <tr><td>Namespace / Deployment<br><code>k8s_*</code> <span class="badge b-acc">при k8s</span></td>
+      <td><code>stand-a</code></td>
+      <td><code>k8s_deployment</code> обязателен; пустой <code>k8s_namespace</code> означает <code>default</code></td></tr>
+  <tr><td>Тип БД / DB host / DB port / DB name</td><td>для agent-стенда можно пропустить</td>
+      <td>Пробу БД делает тот, кто владеет стендом: при <code>agent</code> — агент по своей записи, поля хаба не
+      используются. При <code>local</code> проба честно проверяет только «открыт ли порт»</td></tr>
+  <tr><td>Redis host / Redis port<br><code>redis_host</code>, <code>redis_port</code></td>
+      <td><code>127.0.0.1</code> + <code>6379</code></td>
+      <td>Адрес — <b>с точки зрения хоста, где выполняется проба</b> (ядро на этой машине либо агент на хосте
+      стенда), а не машины оператора.<br>Пара задаётся <b>целиком</b>: половина — ошибка регистрации
+      (<code>redis_port задан без redis_host</code>). Подробности — <a href="#hosting">Виды хостинга</a></td></tr>
+</table>
+</div>
+
+<div class="grid g3">
+  <div class="tile ok">
+    <h3><span class="ico">✅</span>Раньше приходилось править JSON руками — больше нет</h3>
+    <ul>
+      <li><code>stand_scheme</code> — список «Схема»</li>
+      <li><code>verify_tls</code> — чекбокс «Проверять сертификат» (появляется при <code>https</code>)</li>
+      <li><code>redis_host</code> / <code>redis_port</code> — пара полей внизу формы</li>
+      <li><code>logs_dir</code> — поле «Каталог логов»</li>
+    </ul>
+    <p class="tmuted">Через файл остались редкие ключи: <code>redis_db</code>, <code>secret_ref_db</code>,
+    <code>secret_ref_admin</code>, <code>distrib_dir</code>, нестандартные <code>stand_dll</code>/<code>dotnet</code>.</p>
+  </div>
+  <div class="tile warn">
+    <h3><span class="ico">🔁</span>Реестр агента читается при старте</h3>
+    <ul>
+      <li>Имя в форме обязано совпасть с именем в реестре <b>агента</b> — а тот прочитан один раз, при запуске службы</li>
+      <li>Поправили <code>projects.json</code> на хосте стенда — <b>перезапустите агента</b></li>
+      <li>Иначе хаб получит <code>404</code> на имя, которое в файле уже есть</li>
+      <li>Реестр хаба перечитывается сам — его перезапускать не нужно</li>
+    </ul>
+  </div>
+  <div class="tile stop">
+    <h3><span class="ico">🛑</span>Агент не стартовал на 0.0.0.0 — это не сбой</h3>
+    <ul>
+      <li>Отказ старта на не-loopback адресе без TLS — сработавшая <b>fail-closed</b> проверка
+        <code>validate_bind_security</code></li>
+      <li>Лечится не флагом «отключить», а сертификатами: <code>--tls-cert</code> + <code>--tls-key</code></li>
+      <li><code>--insecure</code> — только для проверки связи в доверенной сети</li>
+      <li>С <code>--insecure</code> и в <code>agent_url</code> должно стоять <code>http://</code>,
+        иначе хаб получит ошибку TLS-рукопожатия</li>
+    </ul>
+  </div>
+</div>
+
 <div class="grid g2">
 <details class="tile">
   <summary>🐍 Регистрация стенда на сервере без дашборда<span class="badge b-acc">рецепт</span><span class="chev">▶</span></summary>
@@ -802,18 +1082,18 @@ from standkit.models import Stand
 from standkit.registry import Registry
 
 reg = Registry.load("/opt/standkit/projects.json")
-reg.add_existing(Stand.from_dict("survey9", {
+reg.add_existing(Stand.from_dict("stand-a", {
     "transport": "local",
     "host_kind": "docker",
-    "docker_container": "survey9-web",
-    "stand_dir": "/opt/bpmsoft/survey9",
+    "docker_container": "stand-a-web",
+    "stand_dir": "/opt/bpmsoft/stand-a",
     "stand_host": "127.0.0.1",   # адрес ОБРАЩЕНИЯ с хоста, не 0.0.0.0
     "stand_port": 5010,          # левый порт из docker ps
     "db_type": "postgres",
     "db_host": "127.0.0.1",
     "db_port": 5433,
-    "db_name": "survey9",
-    "secret_ref_db": "standkit:survey9:db",
+    "db_name": "stand_a",
+    "secret_ref_db": "standkit:stand-a:db",
     "redis_host": "127.0.0.1",
     "redis_port": 6379,
     "redis_db": 2,
@@ -859,15 +1139,10 @@ PY</div>
 </details>
 
 <details class="tile">
-  <summary>🧭 Модалка «Зарегистрировать стенд» — что в ней<span class="chev">▶</span></summary>
+  <summary>🖼️ Модалка «Зарегистрировать стенд» — как она выглядит<span class="chev">▶</span></summary>
   <div class="body">
-    <ul>
-      <li><b>Имя стенда</b>, транспорт и вид хостинга — два выпадающих списка сверху</li>
-      <li>Условные поля появляются по выбору: <code>agent_*</code> для агента, <code>iis_*</code> / <code>docker_*</code> / <code>k8s_*</code> для хостинга</li>
-      <li>Для IIS есть кнопка <b>«Определить автоматически»</b>: сайт и пул находятся по каталогу стенда и биндингу порта</li>
-      <li>Каталог, host/port и параметры БД — остальная часть формы</li>
-      <li>Запись уходит в общий <code>projects.json</code>, править файл руками не обязательно</li>
-    </ul>
+    <p class="tmuted">Разбор всех полей — таблица «Модалка «Зарегистрировать стенд» — поле за полем» выше.
+    Здесь — только внешний вид: запись уходит в общий <code>projects.json</code>, править файл руками не обязательно.</p>
     <div class="shot narrow">
       <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAtAAAAQ1CAMAAACr0AilAAABgFBMVEX////9/Pz59/b27uv+593p5+To5+Xs497i4d7f3dvb2tfj08vT0c7Ny8nHxsPLwbvAvrv7rIq7uba1s7CurKmopqOkop/7oHmjoJuhoJ75iVj5dj2hnpqgnZienZyenJecmpWbmJOamJWZl5OYlZGXlZCWlpaWlZSVlZWVk5CTkY2Rj4uPjYmOi4eMioeKiIWJh4SHh4eIhoOHhYGGhYSFg4CCgX6Bf3x/fXt9fHh7eXZ5d3SUWD52dHJzcm9xb2xubWpsa2hraWdraWZtQzBpaGZnZmRnZWNmZWNlZGFjYmBhYF5fXlxdXFpdWldaWVdXV1VVVVNUU1FSUVBQT05OTkxNTEtMTEpMS0pKSUhHRkVGRUREQ0JBQUBAPz4+PTw8PDs7Ojk6Ojo6Ojk6OTg4ODg3Nzc3NjY2NjU1NTU0NDQzMzMzMjIyMjIyMjExMTEwMDAwLy8vLy8uLi4tLS0sLCwrKysoKCgkJCQgICAdHR0aGhoXFxcTExMQEBAPDw+8G4sGAABtj0lEQVR42u2diVcayf63UdM5wICHuCSVXAg46m9eBDUjo6hcXMYbEheOGDWKggsRgxKFgNTcdeZff2vppptFjUsUyOc5R+lueqvqp6u/VU11m/4LQAthKg/955+ls5PjFABNxfHpGf3Xf2qFpqlUOnOaPQOgqcieZo5SqT/+Uyn0vzKp0wIFoCkpnKZO/mUU+o9U5gLZApqXYib1hy40TZ0iS0Bzc5qimtB/pM6QH6DZORNlNBP6X0con0ELkD36lxA6k0FegFbgJMOF/uOohKwArUDp6A8mdCaLnAAtEnRk/mv6d6qIjACtQTH1b9MfaeQDaBWO/jCdoUoIWobMmekUbXagZTg9NR3jpgponVrhsQl3CUHrcJaC0ABCAwChAYDQAEBoAKEBgNAAQGgAIDQAEBpAaAAgNAAQGgAIDQCEBhAaAAgNQDMIXZx63t3VO4q+4aAlhI7ZFYE1hNwCzS/0hpXLbONKh5FdoOmF7lQU23yRxlk57UB2gWYXepaVzLN84Dc2wD8PhjqtZltvUnzpcPTS6W6rrXdTzh3psZs7Xx/wwfcOye986DWfEmJje3xg97XDYnXw8n7JUWaPDjkcv5a8DovdLcL1Xocjxj7Oux2OEUrjbJaDlR67pfut3NSRt8tqdbzepuq8nJ6fZ2Sk/77bZrZ28i0c6Vt4K/apXiKXezvNtm6+td/Kc/fUSQ//nOJpFgtpc47Cou/DakIdOFi+P6GzEe9LMTDKSmr2kbDJiNrCTZpi0yIywI6y0dxz+Z2N6x2Ww8oUH+piE9I8dtnlS1nkNz0FOqOU2aW9bJJXDHfy04VdEpbYh5+NM4N22MeyVXwb5LszL4cVs9DJXl6NdY2N+tQRdh7t61sIiX2qTWLhtTrDb5S+LM9tr5MePveQ+EpmiOQl1PsubDj7RPlHDwfJ6n22cgi2mcg+9tnFnPFNdkpHQ0woa++s38wclIW4ZWimRx5xLoCXEdOE/llqS9e4yzO/mLkJH9gMbMUO9nFEmT42s3+WO/VzWeh9ixQ6wcVyhCfY3GaWzDhb3DE5082m/i7nZet4zUfZppbZR3eYa7pMT9iqHWyftT2pI/Q431O+28oMnfN6f+H75/X+Vic9FUL3im3aIPT3IjdK+rnRB4PEf3K/Qk87mBNmb5GtvNNmCVEaZUf3RB7kbik2c4e7x6/yPSJI0eWRQm+bVaG7pN/MFvMR/9oh/ZWl47g0xZrWhO5VpNBJLnRaltR+sZLOAitc2cL2czHvkLoKKys77Va7PPf6xYp/kecbrS/0oVWskXarlYQcm2mOD9RPT1loB7/68I1A6O/E+SgZ2OM+D9/gec/fJDS/hJsnDS9943rF5EHmscaJmQvFtc7KsLu3Vuge0VSyK2KASe6RPzhzUC20hS/Pg5glVWhWnHeWhR5RZ++iB2zsVxF5iFOpLHSPPFkkz+XZdp3QPOzh8VNsZGquQuj66SkLbRFph9Dft4wejA+RN+f0OwjNjqMIZD64WS3NIZ3jB1lsTFx4R9gYryR1iqKuSmgWBvxq5ULHpII6RqGFd7uyhVAI3aVYR8pCz6tXertYiagcJsrzsst/L9uNHl6RKPzW2+VwWDW7K4RmsYd/atFwyv/KTtaKXNSErk0PH7OpQm+z8QyE/s5l9DAhZDxP71tomolOMmds5+Lwq0ihLZqUPTJIVqtmNUJ3KvaChQvNy9T1y4QWJeq5rPixDUbn2GVdF1qcUP28cspXwmt/tCSL6nKlsPNXFhftlEfrCK3WJX8pb/9nsbt1hK5Nj15fFONqXAOhv2PFkAn94X7boemibJLbFsf5dx7RTkVm9RK6pLYyvOauWyIqVUL3TPGFzVzo6FUltEMrdWfEOmM2ZqIu9KIaSHSKlazwsTQbmNYrhVYxL1ujzT8X6b6khP6l16G1RaoFcf0SujY9XlnDtKt72wOhvzMJD+kjrp37FJqVzD3l4zwlqvY83tSFjrPRIit7R0WTtf6Dj0qhrXwxIfSBdstxKRJJVAvNGwaFrTEh6c/cfV3oKSoN6hYei5Wsl+cd0hbdiKvu1xdaO4l6jTE0byY8Yt5mjULXT48WQ1tl+yGE/o4kPWT0fIJ4EvcoNG96GOGl8DQb+MBN6FanvpcH+Ve1+hSjhxbp3Mro1EqV0BahnRBa1upkib9a08oRk2WwVbZcWPjGdKH5lnfkJq1qePKLrLhpQnOXl97LeGTHrN3brBW6W6sv8tqpRVY3J9n2ikah66dHFXpebVSH0N/R5z7iP6XFCdKXuD+hd3lrm+25t0dR2yoUy9z2z9zQcXmQLTMH42o7NBPHOp9mcYL2nV62iQJRCr3I23njBw5Ntwqh7dFd/uGRYYxi3jYKrYzsz/F26H3ZdjyU2P3VLO6eqELvzzO9zBl+qvTszNnZPtqydYTORvntG285iXxs5Ij/ZsVbEXLUT48QOhlhNcVOHouwz+5IEvJ9N58pN9qzc29C0xmzVheysOO2pN7k4/fvbKLs7ZJTWNBL99S7iPweYJXQ5mRZaH5SyJpWvDaGlvf/rJuq0B5qFLqnfP+PUu3untJTpMY7hTw2dsjdjTKjrf76lUKlc7+cwn1tacd5pdB10yOENqxIMcbj4F4DaLX9uTDujt9jpXC1VyhtfilWOsksMfecH3XyBg52XM0H3Gi7qK/R7C9cAdtkTQwtbjJqQtOZTr7C7p3aSmHXGl9BV1ytaFoOKoSOerjs6k8nog62OrND/rJDVdJi7+Uxyw7fJdvvdMrMQ/taoc22rpCxaTM3xLdqfn1SWSmsnx4I/XBGa42rX29QLfyWZrvCTjQaz2lH/0NMvNZw7VAcZDOrIUb29Hn3lr9l49loZLteuN5Fi0tLdW9zJkXjSDxiaMMprccue8FickXcszlc+9ZsOFiKHNT9on56wtpJKHcbQjcOd+qCFa5q8bobL423+eoL3ShAaAgNoQGEhtAAQj8A7x2OcW141OFYhketITQAEBoACA0AhAYQGgAIDQCEBgBCAwChAYQGAEIDAKEBgNAAQGgAoQGA0ABAaAAgNAAQGkBoACA0ABAaAAgNAIQGEBoACA0AhAYAQgMAoQGEBqDRhQagZWBCZ1MAtAhZhBwAMTQAEBoACA0AhAYQGgAIDQCEBgBCAwChAYQGAEIDAKEBgNAAQGgAoQGA0ABAaAAgNAAQGkBoACA0ABAaAAgNAIQGEBoACA0AhG509nbZv0TiO27hYg+5/H2FXuAsrn1BVjHmXBla9IS+17FYnBp2DrVerh0sSJbk6IoY2XgkoS+IxLMGnSn9NDgQHvIkv8/K1/uJbzqy2Xq5tqk6pJ6rfWJk9tGEnmL/jz743J/gM6UnbxcWvlNG7DpnDlsz0zbJimEsS2Yo/fLIQqs7lZiZmF4sqnFIlG4tXIgrSIHSYmRqcumM7qgXl+O9haOdueBcjtLDhX0208bCHv26ED+IBMN7NLkgyrj9hQS9WJyemGGB6Tu5XExsa1mmP7oUi/APPra4SsvzqqibXOebZ/u3kN1ayLNdXDji2+RhbnlvaTw8MRM3bGSV/V+Jf61eNheZCs7x2EpcD5fYJunqkjEF+pBKNBScP6THaqp3jDnEV3HKJ7F0crQd17atsTMzMRXho9PlSGaVp3idpz2+wI/NWmgixHPmcEFsn+W4drlcXs0uT4ZEoZ6ZmwzOHVcOHc0GQ6slGpO7945uRNi6ppbFca3MzEtMXGBJEQdhPTwRZmkpH1/6lSV9Ni13QkzaYkPHbMuzh2oihRx1hE6QJaPQBokeVOgEWaDrrqHZIBlliSQDgUCYLhC2FzuEfKGFYXdoyu07XwsEhshIILC/QWY8oSkyynaYsEN71kc+0K8k1BcMe/oOMy5x7GadmeIbZ3DW61qjwUDA1R8IzFP5Bc+prHMm4WJpfzPMMsi5S8vzSrRNrhMuHh3xsd3JsDkJy/c4n6bvbcw5POtjmVreSMDN9tM5eFy5bNbrDoU9XrYSXobQoQn2b3zImAJ9SBImwfCAK7EfCIwQXyCwZswhvop9fuxolIyy77Vjqm1bHY05fbNTLj878/vW3466h7g9AT9ft4v9ixB2es6R0dkRLsAWcc6JjHFOq0uPvvGPzg4519mmBj3hsGdgzziU7BucCTin6Hwg0O8KBIJ0zhn2zrwhbCVVmXlZlYHk6D4/BtNkeGbYGaPl4/vF7xyfGfSI88szGAi8YXrQZH9faGagLyETGSjWF3qNrBuF1iV6WKEXyHp+cITbwQ+SOFxyX0aG2L684zuZIIv8fCW8/Noggyc8Q9alBLNDTIIC4bJtsqRMefj5OBCkS9yNon+Qj/ZNadvc57nDPEjQd+4DLvSJh5lunJdR3uRgQFWnUmh9b/P93LCgp1jeiDBmlUQrl53lG9ggv9cVWqRAH5KFKz8quUE+X1Ics+ockkLPkqL6fcW2Bfl+f54f4wjNkKk30bUQz8NKoRNiVWGWG1tkzMszpm+oLDR5T+lnDzvlgzwkPHBNGocmPEc823g5PDUgBQ1SWnrjOqnOzCuEHn1D6Z7YhbFBWj6+K4SdC1/cfD9OCDs4GX7IJlzsqwPPhJoCQ8gxu7W1taeW2O/5CqqEFhI9lNABtjMso/1sv0RE4A0YhV4dfM/2ZVTE+/GkQWhe2B6w+bgE+65VIfSYWN5PP/KSMc4mvfGJSyzZqhCaiuM2zjPlzQQXOjTCMsM4Lz+W2ibnnewi99aVqRJa39sNMXS0la8UeoPNVLHsqDjoAyP1hJYp0IfU482vJMl4WejqHJJCT3hptdAb8tLAB8T0wVEmjY8f8Yn+iyqh53my6CdmzBZZ4qkbD3vLQrt4sBIiJ0VnmI+HnBf60FfCh3JbRwahP4qSYq06My8XeoWfFNrYSfn4qpv3i9N6VQqdl2XfFMnXCC1wz1/IPaPVQkuJHraVI7DHMoJdbAKBviGD0PmB2CLbl8Hx8gKa0OLQuqaEBJPhXSG0yOqJfnbImdph9jnYx9c4Ig6vQehVlvGfnTzWO3SH/UMhfuZXzMtHtU0eOlmZOjRJq4TW93aFxMtrVoXuX1iY94Urlp1b8ATEdwP1hJYp0IcE087yeqWwxhwaYVHkjBDaM1khtLZtNbfEvo0PsDlEni6y7KsUetrJ1xlgnm6TTf8sPXVuDpaFFl5GSHKfDPGZhsiRPrRHIuX904Q+FgYuV2XmYbKavKrwglPMcfQuFAh4efyjCb0zNxUIeIaomuNc6D3yVu7NXr0SenNpXB7/YX+10KpED1lC7/Bzc4mE1cpFWejiwhvK98UTrBFaHPS+CSbBZtyTkUKLpSbd/LJzcNHHQjmPr1ydMgpd8ITokivLhj6SEY9nVKzMOC8fLW+SlYAJHgtUCq3v7RJJVAvNQjyfO5gxLvsm4BRrDLprhdZSoA8Jgp4qoY05xGoZgVEudJq8qxC6vG3pr9i3SQ9TQugQZedypdBBl1aXZUJHBuhKX0kX2i+zfCdBJtTqmnFoqUborNjX91WZGSDVbKtCj7m4eEm3f3FjK2QQepUEVza3hofETF+l0Ltye8ssxqkWWibez/PrqzNUJbQm0cPG0CKaL7eRakKnXQmxL743NUKLIJHt/DbZ8i9RKfS0Fk9knHObfD6/vpxRaDrjOh/loxdDfjo2TIe9xcp5GfomP5DNucFStdD63sb0/TaGHJ94IozLDok18otxpdB6CvQhtU5YJXR1DomQY5UXwlUhxyeZgeV94xt1ztYvoWeI1lzALhCHZHciTHWhB+RxOMzwmp7AODRfIzSvxW2z3KnKzEtDjvyskx2msJOrPGMQ2ieM9XOhJ3xUCv1Zbo+HSPWFDvOYZV2YYRRak+jBhc64xFGIZcpCu0MhKvZlxs1O/Twvc8tCh8TFLcqyLzx0oQrN01/y8KMxNRziWTrr4nmU3K4WOsmixU1xeOM8ht7hVQ7jvDx7y5u8GJj1ztNqofW9PXHx/XrrPawUmvLai3HZIF9jzj1TK7SWAn1IPZN429zEm7LQ1TkkhA56LmqEFtsW7dqiBMzy/xMjotQnpSqh13n9i+ZiBRHxjM65PhqEFqYFB9QLOd3cMw75R/lZ0L9mEHpVZOpBdWZeHkOf97HocJIv/WWAHJaPr4fn4y4/oKW+kCo09YsU+IdpfaGL/j5+7oorr0HoskQPLjQ7UZeyiTBvXVCFdro/y33ZIxMH+9P8m7LQ/h1aCrq+sKPg2qCq0N5lPvuGSKMrKuLfkd1sbHC0WCU0q+3wemHaPSmb7aZdhxXzUmrc5JxLlDwLZH1ra56sbG0tk/k9w95Ou2Jna+4RQwntZWHUrLhClpfNsH2cPD6Y5LtPJtn3AyPs38jA1lc9BfqQZGBwJ7MoDo0qbFUOMaFP1sgEW0+UzKr3Fw3bFkWnK3qWHON104/OGD1ecs6oswRd7F+IrKWpr2899zHQdyiEXhrsLxlL6FCJxvkJGyOhg09L/MTQh1bI3Gl8uO+TQeiJDM0MjdDqzLyilYO3Zyw4lzPr/gkRiMjjOza4kVkZGHPn2fiGJvQKmT3+NMtPGi50hkwbY+iPS7zl9EOY+HmoM0dGF6R2ukQPL/TZFIuu+hYNIUeEqvuy5iFk/KMx5FibcBJXjF8nx6gm9Nycm6gX20G3qHds9hPiHD2uLqFZKMlb7rjHQui0K1gxr4iAyps8lM0nC8YgcNqwt9lxQgbmsgah+b38sdWKZVmpGh9hVXE+tSKc3NdToA+pF5IhQnwreshRnUNM6LXyetSY37BtzukEX0L8sOGjnxB/tDqkjdL9YX7beFPWTj/zRgxd6NEPLFPe8KS9c7Kdny4Zh0pzhLhC+8aQI8m2MZikNZl5udDUP1g8YRnT9+6Th8cU8vjuDLB93fjgJGPyeAqhS/Nsy863VBM6VNHK0R/4yBtkdI5olUQPInTVnd+dy+7OFpMVd4Q3WCl1vpuvmKXAyrKL3c9i+HxADSIv9nfqlRLvnOk6J1flvOVN7pCaGwSj0xV7e7xbumS/K5f9lKzemQ1RgF/+u5vkNTm0ph43Oh68ZBWZ3X0tSE7X5G5BRJxHO9n6y46ywjZxIIe/JrV90YfOd3LVgh4mL67K+Es4rE5nKSFPhuyBcWo+kdCPebTO3e2Qq3yEydGj3Pq+JRsiFqA1QmvMuq783cKRO3yDjQ37aV2hb7nsTYS+luuFvpKCdgfmcqFvgChxH4zJrR9G6MUxQwW8zs90wn2e42/dUmbOJ24X3Ebo+stC6HuhVO+mTdMKvRvYqY1KAsvauRu68keS6+PvP3/7xTAwW+fnnNG12y9bwf7C6Z0yIqnWfehq7DaLXyxc2ZsgHL7R2lYCX+nj8qF8rye+cNZMQgPwOEBoAKEB+GGFTp88VtLQ3xRC3zPb4fE+svooyWrC/qbFkVH42MhCn00T98RsNP0IqWrK/qYhD7ptNrTQwaEPxcdJVFP2N+U/UwYPIHS5j+cqb+MvLvAfLVze+1Lv87jvVO+KlruibmpdLI3dThcWImuGexdyHv5r4XLv0XIvzHe8KZf3Ps0sxA29ULVHPJxqP5Wu7m/KWYrpeyt6xJbhu7CwWd6e3g+UroYmQlF1DrmTxtVJTlZYuvnqyr1GDT1Ry9PkFtfeUWMX1qp+qhOix8ru7ERoner7qnc8NaRHbF1fkfhiQc2kcldkYxbyr1YTJcPh2Vlg+/WRH5m1yIV+0A5F/+UES339aQtqP92KPandDC2+m54Ix0XK5SJaXjaA0OU+ngEe4r0lw1f2vtT7PC6N7k4NeMb3abkrarmLpbHbqT8w6hG/RFJd5H1I+e9f9N6j5V6YK84EveC3G0ODZ4bfZ2q/Ld4v/4Stqr8pZzCo7634JVIZvguBlfL2yjtJZ8jY3Dj/hY2+k8bVSaYGwpNO/1eq9xrV80KfJrc47TF2Ya3qp5p18punq2Ro9g15q++r3vFUIHeAb11fkfyCd0vlmVTuimzMQjIQGBskAcPhyXuD/KfLX+i+a9Fw0LbET1t4d876094EArvVe1JnM4UR5+Ss3xml2iLlvGwAoct9PLnQabdv+Mrel3qfx5mJwbn1pcGBr3pXVO23WsZupyyzSj5veWsjb+RMeu9RQy/Mcf8FF3qb36++Qujq/qa6gVPqD+IrhebHy7A97QdlIv/DZMewkzVCn4e2+fybhl6jel7o03Sh9S6sVf1UY/zHmWe8vyudcR2U91XveFqlkb4i/QueSXpXZEOSRBaFyIHh8MRJTAg99sbYUbVK6JppesaV96TeZt7xMqw43JdTF9HzsgGELvfx5EKHpiaH6VW9L/U+j9OiO9oOs6zcFdUotNbtlGfWqN4e4Q7JmfTeo3ovTJr2LDKh8z6eb1cIXd3f9FuENmxP3ck5khTrmjPsZG0JLa67WnAlukTpeaFPKwutd2Gt7qc6T/g99k9HYptL2r4aOp5WamRYUbXQWldkQ5JEFs2RT8YuqXP9OSZ01H1o7KhaKXTttDpC19vMKO8FxE7oDXURPS8bQOhyH08mdMJ1GBymV/W+1Ps8TokObNQ9pXdFNQqtdTudWlgI+cpnbpIfSz6T3ntU74XJygHXezIx5uPxmt4LlQ29XT0yCG3sb9q/sBBN1Ag9t7C4XqwQ2rA9dSenZBdY0c9X28mq1QnC/gFx5mq9RvW80KfxLS4s+D1U78Ja3ek3rPa4/bCw8LvYf7Gvho6nUqN+HpN6gsYVVQutdUU2JIln1uzgSkWX1OLw2BT5nYcFhqkiqQtBKXSdaQahtT2pt5kB0d84LnzIVOTl4wut9/FkQo/NUyb0Vb0v9T6P6hHiHby1rqi60Hq3Uxae9nnLbdUxLi+fSe89qvfCZMWYc4wM+ty8nqX3QmXZOOtj54wh5ND7m/YvzL9xThRrhA55+uNGoQ3bU3dS7QLbFzTsZNXqZGubr3/B2GtUzwt9mogkAwMeqndhre70q/0O7R2bUVygxb4aOp7qoXLAFTSuqFporSuyIUkiuPXMVnRJzXiGvOSN6AKmTxUVioBPyFtvmkFobU/qbUb2YE6SRXURPS8fX2i9j2cgsNaf50Jf1ftS7/P4VpbQ/KzUuqJqruidTaVNYZdWWw+5L+RMht6j5V6YLEyZKZHZE/dUbcgxRU70SmFVf9MVFi7WhBzn8qkFmtCG7ak7KbvAXrACT9/JqtWpLLMJeq9RPS/0aeWQQ+/CWt1PdY6ca4NH4uQV+2roeFp5oc9UXb4NQmtdkQ1JElm0KiLCcpfUkCs9T7JzvBOsPtUYXtSbVifkqLcZ2YOZP6ZELqLn5eMLrffxDIzzQooJfVXvS73P444ok3f5EdG6oupCa51NZWYtabWFYv+EOpPee9TQC3O8L8srhe/5OVYl9O/82RSa0FX9TT/yB1HUxNA+v1FoQ29VdSfXxP5viIc/aTtZtTp2WqwWeVwwb+g1queFPk2vFOpdWKv6qfIF6FEgRtUYS91XveNpVaVQX1G10FpXZEOSRBYl+AW0fHh22bwshj7vHzN2VDXIW29aPaHrbUb0YKZzrlN1ET0vH1toYx/PgItnLhf6it6Xhj6PYyPZYnzUc0jLXVH1kEPvdrqwtbXuG5R1nv3fyRzb2gxZ/aT3HtV7Ya4zk7jQF15fqVLo3PqA19BsZ+hv6qcX8TFXskbow4jW3UAeL0NvVXUnLwYH4/ntAR817GTV6vi1ZzKxH2IVO73XqJ4X+jRdaL0La1U/1U2xG8MDsS8bgyP6vuodT6sby8orqha63BVZTxLv9bsZdO4aDs/wYFG0ckR5MVqeapC33rR6QtfbzB4Z2zuLusLaqazn5WMLbezjGRAFBxf6it6Xhj6P+ZCbuKdEA4DaFVUXWu92SohzKKzeOJgpb22x3Ht0qtwLs+j1l2Q79AemrkFosYpPBqEr+5sOTO5UVwoJcY8slyqENvRWVR8OlPSxKf49atjJqtXxRk0nIZ6Iodfopp4X+jRdaENn1sp+qkXevkP3x9gWRg70fdU7nlZpZFhRldDlrsh6kniWDgbjhsPDPRZCU/9gXj9oRnnrTasndJ3NiB7MZDJbblEq5+XjC12/B9EVvS8NXCQutNu639SDZEZrvnPyjtOy92hlL8xvJn3ze9+G3qraTcSd639dsb8lE6n1GjXmRXmaEb0La2U/1bBL/Oolu1PVNami42n9FRkxdkWuk6TvQp3NXOztZm6cl48odBXXdVa7ritqXaGblNt23Dt0zdzH5gvf7VHiLfFbjvsQ+hu6okJoHum4diH09xb6G/t4Xtn78hu6oqpsaEHw23jz5ujte6LO3cdvHfSuyBAaAAgNAIQGAEID8IhCz/WhhxxoIaEvhv0FZC9onZBDvuUNgAYTuuZtqfqLTbXOk8a3pR5HpqYWRdkc6kcRDRpO6Jq3pRpebKr9aMXQkzbh8UxPeYb5bxQ2yAbyFzSY0DVvSzW+2FQXutyTdpr/yvejmLPgmkX+ggYTuuZtqcYXm+pCV74t9av8yadvHPkLGkzomrel6i821TtPGnrSlj7MBgMB2ddm1I/8BQ0mdM3bUvUXm+qdJw09aUPOmdXtLSn0uA/5CxpM6Jq3pRpfbFoOOco9aT8LlTNS6G97XSkADyh0zdtSjS82LQtd7kmbEPMsyoc+DUwif0GDCV37tlTDi01VoQ09aXPuscTe3PAg7zOY5h211/rXkMmggYSueVuq4cWmqtDGnrRRN3GO788SFpiIp6OsPs4DzwGEvpSat6VWv9i0op/W113tgSlDqBOCRhT6Wup3PIyVX4kNQPMLnemfQu6CphS6bk/a95NfkbugKYUGAEIDAKEBgNAAQgMAoQGA0ABAaAAgNIDQAEBoACA0ABAaAAgNIDQAEBoACA0AhAYAQoMfVehF9bkayQU8kB+0gNAD8pm4JT/pQ26BlhF6ibggNGgZoY/cQ8F+Sr9ube2LqepnMbnFOC/PvLOyuFmiNL4lybAFY+9WxIu703yMlrbEY5gOxddi8Mv6u+g+jgN4WKEnyXaQldD7hIhH5G4R8aaKaZd4ot2uNm+E9PuJd5/2qY+6i9GdPtewh/BHdETFg5RyRDx+Jiy+5oMRF/G7nREcCPCQQm+SEJVC+5yf2fjMEBc6RGJHlC6Uhd4kc/ytQUL5afHminzfeIaWfucveKsQOuBhRTMf3CHjJ7QYJts4EuDhhP466DlRhZ51LfGJs1zoIfF0f13osT7+LPRIuFAWOkL2+BdD3iqhB0dUoQ+j/IUWcfIWRwI8nNCz/Jm4Uuj54BseccRFCe1MG4UuOSf0xaTQ4y51JF8hdJY/4f+LdLt0GN9alS8ZAuBBhE46A7QsdIx8pmHfCRc63ueZWlgIaEIfkulqob3ag6OTTGhSDpw3ybIm9JKMtyE0eDihR1z7utBf3Uu0byEjnul/7idjAa8mdIYEq4X2e9T2jiwTOsI+N4TF78iOKvQSmd7N0j0IDR5M6OCKjHBVoenUmy2SlEJ/5P/1GNotXuN2eKQLHXQWtfUYQ45xT0kVesTDZ1iH0OChhB4MuH0XRqE/kBkfFUIf9/uKRqGn5Ts4ndmy0KskKuqNsQqhT13caiE0ry5S+gZCgwcroQmPDwxCFzwDC1LoMVeyopUj6Rpc3gpLOaXQF37P2lli1rluFHo3TBZY9LFOAlulKbKU3QzOk+FTHArwQEKHaYXQNMSqeFzoCFmiFULTvTEncc6VdKHp1xkPcY7FKkKO4fI7hkhuz0+Ie5bOEHKMYwEeQuibkd3NV09K5KomDAfUgQXCvjpM4CCAhhX6W6gUGgAIDQCEBhAaAAgNAIQGAEIDAKEBhAagxYQu5s4AeGRyxfsROp9JAdAQHOfvLHTpNJXNX+BaBh6fi8Jp6vSOQpfS6QJyEjQKxXT6bkKfpEvIRdA4lI5O7yJ0PoXyGTQU+VT+DkIfoysJaDBOj+8gdKqIDAQNFkanbi90MYUIGjRaFH1VKXuN0LkU8g80GlcZe43QZxAaQGgAIDQAEBpAaAgNIHQFq8rPN9uBEeUtjSq/1Ptqb8Y3sYxDBJpK6GXvJt3x1ntK/8+KYrcodrw1CDST0Jcyq9g2aLZXeY2DBB5F6MOw//e0KvTb3/xh8WC6pTW6+dvsEaWx0SnxqjYaDfomY/pS8cg+PYxssqHs3Mj4qv7FSyXCJ5o7cZDAYwi9a1dsdss4F/q8R7HaFescm2rt9rBBy1o3/79BeZFr6TQbivFyDP3eotgsimOvaisWOw4SeAyhXyt+VvxauatDSpjSDZs1w4S2dufor4qtp0i9XNtxpbdIs93K2xqh7dYYLc6Yeyo38rZ+fRGA7y201VoQWv9MjyzCyillkk1VdinNKGZWtUsqbLLNwjsVbCrd1UIX5aQPBxUrjdusaRwk8AhCHyld/GOGCb2kiBeqbPD6nNUm4gYeCJeYshk5F7XZakroTuV1tLrDQMxqXsQxAo8h9KYiiuUVJvSkosLKXKuo01kc/D+TeV3OxeylUxbGtC50/LVVMXexWqH6BSNksaIdGjyW0N0y5v2ZldKvI4JYjdC7aqxht9Dll4xl442VwmyXWRnRvqDsxOhK4giBxxE6owh1J5jQxrboKqFLZtFoUdAb4yrvFCZt5nKvgWmlBz0IwKNVCjuVQxYnO5jMOZuNdxuIvYzXCE17eCWR/q63XWhCr/as8dFus9bjIG62Z3B8wKMJPaL0RMLdXGgaUnrWk2G7I1sr9JrZEUtHbOZktdBJsz2cXB/Vmz96lR6v4ABHCTyC0NkeXg3cFreqI52KYu3drw05KF13sNlsy7Qm5IjyL8zd5Z9uOLSqZRxHCTyC0JQmlo/KwwexS5dLr8Trx8bp6IdzHBHQMEIDAKEBgNAAQGgAoSE0+HGEzuNRYKDxhM7fWugLPKwRNBrFOzzbjqbwOm7QYJzd4emjNHuMDASNxXH2DkLTNJ54DhqK0zS9i9AFvJcTNBLZK99I8Q2vdculMmjpAA1CKXNNre4bXrxZPE4dn+I1puDxOWUqXtC7Cs3CjizeJQsagEz22ney4eX1oMXa9CA0gNAAQGgAIDQAEBpAaAAgNAAQGgAIDQCEBhAaAAgNAIQGAEIDAKEBhAYAQgMAoQF4QKELC2UiyKz7Ib7wsWoAPJjQX0gZFzLrfjj3esSjUrL9/SfIjccIORbJKjLqHtlxBvhHkGwiLx5T6MOtfGF7MSYfDfZl/V1UvMxqb4s/KOFkS7xLaH1pmb+i8OuWRLzXbScaWRUDiTg9/bC4XqJH6te7P2qmvyXvKV0lYTFysPpuZVtO3199z1+plFTzZ4/uJGQWs5J8R+TW/lZezV08/OfOQi+SlYF+H/FyjyMu4nc7eVg9Tb5wk8ky8zhI/AMkUKD7apQSpLQYIp4Rj3OOl0juVZevn0wUltWvfT9sro+5koeeIfGMiWWXa4RlCn/+4KbbM+x0f6BTav6E6eAbHpp4yDqlg8N87lmSVHMXT4W9s9BLpI9lbJSEWHFBxk9oMUy2K4Sed27ygmeOZfksX4ALvcLLoeIk+cgvsX5WUofEyvbJzI+c60ce35hTlL5J5wi75L0j80xcd+ArzYy4eX5GiXjnrhB6xlUt9Cy8vR+hxTVyyFWkh1F+NOLkrVHorCfIv59aNAo95OGP1jvgg0GxmjQJQGi6QYhsNQoT8c5Rr4fSBcKjig+hZKXQSRKG0N9JaPERIjzmKB3Gt1a5lbrQ2+oxogahvzrHxZRBLxf6kzh2gxBaF3rUSWWmHtKAoR3JIHRgPAahv5PQ6/xjjpcpS30ikBNCS5ZZsBGtEXqPTIspIy4udK58CH9woT/xkEPU8gYHqJap3oF6Qq8596TQaj5D6HsUWmTyDLsyLpHp3SyzVQi9zurcESb0GlmqEfqYiDCE+vq40KLZ1e+G0KOu5CfPEA/GfB418khQv6dW6EBxaJZKoYd428YUhL5PocXr6KfJZzriKYo4oyLk2JWSJrPGGNolrpQlzwgXWrTeDfh+eKEXyKLWbDdBRO5PkDzLH56Tp/slg9ATkb5zipDjewk9wd3sG2JVPS+f8KZS6AvvwFdKv3qGjUJPkWPeIEUWuNA8bEwIlX9ooePOMVF75p4ui7w9d41xifkV7h35YBB6zM3COAj9vYQeenuUDvFIeYosZTeD82T41NhsFyVv1j6+YYfCIHTS9SaR3/K6MqLZLnaWGHEmf3Chvwz2HYusH+xL0+LQ4GY+Oc6VLQ65FjaXXMNFg9CEawyhv5fQG1Mu4uHFyJ6fEPcsC6fJsUFouu4jpG/VGEOzWQNOQoZ2KBf6YIQNxukPLnSQbMiBbd6CmQ15CPGI6vSXaTchwc/GGFq05EHoexZahQlNCwl15DBRd56jRO0bA/K7R+qBLNDTJLK8mlJiX8u04m4G+fGgQt+tZCogvwGEBgBCAwgNAIQGAEIDAKEBgNAAQgPQ+kIXc3hz+g3JFZGlD5yl3yp0Hq+uvx3HeWTpg2XpNwtdOk1l8xe4lt2Yi8Jp6hRZ+jBZ+u1Cl9Jp3OC7LcV0Gln6EFl6A6FP0nikye0pHZ0iSx8gS79d6HwKhcldKKTyyNL7JZ/K30Ho41Pk4J04PUaWfvcsvYHQqSIy8G4xXwpZ+t2z9NuFLqYQ7t2xYl7tL7L0zlH0VUXCNULnUsi/O1KdvcjSe8/SGwh9hty/79xHlkJoCA0gNISG0BAaQkNoAKEhNIQGjSN0cht5CqFbSOhu5fptWjqR7zcQukvJ0RHlLXILQreG0NPeIl324r2FELrRGO/XhvonEXI8UJbej9CbU77xiJywOemfOZRDU37xFqcfVWivoqjZ368o/m8XOhYp0XiEv40pEfZPxWHxjbL0XoT+zWzutCpdB2zwd4u5UzHPUJruUcx2xTL3QwuteCsGbhhDjyiK3ay8xO+XbpKl9yH0mtK5R6lP+YXSfYsjQxOd5n3qV16n6b7dcvDjhhysFOEFivpxY6ETSleSpr3KJES+QZbeh9C9Cn+Sf8lmKdFfFP78+ZmeNRr9LSnOpMUfuFI4xMsRXpgM3aaVI6L8xkdXs/D4Bll6H0J3yophj7JNHWb9q+yH95HXSvhHbuXg2W/I/BuW0GbLb2jruGmW3ofQVqsYdLOC2mbVvjjolVv+oYVmgZei1V5uHkMv95gVS+8uJL5Jlt6H0HaLGHyuxLRB8cXI2gkd/8GF5gXKEL2l0JQeTbAa9hIkvkGW3ofQXcqBPBBp9sebm/Y2Cmmli097/aMLTf2j9PZCM6IyI8E3Zul9CD2uTLGhQ7OD0gmFb8ynzMSVHjaQsPzwQldwI6HD3eJ96BYIfZMsvQ+hszbr23SsS5nlg4r37a9me7Zotczsh+z9Su85hL6d0HNK99uj6HNlFPn2wELTA1Z7USyivXSfD3YnKJ2xKop1+qRTsUPoW4YcIRur/lh+xo2VhxRapRDdOFcHs1H5Qs1CDG1OtxLaQGJ5Gzo/itDguwgNIDSEhtAQGkJDaAChITRyH1kKoSE0+C5C5/GozDvnfr46S5En95ylNxD6Ag8zviOF6hxElt6V4h0ep0tTOWTgnTg7qp5yhCy9Y5be4YHnNHuMDLwTx2fI0vvO0uwdhKZpvBHkLpymkaUPkKU3ELqAV4HfgWy9+guy9N6z9AZC01wqg5aO21HK1K+CIEvvPUtvIDQtHqeOT/Hm9BtzyvLtAln6QFl6A6HZNTKLd63fnEy2gCx9wCy9gdAANE+bHoQGEBoACA0AhAYAQgMIDQCEBgBCAwChAYDQAEIDAKEBgNAAQGgAIDSA0ABAaAAgNAAPKvTioviILjSM9gnX25vMvkQ26kwNkgLdJfPq2LZzBSr8IEIP9PH/cRJqlD0+9QaMo4eRWwudXviojf7uSsCFH0jor96BhimgQ+6Kp8WteG4ttIGSz4cnZfxAQs8Q+XarnZXFjQtKj7Yk/JXUB6vvYxnx5YWcKIq67Nri0gZXJq3NJ1lfWmYjeXX5rSJbV+zdSpx/tbfFn7hwsiV0PRRfi1drfVl/F93X9yfpnOMfxY3FFb6leNC9tWOcKxmnuY3FDaHn4erSbqlG6MTyyp4Q+nzrgK0gWdpgUdUHgqDjxxF6k4T54MEw8fiI74AuE4mP5qeIy+/sE8ok5UT+zsj4gNM3RIaYkFE+aURd19cg8Q+QQEGdk5BjutPnGvaQya+UTpMv3HiyzOcMi6/5y2ojLuJ3O/W4YoZw47c9ZKiPBE6ph802ZJxr2rPhGR4kPrbGuMfpH/TNVwm9RFwjnqlJLYbumwoTfs4ODEOGH0Xo/b6hvLxMrzFt3SKE3SczospIZvM0O+w5K7voYUIXvX2s9Nx2v+FCf9DXNe9kBf0qEUXsoJ//z/eNZ2jpd7JYJXSABRJfuNA7ZPyEFsNku7w/4iXm/gF2sqy7WGD/hocchrmmnX721SyJUjriYkV/1FUp9BfX0DEthVya0IP+0YNPPJIhGdjwQwjtnvU45Ws1N4Rr466SLvTu8gn7/5bERdH3URV6lYgSNUR2K4TOeoL8Y2pRFzpC9vjHkLdK6MERVejDqAgsiNawkSPi5bXOKRGlnKlCG+aaJqtscIsssCuGmHWkUugVssQjG11oklQLbrwz9McQ2hUIluPLXGJrKyCKMlVoVhrvbW/N8qKbhQmHqtBzQnAm82qF0NvE0CIhhR53iZFpkq8QOstjHCE0q68dxrdWta3RPTk07JzdlbW4N7JSWJ5rWuwFn21dbm62UuhZsiNWUBZ6QE6PiRMB/AghR8nvORQyjcvI1yB0NuwUk7jQ426qCj1NRP1sgxllFHqVxwGVQnu1aDrJFpJwoTf5fyn0Up+YOlN5UhzNDhLXRKIstD6XPC/47kXl5hYrhQ7JfZvQQ446Zxto7UrhrvMNl9frWTso0Smj0EGymCywSiIXemBUEzpMErLQW6oQek1c7SuE9nvU9o4sM3GdfUaE0O94MSqEXiLTu1mtXDZ6V1oPuvj6hNCGuYxCi839Xi202LexstBqZVCPakDrN9vNcs02yDsZk+pC58mEvIwzoU9kUwgX+h1Zl2XjeoXQu1LLZFYXOugsv//FGHKMe0qq0COeopiqCZ0ks+X1ZbxuVWjDXLrQG7L2OV0p9JwcHagWGu12P5LQuUEWdMiI4SMhJ2WhD8UNxEwfF3pVBqFc6KQzJMPb8wqhL7wDXyn96hnWhVajkIVYhdCnLh5sCKF5dZGtqSx0WmwxMSVqcpNM6DE3rZhLF/rENSJqopVCfxCab5JqoVfEVQb8GEIzDd6wwnF453DJFxYOqiFHv2f9S8w/T8K53ITriyY0DblWsodzvDCtaLaLkjdrH99Ic6TQF37P2lli1rluFHo3TBZY9LFOAlulKbKU3QzOk2HtvST9Pt5I4fGvnewtOYO8xI1tUcNcutAsHopsRf2BSqGLfe7Y5uLgSLXQYZKGDT+O0KwStUIXXIT4k3v9PLZQhV7vJ2QwVhghQ8Qt2tuk0DQywKpos4Uqoem6j5C+VUMMTb/OeIhzLFYRcgyTMrk9PyHuWTrDb8Ko4vGGvkSAfemaYsFLktUrC4a5DEIf8alvYzL+KRP3EDKwHiZnFUJfePyQ4YcQ2khhp+aFWqXEgRrcVj1bfS9Z990uR4maVwokql+aMaz9+miBsK8OK382lJDhDM3v7KlrinPDD+v+uOhwt84LDC6SydqJUdn+DX4ooR+ISqGrmXId3v8mS95B/DgJQj+K0On+wE1XmFgts1F/jjlnHC5A6EcRmu66btpiHPGWCdadAT/wh9AAQGgAIDQAEBpAaAB+DKFjv3ZbTQA8OtbuX9fuLPRJD1tTu/31rwA8Kq/t7UzFnpO7Cb341GQayv0JQAOQ/T+T6eniXYReMpksCWQkaBR2LCbT0u2Fzjw19Yr1/Pc//wbgUfnPf4WKPaanp7cWuttk4Wv5F2rPoBH4Ny9bLaae2wqdMplYvPG/P5CToDH45/9Y1GEyZW4p9JzJ9+eff/0T+QgahT/++vNPr2n+lkK/Nv3x55//Ri6Choo6Sqafbym0rYMV0Ag4QCMV0SyMbrffUmhTJ4ugkYegkWBRdGf7bYV+/eef/0EWgkbiP3/++dp0W6F/RQgNGi+I/hVCAwgNoQGEBqDJhN6c8U0ulx+xOKmIZ+t3Kbmb71m3ov0S0NZzz4nusdXdzjdidlA6otTrW15aHvfP7EGq1hF62a5wLKPqeFwZ5x/T3uJl6/DuXC90r+0eH/Oy7aM0pHy4g9C+SZZQb50n+m/YFAvLgF9hVasIPa5YQ5snsXGboj0KrrP76s2vKdHrhZ5R7vHx+b+ZKd1XRu8g9KV0KuzEjVrMeKlhiwi9a7HKN6wlrdYTehBhxeBLC3/eXSxSovFIOrc8EpIzxCZ9U7yQjPUr45HsdiR9EhmZ5tfq7Yh4GN7iqhBtf8Y/m+P+sVI1Jn7muhbhK0hGViL8bVc7ER7RnEd+rxjbOIrsHE7xx1FHg77JmNw3bXCxyxxZpp1dcuL4+LoqdDo88uvsOb+oRNLZ+V/ZrOnZEfnL2v3wyOicQXq+c3GxHx8m/TP6k8f2FAf/GFJmoFVrCD0iAwxuBdNwWWGh75wSUWPocSVss7FrckyU5JZOM7e0iwcocbac1WpXbJvchiUtTO1WpsydVsWRZkUfG32p8PcZ2sUmvMqIwp8R/ZJvgi4qvRVj4zFl1KZ002yv2Ay/sa8PmtkGbfRnMz/PflXMnZZuIfRup2K3KfZNKvaTzdob4Qs85yu08q9sazUxdKlbMdsVy2RVrvyqhKFVawjdoxgf3LnmGGImmb2q0BMsHKF0lku3rLw+pwddPNr4hf8bVSyzRVaB7K0S2r5NS73cYC/zb06ZZkWzImIYh+2Qz0ztnVah91rF2M6G0vk8GWdq9hZptptX3wyDDhZy0Ag/z/bNtl1a6DFzobusa/zsYyufUGxLdI/JHaW7VvZV1mZlJfJ7s6NG6LDyc5omu5WqaNph2YdWrSG0zVw7j6OzLDQvP3P8stxlLYgKY09Z6F65eLZSaF72JfgCEWWOnpjZTGHLOJP2xPySOc2/m1ZYge+wV41tKFbeqmKz8IeUb3JLDYNC6KyZFda/iepbUmHWLstrS6+yzfaT78zPomB/yWSdUobkyRqtFvoXvjm6v1FZ4fUZ43PQ1EIrtjpNAsq+JrS4NlvtbD4ZwVo7y0JPSWc2K4UWjyK3MYOzlpdsJWztvd0xZtE889vHIpCQuWT9lWaV11VjG+LcyaibsdmMg1Jo2sW2/VoRD322M6GHFPE4xgkW/sr9HBGBsJft3c9yj4LKZLXQs4o9XP0saXZF6S7AqhYR2qrUHstVJaQJPaMKva2oWMtCi1f9eJTFSqH3ZdNBiQ3b+Vy71DZKraMsAk6L9fZ20+5uEaZXjm2I2Hdd6VHbHoyDqtCjSpydQOLpuV1M6F5tl35T93NUxP5DbO/UueZYQW23WCx2Qzv0NKsC2HwsYFG/oDyOepmDVK0idFed+n2J3xWpFHpfcUQE78tCi2rUSzZcIbQo/uxmUYvcph+UUEJZ5dKKNgprL9f7V0vptblQNbahvORtLopsMrRbjIOq0B9YgdsjQgbqYEK/VCblLm3XCN0r2wzDLD755eXLl96KGyvxX1h1cU/7gu51mlEhbCGhx5VOdeh1d7ktlt+VqxSaWjrLi6hC/yZDjgSLHd6LuFYIzX0riaJvm1/wbb2TliKT9kDEvr32OFMtpqyKamLFmBS6ZBaFZsHcaRxUheZ3H93KnLyunLA9KPfaqRbaJ/fbr8xWhxwSf7nNnR51mmMwqoWEzmg3VMYV+7k2cVL5UC20vIpne5fLQvMit2Cx8bl5qPqbFJq/0Soqwgdx9/u5vYfZGlO8ol0hpPiZ3tT6izJRPSaFZpvhDX2/K79UDKpC99hKMwp/59tbXimUUTed9mZrhJYtKNRhOawW2tsvmtTFblJ5iZmCUK0kNG+y7ZmY+8Wu2NfVdmjemDFaLfSmxb58+LbLuslDU3dkb1SxeXd2ermL64otEpmyW4XQttBBrFMRDcC9lhKdUSz81YJWi6h77itWXjR3W4SrFWOq0GtmRywdsZmTFYMeZTpS5GfAatZiCb/1Wzt5s91zxZfY/s38uraEZifD+P72z6yuWS20R3kdPXzrKDd/bCtW+R4A3FhpFaFp2m/llT0vbyRb1mpiXdVC03i3WTF3cxEyDkWZG1XmeszqD0AmzYrSuWrjjXtmZrNik092mlGWaVoR7nRLXVkNzy/M66wZU4Wm6w5+F2W5cjBm40WyuPu4aGH7Ovtc4TcnR9mO272lOkIXfTxNL09qhC7+wr+wlUvlt1rNshdatYrQ7PDHl7crG2bX6r0RLRvVGgNi0eIob2ZeVZfKRA0/V0tq9+fSkZ3bpC69Ei9VDxaXRHPgMlv1+ZrhaZXru5eu5kOs/ms3S9vL+N1Giwt9G0Zl7QwACA0AhAYQuq7QfnTBAo0ntP/WQnf/+ed/kYWgkfjvn39231bop2Y8OQk0GP/788+nT28pdKfpX3g4NGgo/smiYJPjlkL/bNrE46FBI/EHK6DXTf93S6FnTI4/8XQ70ED8hwnpMM3eUuizp6ZJ/hIAlNGgMcpn/oKUcZM5d0uh6bJ4J8Wf//vXP+E0eGyb//kvFm/8mTCZovS2QtMeU8fveJcYaBzmO0zP6e2FPrWZTF3/RDaCxuCfXSaTLXcHoWnJ325qt/+/ZYrMBI8LXf4/e5up3X/lY+O+4eX123hzPWgYbNtX2/oNQlOajE57/x8Aj4x3Onrtk1+/SWgAmgUIDSA0ABAaAAgNAIQGEBoACA0AhAYAQgMAoQGEBgBCAwChAYDQAEBoAKEBaFmhFxfVgZUF5Nb9sLjAWfmInHgMoQf61AE/uWyW1Tjy8SYMEEnguN63hxHk0CML3beIfLyR0DxLLxIz5M1FnW9XPMihBxQ6u7a4tCHfj7y3+v7DOaWf1kh46zNy8oZCM0LkozFHj7byn5Z240H31g7y6KGEjg84fUNkiL/SeIq4/MS9Shf51XMVOXlzoaNk2Zijy2TdTZY9LDeHkEcPJHTR25egdNv9htI1MpenJ0HnPt0kCDluJfR7EjPmaJQMR79k6BuEHN9XaFdA4mZCr5KIvFbu0gXCi+kv+xRC31Loz0OuQ2OORol4wyeEfkCh50hcXitX6Trxx+S7VyH0TYWWWep2RityVEQgEPpBQ45pss8HN3ixEptwEm+kAKFvKfTUHH9hsyFHo2QNQj+w0GEiXhQcI0v842jBS7ynEPq2MTTHkKNR8gFCP7DQ74h4i/ai/BBD7yH0XYQ25CiEfnihk86QzPNz+naeDyXYpXIbQt9eaEOOqkKPuZFDDyY0DblWsodzZJbXZmZ3zzcDzl165hrfOkBO3k5oQ46qQs+R2Bby6KGEphH+Q4RZfmNroY/fAuB3VOacBK/yvq3Qeo6qQie9hBSQSd9N6Br2knl16HBHveP9KZ5HTt4ePUcl8T3kyQMKDQCEBgBCAwChAYSG0ABCAwChAYDQAEBoAKGvopg7AzcjV0SWPnCWfqvQ+UwK3IbjPLL0wbL0m4Uunaay+Qtcy27MReE0dYosfZgs/XahS+k0fvt1W4rpNLL0IbL0BkKfpEvIxVtTOjpFlj5Aln670PkUCpO7UEjlkaX3Sz6Vv4PQx6fIwTtxeows/e5ZegOhU0Vk4N1ivhSy9Ltn6bcLXUwh3LtjxbzaX2TpnaPoq4qEa4TOpZB/d6Q6e5Gl956lNxD6DLl/37mPLIXQEBpAaAgNoSE0hIbQAEI3s9Ab3hk5UFoe98/wR6Jse1VmyjMdzY9Gssaa/fLoTMXTworj3n0IzYmqmbfNRxLh31bVRj3D4IeJyU1Y/J2EHjcrPVJsm2KxK8qvlEYUlV5tpt/Mlk6LVX/vyqLN3GlVpvS17DgUZRtCc0bVzItQmn6u2DrNDl5IGAa3HYrdpjzH3ZjvIXSmS+lVhe5UvEUatZgT2ndTyu/q0KzSU6JZhyWpjifNdlY8/6LMa7POWWwOCC3xKh+0wdfKJKVxa2flYKeFlQzzys/w+DsIvW2Z35VC7ykO/jGkaHHGgbVbm6tb4eFFTBlRx0cU/izHkqU8Q0/3US+ElrxUdrW4zNIpi+yYcTCqiMfrdlvPIfL9C32wQ1WhVX5VwupQr6VcVluE69TapQluFvF0j1mbYY3NDqHVk1s50aJpxcs/1llBYBgcUd6LUE+JQuTvUimsFNphUet2HxRf2Xo1mO60qxM6beLjZyWhLwihy2d7ZtYfjLGhGVnLKCrPjYOvFfFWoflyyQG+o9A+ZVQ7LlatoGFuvxafXWa1li5CQUr9yjKErslSh2KxdpqV7iwrhGfFFHOXcbBHOZTFtx8if2+hS71Kt/pb9Zi8RqqXzl/UUDpdEYL8psxB6Jos7XW8pTTRqXhYcPFWO/8Ng91KTmYw3lTxvYU+6FJe5rRI0JwszxFnF0pR9mgxs82u1uejEPqSGyubip1OyaiipHQbB3tloBYpV7HBdxJ6r9NcDuuy5i59jnN1DrtNu6pa1fr8DoS+7E6hXaG/K+N8KMmqIIbBftmsF1amIfJ3Ffqo0xwrT5yrKD9kJfDQrN1oeS1bpjptFELXZOmOvAlos9J9mWFzrEJoGJyVJv9sLA0g9HcQ+qXxzp+X3+gSYQiPPEbF2Chvb8rw8VURVMswO3kEoY1jR2Yrz6JFpYtXrJOi2ePEOFiwOoqsdLA54PF3EPqt1/ta6fR6R+i2YjX8gKNXuzvQpbACJ2G1/Do3pHSWeMtGUEz9efY3qzVO6TI/HYpssU7lpdcbhdD0F8Xum/VY+OUuotgnZ3rEPUHDoE/pDk85FLxn7HsI/Yv6wwMrfVvxA44urUFDCC1+qmHu4ZOk0Nles6I4eJEshM5py05AaFp8aWE5YRc/fFmyK4pFNs8ZBn+1su/fQuPvFHJ8G5lormK8ED1C7l+SpYWN5V2t32xSr5cYBtcSkPiRhQY3bOUAEBpCI0shNISG0ABCQ2gAoRtR6DyeW3Xn3M9XZyny5J6z9AZCX+DJgnekUJ2DyNK7UrzDs+1oKocMvBNnNQ3wR8jSO2bpHZ4+SrPHyMA7cXyGLL3vLM3eQWiaxuO578JpGln6AFl6A6ELeC/nHcjWq78gS+89S28gNM2lMmjpuB2lTP0qCLL03rP0BkLT4nHq+BSvMb0xpyzfLpClD5SlNxCaXSOzePHpzclkC8jSB8zSGwgNQPO06UFoAKEBgNAAQGgAIDSA0ABAaAAgNAAQGgAIDSA0ABAaAAgNAIQGAEIDCA0AhAag0YU+4x1f2Cf/yPEet6lU+tLRU/ZxTGmJjxbK316oo+q32ugJ71Gjj/IOSSf8oTiMovzWMKp+W+CjF3L0VB89lqN5PlqiNM0+sjWjOTUlR+zjrDJhZ3Jfj/SUnNVNp0hYXo4a0lmVsFNDworldNZL2EVNwo4NCSvJ0Wz9hFE5elaTsFzlETurTJjxiOVrEnZ6ZcLqpCRzy0N0/C2H6Oojdkuhi7xrIp+NUbxutMA+curoxTeOltTRPPvIq6Oly0YvDKMFdZStMfctozdKSdGwr8XvkZJLEpa7acKKjXaISg91iBByAIQcAEBoACA0ABAaAAgNIDQAEBoACA0AhAYAQgMIDQCEBgBCAwChAYDQAEIDAKEBaF6h4wtZSj8v7CB3QeMJvbF8TunJ8kcxkogtLm/sX7fOdRKldJHE63yVHQqwbzbpLpm/bi18tmreDOVwyMCdhA6SQ8r8C7HBHS9xDfcTMvLlmpVOuKaCrum6axs4YQX4AU0vfLy+nD+gdDtWMe1zXxCHDNyX0H3ujQtKP4VI+FoZl1YS9aavkrWb7d5UsHoFMRwzcD9C7wurKb2YmjXGF0vLu3Ly5uKyiDK+bh3wj52t0tGWZFedtzA4wv5/2srSczHP59j71U/VG9xbff/hXM52vjUwurXHQ53ou9U98a3fe4GDBu5F6ASpjSK+Bol/gAQKlG72k6F+Eixy8Xl8HCckt0wkPnXuNR5c6zH0kpP4Xc6ZqjKZuPzEvSpm2+ULs8vBitMz4nK+419HyToOGrifkGPYObeer/x23rnJ44A5euEZTHDdFlShS34X4RW4fWIQNkxODEJ/dk6c0PwCWTWucI3M5elJ0LkvZrsgPOTYIbMXNBskPIo5vD7eARD624Q+HCXENbWYNjRaeESMO7VI8zFRcrrGVaGX3dO1Qo/0UYPQ22RZtJxUPAZngSTZ/y/71CD0+EBJqCwiHs8bHDRwP0JTerwy5iSu8JH25TaJ6HMe72xt9fml0F/6IuFaoQf9RqE/u/uWa5oA14k/dkK12aTQzgm59DD/7/PioIH7EpoXytERMlSkfo/H42fBRlSbvuET4bIq9Iy3WEdo57hRaLoTchNP+Lhye7EJJ/FGCgahD9VInIjyPeDCQQP3KLSot32k8zMzMwss4l1Sp+04R7ZZLDIghF7Yc67TekJPVAhNaY6dHa7qGzBHC17iPdWFzpKAbCzZ5t9OOHHQwL0IHV9SW8wiZEP9clfqmszSWcLvdH+RJfTi2BitJ3TfcJXQ4kyYqN3oInlvCDkqwubhQRw0cC9Cz6nFcekNyahfXngHvlL61TNMQ4Q3LM9LoSece3WF9g0ahY5NiRPEUyH0WyF6gsXmfLaSEDpEeKhdDO3ocTgAdxY64yehza2tDwGi31iJkjdrH9+QNbpMpj/tzk6MepLMYTFDHaGnnMZmuw0S/JjbDZejFsEcmd093ww4d+VvOUYHNxP0wO3fOf8Y7Bf3YiqCHwDuEEOf/97H62ZDy8ZWCVYX7Ftl5WeQEFfwy5qTxPZJ33l9oWOioa4ccsR4PbJvrnJ7C3wbQ6vqj5NiHjJK6aegi7iD4n7jEvmAgwbuIHQl6Z3EaXUdLiFD6y+7heuW/jroq5zweeewdq7Dnc/6yPmWaMQrqhspeQdx6xvcn9B3ZKXytuDNierthAA8utClsYGT2qkbq2V2r17+c984DhloHKHpqTdQJ0z3lnl79eJvhrI4ZKCBhAYAQgMAoQGEBgBCAwChAXhMoQtZ/i5yAB6ZTLZwD0JfHKeOT88AeHROmYoXdxX6LHVSwpUMNAalTCp3N6ELCLFBI5FNFe4kdPoEeQgaiZN06Q5CX700AA8fdVxZxl4j9AUCDtB4LXOlWwtdSBWQgaCxKKSKtxY6l0L+gUaLOa5q6LhG6DMIDRqOq42F0ABCAwChAYDQAEBoAKEhNIDQAEBoACA0ABAaQGgIDSA0ABAaAAgNAIQGEBpCAwgNAIQGAEIDCA2hAYSG0ABCAwChAYDQAELfUGg8OQk0oNC3f3JSMYV3xYMG4+KqBy5eI3QJD2sEjUb+Dk8fpekMMhA0Fpk0vb3QuVQeOQgaq4DO3UFomjnCI/xBA1E6uvIlKdcKXUqnEUaDhqGQTtM7CU1Lp6lsHm0doAG4KGRTp/SOQrOg5RjvMAWNwfF1VbpvfNd3MYfXmILHJle83lS8vB60FBAaQGgAIDQAEBoACA0gNAAQGgAIDQCEBgBCAwgNAIQGAEIDAKEBgNAAQgMAoQGA0DfjaCHB/r9bw2EDtxZ6cUHj7aPvbNY5TekuiRgmTQ583iXzlHrePMD2PaN03pWENE0tdB/RcD7+3kacY2GP79xwujl3aHrhI/sm+jBC0zfeLKxpaqEH1AFfAwhN96OLm4bRQ9fMQ26dC33oCsOaVhE6vXUkBve28vRiS5DQ5tuR43F2yLfyhe3F2KmYkX+V3to3zCFih7XFpY0Cn5UVdxdbe2xSgn9xFHu3Epdb4I+2OeHb20nICScVg5IpD9vK+dYBpXHxVXxl6WPNk8t2VhY3+NqybG2Jpeh+5aDx9NB3nC0VjazK6KK0ubwYS2tC01nnHrRpEaH3yZQYHOqnNCnjkFFtvkE57mFhAFkZ6PcRL9NlmnCTRsksn6NfzsE8jg84fUNkKEkPPWyFGRLiBR/7t9PnGvaQya98wS9siXWyzFbMo+Osh6xXDAoyTrYQLcfQJz7SN0S8iYr9PxgmHh/xHYj5RtzDTvdGxaCxuqDveDFEPCMe5xw/yUbJ4LDLs6YJvS9TA1oh5BhzfREGzamyyUMshR7m/wNM6CXSx4yLck2F0GsuocCZOBuCTOiit49Jt+1mDq6QTSn0mPeM5vvGM7T0O1msFXrGVRZaDgpWyapR6BnnB1bSDw1V7H+QMBWT7gD7hrjf5mnCM1QxaMCw4yuEBRbFScKi8ym+kaMh9xcttV4ftGkVoVeFxbNkjx/9j5cKLaLMIVdRCF3whoXQCe6dEHpVtlOEyC6lE0MXXOhVwiKOCBEX8yFvjdBJEtaEVgcFsyRpFHqsj0/8VPkwvw2+x3TcVWI7IPwNk7hxsELo8o4Pefgjpw5IkB46x+W5s6ilNkjwpL9WEbroGWFDA2+EDIeXCr0qfd0XQr/t3xNCx8RkLvSc9CjKJ5wMhj6T0P7A78I6saZpkq8WOjAe04RWB9U5M0ahZ0nwY51Hn+USW1sBNmeCF71czahxsEJobce/SovpoJduyLNvny8hUytTDlqilYMXzttCg3E3vVRoIRzXlgmddkWPhdARXiALoaeJqI1JVebJABnwuLiZXq2BMMlmkUih15x7mtDaoCAgzoCy0IV3w8Q5UnXbZW9crokLPSs3+9Y4WCG0tuN7ZFpMGXGx4ENInyfjWmoXyA68aRWh91j4HPbwB0YPjF4utHBqhgk8Tej0CJVCywoiFzpMRL0tRpYoTbsD82R4UVzs/R7ZDrKVZTOvs8+IEDpQHJqlUmh9UDBWKTQfDnlYmGAg6/WsHZRYIMyFFm18ayx4MAxWCK3t+LG6El+f3Etec53UUhupDFRAMwtNxwYv+rh8JzLerC/0sowHPtOQe4dpLYX2+agq9Dtp5CL/mHYmT9jVPORkjged5adLGkOOiUjfuSq0PiiYJGdVQouanLEA3SDvRFErhBZtNCskZhysELq84y6RmhKLsHZkYb7LP2RqZwna7VpH6FUyL0IH2cBwidATXIY+Vu8K9Q2za7cQOi3PAC50UrS20Teec+ZJSLRypN2j5ZB2IVYp9Jg7SlWh9UEqo9l9g9DnoZjU0liAynV+JOSEWSwuLZPOz8bBCqHLOz5FjtngJlmgRRZHi8hoW0vtNDmFNy0jdMHj8lP6NTchGvAuEXro7VE6xE2aJu60FDqzSDY1oWnItZI9nOOaD7szstnud1ZYXvg9a2eJWed6pdBkmGpC64NUL2HLJfSIe2nvZM078NWw+0kyvHO45AuLmuBQMJld4eGxYbBC6PKOJ11vEvktLw/tV8nM4emqe6ScWu8gtGkdoVmEucTr/G5xdb5E6I0pF/EsicKM1/u40IOyVJZC08gAq6bNFmiUFYFS6PzAYJ5+nfEQ51isKuQQVwRV6N0KoY9E5FAW+jTkYqsd263Y/wU2zZ/c6yfhBJmPeIgrXBRNiNpghdDlHad7ASchQyJ42fCztY4faalV42/QpEJXE3TxH+ckr3iREPOCFhJVE48+VzU+JOu/WyCRu8nOTLoqW9Aukrs1qy3sqL8mSvD7QYl81eClO57fPdIGM7uGtzVO49Z3Kwm9Rq79bQ734oFIOm/wSyFhcc3gTXf8wDkNa1pG6J05lyfdQELTBWedJrSjVZ3rhDbMevRNO/5m8ATWtIzQQ2To+jbYhxSaTgzU+vXRq3N+tdB5w6yb37Ljc64EpGmpGBoACA0AhAYAQgMIDaEBhAageYUuZDN4bTp4fDLZwj0IfXGcOj7Fm9PB43PKVLy4q9BnqZMSrmSgMShlUrm7CV1AiA0aiWyqcCeh0/jpAmgoTtKlOwh99dIAPHzUcWUZe43QFwg4QOO1zJVuLXQhVUAGgsaikCreWuhcCvkHGi3muKqh4xqhzyA0aDiuNhZCAwgNAIQGAEIDAKEBhIbQAEIDAKEBgNAAQGgAoSE0gNAAQGgAIDQAEBpAaAgNIDQAEBoACA0gNIQGEBpCAwgNAIQGAEIDCH1DofHkJNCAQt/+yUnF1AXyDzQWF1c9cPEaoUt4WCNoNPJ3ePooTWeQgaCxyKTp7YXOpfLIQdBYBXTuDkLTzBEe4Q8aiNLRlS9JuVboUjqNMBo0DIV0mt5JaFo6TWXzaOsADcBFIZs6pXcUmgUtx3iHKWgMjq+r0n3ju76LObzGFDw2ueL1puLl9aClgNAAQgMAoQGA0ABAaAChAYDQAEBoACA0ABAaQGgAIDQAEBqARxT6/OPSO1DB0sdz2NOkQq8NE1CH4TX404RCn05C3cuYOoFBzSb0+gC8vZzBTSjUZEIHYe1VTEKh5hJ6Fc5ezSocaiqh/VD2avxwqJmEzjqh7NU4US9sJqG3Yex1bEOiJhL6HYS9jneQCEJDaAChITSA0BAaQkNoCA2hITRobqF7u+y2zh74DKFbQuheq0nwtBtCQ6LmF7q33WTp6unttprauiE0aHqhLSa7HHCY2p8T0uWQENLj6O11aKEIC0rsqu/y+14xWA5VurSleh3dcvx5j7qmLram6niGrc7xXFuuq5cvpsKmdnfa7A7+JVtDj+HzucNm72Kf3eqs3WxIft3NvuOb1Tau72ynXER+0eUwLAGhW1Po56Z2bfCpiR3tdhl/tBFiM9nb29tN7fzY201tHW0mm5BBzsCmPjeb2jtM7UIRdbFe0m2yipPD1GuXk9j67abOim12d5ja2k0d3eXlnvZ0qzObesS22k1Pe/lWxcrYnvAVONi+sOnP2X5KLMRs4mdFB5urx2TmKxbz6zvb+9QkV9XFv+D/9CUgdGsK3SU1FaUZP8ztHcJtIXRbJ7fDLFR4zu3oEq6yBaxcaBvXrLu9nRewwqenmtDPO7jbXDALEYZVCv1ULNj2lMjN9XaanhKibbrb1NHD123ly3WIs4153Emet7V38Uk2wxqFnp2mSqENO2vlp6idTeQuP2/veG5YAkK3ptA2LeLgJpgrhRY2trexMpEHI6o0di4JF7q3zSzdssvCzyC0vc18ldAOu9zGc21z7e260BaTLPLbhIr8xGGrZCvo7RQrke4bhO5tt1QKre9srzhniNkm9s/G6wj6EhC6NYW26rJ1c1mMQqvSdKsWye+sLCoQQjtkYSkk6hSnhSZ0b5vNcpXQvKHQ4XjKVyRWqa5JbrrDRORmefDhaGMrt7V3yhX0sKXaOqqEtrV3Vwqt76yjfPVhQne12SuWgNCtWkKXQw4H169GaHbZ7jGVw2EmXBuRQmsxMhfIJqIRTWhr+/MqofmyTx3lM+epFi+rMbRFP1/U0pptoYsLbWFj7ZZONYbmVAnd02bv4Xq2sfL3eadQ2xC728tCt7eJgtuwBIRuSaEd+rEVbtcIbTF19Zqelts+novLOBea2aM1Y6h1LSm0rZstWCW0zeGwtmvNgr3tbZ3dz0UZzPR1OOxmNbjp0GINsVl+yjgcpq5uk4ML3WXqcGhFui40MXcQoadoTOeVPcPOdhpK6A555hqWgNCt2crR1q62qbGaXE+l0Hbt2i+v8+oJYFOF7jJYIStvqtBPnxJSJ+Qo66VGAsbNmbqJPtyrffBwvd1qaydcaKu4CPRWltBtXWyq1NNhs3WJUELfWXUPu2Urx9O2nsolIHRLtkPbZPsZ6Xkq7DMK/VQKL+No3kzXpbZviP/PZXDQbe1hglh0oYWdVwktIwGHqb7QcuZevnEutLWjwyKENqsbrhC6vcNMDHoKofWdfS5bYJjhXOhuHmZXLwGhW07o52ZTm9neaZFNvxVCt9t6esR9l+62jq5ex9P27h5HWzu/mj812XnMYe7u6WzveN5jky0TUmghy1UhR7epo6vH1iHWzEOOTrO0VG6aWejo7RYte1zorrY2hxDabjL3dFmfdrR1G0MOXupWCV3eWdHu1+noEPGKVbafVC8BoVtOaHZltnbwqp3DUDOTQjvMbaY2m1p8m9qedvEWXA2mBHPF1G7uZTU7M9GFbuutFVpUCrv0iwILd7u729m3oqLXYe3RN0162VZNoklCtBDy6wAX+jmvST7t7TRJ1VWhbaRG6PLO8qsCW397pxp89LCiunoJCN2CQosGsd46sYiD9JYlfN71XIQNWlOFVKJXRis3/aVeb53NGS8aXd3Pb75UxQrKy/fUXRV+y9HiQtcPrh0106qFxo+TAISG0ABCQ2gIfUeh8XtoAKEhNHgoofHw0WvB40ebSegEhL2OBCRqIqG/4umj1+AsQKImEpqGoezVhOFQUwmd7YezV+HNwqGmEprGIO1VbEChJhOaTsDay5mCQU0nNE3iPSuX4E9CoCYUmhbX58ZgbzVjc+tF+NOUQgMAoQGA0ABAaAAgNIDQAEBoACA0ABAaAAgNIDQAEBoACA0AhAYQGkIDCA0AhAYAQgMAoQGErkdhoUzkqtUsqjMtytEtObbbFFnA9z0SS14YUrL0Ia1/P02+NPlBvi6FP5DQX/ROoa6rVjOgztQnR9XnLS03RRao++55VzCmZKr0rUJvx5o9hVeyGm+5kGPx+idsDvRVjE6QAn9ETZMIzfa99Ck+RYbOtJQcxkb0nb9O6Klgs6fwSvoWW1Xor1sH/GNnq8QGJclLhPYN0uYSmrNCQvrYjhhRhT4731jcEOVZaXN5MSYv1p9j71c/UXq+NTC6tdfcKUzE6emHxfWqFMaTpY3FT2skvPW5NYXeJ/M8mYTk2KAkeInQzrEmFJoGScZwuGd1odfcwwPE95XSo1EyOOzyrLGpS07idzln6G4TPLHxuhQG3asuXz+ZKFSksG8qTPoWm+0R2DcVuuR3CaFFZlwm9JE4+ZtO6GX+pDo5djHpSupC8yckzZMoiy54ThwNub/Qz86JE5pfYOMXJNjsKQyKFIZ44vQU0kH/6MEnuklaNuQQQi+7p+sK7QoEAuOhd6diTGZC0wm9Sd6qKQl4fXFDK0dUFGgL9NA5LqpJLHnbMnGJYlMJfUkKg+IAp0nAmEI6SJLlY9myQn/pi4QvFXrUTTzxckHQfELv8guLmhJP8FAX+lCkfoZukIjMiBD97O5b3hdfN5PQl6QwSD7xD++gMYV0cIC2vtAz3mL48pCj9NHl5Z8hkUFNJ/Q6mSuP7Q56cxWtHFzoFVFW0zxhxdhOiJ2+4ePmEvqSFAaJGBp1VqRw0N/yQi/sOddp+KoYelpcpoY8tBmFDpOYPvaOxGqEjpElPiFDJvlHLjpCXPGmEvqSFAbJCf/wuytSODjc8kIvjo3RbxB6Tz42udmETroHivrYIlmpEVptGNgttw/sOCeaSejLUhgUxRAd8FWk8AcQesK5d7XQGc+AKAfWmlDow0FnXB8r+cuvt9KFLg6KiGqebNPYlLiR7JmgpaYR+tIUBkXknKhMoSr0disLLTSuL7Sb/0Bg3suuYutzxCV+yTFFJhZyzSC02Pew2xnTxxaGje3QmtCs9j9zeLrqHqGs9hT8mNsN8yv06OBmorlTGCT+2FlixJk0plAV+sw1Lm+otaLQfeeXCi3uswyMb1S9N+u4GYQWv3MYntnRx5yD4x9oHaHpBn+bwfgRv/74+E9X5viQh4w2dwqD5GCEkCHRQqWnUApN55y8JtlSQt+MMDnSBkNNIfTNyOxm1KHPO2q71/nWSXOnKUgK9DRZm0LJp3geQreu0K0IF7pVgNAAQkNoCP3jCA0AhAYAQgMAoQGEBgBCA9DAQhdzZ81O7uLKFF7kkMCGT2HxfoTOZ1ItQfr00iSeppHApuA4f2ehS6epbP6iBS5Gxdxxuv4NhHz6+FtOfiTwsbkonKZO7yh0KZ1undtI7NysMzVXd2qTJvCstRNIi+n03YQ+SZdo65BN1V5riq1UK275BNLS0eldhM6nCrSVOD7+lkktlsBMSx3CfCp/B6GPT1urVeei5gQtHF20VAKPWjyBLK46voPQqWJrZQbNVIeT2ZPWSuBJqyeQhVC3F7qYKrVYbpxWH97MaYsn8KTFEkhLV5Wy1widS7VYZtCzo+pr0BkS2GRclaJrhD5rPaFTrS50CkJDaCQQQuN4I4EQGscbCYTQON5IIISG0BAaQiOBEBrHGwlsdaHfT+N4I4EtJHR3V8MkPenQnnSb6NqH0BC6rtCxJbo3458Vv+oqzP/mD8nHtCbC/qk4pYcRa2dkndL4lH+pkIwkKV1aK8zx93XEp33j8unZ2bmR8Yd4+d2OTbFKoxNWxZaA0BC6ntDd5inFZlW6TpijnYrVrlj4iydHFMVuVl6Wogqjly5bFLvFPqLMUWrt7lWslC5bzXaL0p1hMYlFsVkUx/d//+qOVVFs/LHHcZuiWHcgNISuK7RiX6OlHmWS0h5litti2acJpStJ0142MafwkKPTvEhPvFYhtL1zM07TFkeSFn5RRii1W2O0OGPu+f5JZwUzL6PVDwgNoesLzV8KtKM4aFy4SyeZpRHlNz64mpVCrytc15JNCK3wd64MKfyR8UWbjRaVbj7rh4d408EuK5pti/zfLiqFEPoyocXLC5iac8oQH9pkIUbCbPltU3wthJ5TxGsanguhrXywyyy+7VHStFN5HX2onl0JGw+B1AAaQkPoukKLn9x2KqVxZYIPpbnCyz1mxdK7qwodFKU4lTG0XfivqMRo/LVVMXetPqDRZZ8hNISuI7R4H4fdTEOyHE7IGOJoolMxL2lCi5dG+4TQnWJ2S0TCI43CbJeZR9MPQdKm2JIUQkPoy4UWrwdjBe+y8poPrcgPRpTJrIYcv8gAoyx0t5Kt8sz8QN27El0JCqEh9BVC+9j/mPKcZq02PqFfidBwt3gnoaWLFrjQ+2YHrziadaEnFfFC4V+m6WqPeDFnt7mI440ENoTQ9tBBrJO3XUwqz7f3psydvEjufnsUfc5jkE7rfJSVzSMRn61XFzpnt4QPVl8rMzRptoeT66MyTsHxRgIfX+jNTt4Yxofn7KzK5eC3LEK88mX5mYURIYvSSbO9VsX2/ldlXhOaZl5a2KwhHpg42Kzm7n0cbySwMYQ+oXtr5Qg1qtW4EsvbMio+jGiTfpbhtkppVeuRnI5+OMfxRgIbR+hr+aWXG2w3Z3C8kcBWENqrOManu2RbB443Etj0QhdfmxVL50QRxxsJbHShW+t4p7OtlcBsusUTyITOQ+jLU3TSWg+bpZnqy+dpiyWQFu/wbLsfQOiaZ8E1OUe56gSmW/0Q3kDofMs9fbTmilw6yrdS+nJHpdZOIKXH2dsLfdFyz4c+OalVoIUeCH5RU0C3WAL5C73o7YWmqVyLCZ2uTdDxccsc8Iv0cb0i7biFjM5e+UaKa4XOHreWz7VXZGbBcauctrlUpl6I2DoJpKXMNUm59i1Yxy3V6HNRPzuyqXQm2+zvWc2epC89lC2RwLOz0+PUdReba4UutFK7/MVlL7m7yDX/q1aPT3OX1+BbIYGpVCZ7bc+9698ke8llrEmvyC32Qihwc6FpkZXzp81/ubrqigx+JKFZ2JFtgdfXX3lFBj+U0ABAaAAgNAAQGgAIDSA0ABAaAAgNAIQGAEIDCA0AhAYAQgMAoQGERjYACA0AhAYAQgMAoQGErsviwsJCJJa80McWlj6kkXGgSYUeIALPu4JhjEyhvyloUqH7KC19ik+RoTN1jB7GRsgysg40rdCcFRLSx3bEiCAZp7mNxQ1ZYu+sLG6I4CSepAcr6zn29dKqfNxnIvpudQ/5DRpFaBokGYPQs9r3054Nz/Ag8X2l9GCYeHzEx9/lPRic6/cTTzI44CMe/j7CFadnxOV8hwwHjSL0MtnQxi4mXeW3wU87/Wx4lkS58musSHYHuNCDwQu6RIZYQf6WzIsz4IJmgySBHAcNIvQmecvGXAGG1xcvfz9NVtn/LbJA6YYIrMddLPwYdKYp/UrcXyjN8PBkfIDHJId6pALAIwu9y20UQo+6PcFDXWg+uEdm+EgusbUV4KHJoJePeob5f2eQ/U2ImQeHkeOgQYReJ3Plsd1Bb64sNCuF6T4Xem9ctullNHM9AVXoQ7W1j/Qhx0GDCB0mMX3sHYnVCJ31etYOSnSqjtBZEtgSbCPHQWMInXQPFPWxRbJSI/QGEY0YI3WEpp43yGrQSEIfDjrj+ljJX26v0IVe5S0d9CMhJ7VChwhvuyuGdpDj4JGFdvOfb4Tdzpg+tjBsaIcuC50kwzuHS74w97pa6AO3f+f8Y7D/ADkOHllo8UuO4Zkdfcw5OP6B1gpNF1yE+JN7/SRcIzT9FHQRd3AXGQ4eWeibUNi54pVZxQTebwKaS2gAIDQAEBoACA0gNAAQGgAIDQCEBgBCAwhNi7kzAB6ZXPF+hM63wKvrQWtwnL+z0KXTVDaPn2GABuCicJo6vaPQpXS6gJwEjUIxnb6b0CdpPPULNBClo9O7CJ1PoXwGDUU+lb+D0MenyEHQWJwe30HoVBEZCBosjE7dXuhiChE0aLQo+qpS9hqhcynkH2g0rjL2GqHPIDSA0ABAaAAgNIDQEBpAaAAgNAAQGgAIDSA0hAYQGgAIDQCEBgBCAwgNoQGEBgBCAwChAYDQAEJDaAChAYDQAEBoACA0gNAQGrS20Hk8Cgw0ntD5Wwt9gYc1gkajeIdn29FUDhkIGouzOzx9lGaPkYGgsTjO3kFomsYTz0FDcZqmdxG6gPdygkYie+UbKb7htW65VAYtHaBBKGWuqdV9w4s3i8ep41O8xhQ8PqdMxQt6V6FZ2JHFu2RBA5DJXvtONry8HrRYmx6EBhAaAAgNAIQGAEIDCA0AhAYAQgMAoQGA0ABCAwChAYDQAEBoACA0gNAAQGgAIDQAEBoACA0gNAAQGgAIDQCEBgBCAwgNAIQGAEIDAKEBgNAAQgMAoQGA0ABAaAAgNIDQAEBoACA0ALcROosX4IFWIctLaABaBoQcADE0ABAaAAgNAIQGEBoACA0AhAYAQgMAoQGEBgBCAwChAYDQAEBoAKEBgNAAQOgfkPOPS+++K6t7l298/x9/b2L+8RVCNxprw+T74w4d19v257//ren5B4RuJE4nycPQ96F24//4Wyvw9y8QumFYHyAPRui8cttf/v63FuEfELpRCD6cz8S524rlsyijIXSDsEoeEl9FDerr31qHf0DoxsD/oEKTD61ZQDMgdEOQdT6s0HPGjf+9lYT+AqEbge2H9ZmMGTfeSj5fFXNA6Ifj3QML7S7q2y62lNB/h9A/otCkZUtoCA2hITSA0BAaQGgIDaEhNIRuKaF7u+y2zp5HEfrVs2fPXkBocI9C91pNgqfdDy70qydiy09eQWhwX0L3tpssXT293VZTW/dDC91h+unFqxdPTD9BaHBfQltMdjngMLU/73Wo8CHpt/rJohK7HOji/7sdvez/c4fN3nV7oZ9Jk1+1PdGiD1FUv3ghhuU8L/SpjFf8Sz7vCzFNjVdeqIjJL+T86hx89lcv/qZNlet7UV6fIfB5Vb0iCN2UQj83tWuDT02ObpNKDxvqkJqbrOzDbmrraDPZ2FC7mGw1Mbsd7ab2dtPT57cPOaQ2QuhnbaYnbSau8ZO2Z20d7aYn0vn2J21tz0Rpznj2tw4++VW7nNH0hM/2QtvpVy9Mz560PTHx+Z+ZXojFn/B/z9rbO0wdfGM/8fWJ86hDj3Z+MrGF2l8YVvTM9AxCN6fQXcJSQadQVzW229Rh4vVESzuf2mWyPie9T01dRqGft7V3cdVtd2zl+Inb80K49RPX8Ik6KKb+JCJtNlWYrH78JMx/1vaiXMrLb18Il1+0d6hCv2prE0K3P1NnlHOX1/dKFV5spP2VviII3bRC27SIg1trNgptlQWylQv9tJ0Xwz18Bl3o3s5OPmh6ehehnzzpaP9JXPVF8MBFeiJsesVde9IhCnJunEFopjmbRY1UfnpmFLpDniEvpNA/PXnyRHe+jf21/01btVyCu/9ChBuySIfQzS601dSpDXZLNctCP+3gEYeDC61Ky78yhBxM8S6Ho63jTkKzWEANb1+9eCHce2KSZWWHGoxIywxCP3nChXthlE4T+idNR+7nC9MLKfQzqfmrv5nUlXSoS2jisk3/ZHoGoVuihC5HDA6TpULoThZzWNp7mNA9WnDJ4u12dVDG0JyOO4Ycz2QMLVemC/3ExIpSbbtGoZ+1vZLKXib0C1XoJz+J6WWhX7xS21OetGkxtLg4sAhGBugGoXm6nryA0E0ntEMGzga3y0L3ttlIu40L3Wt6qrZ+sK/b+aeZCd1l6nD0aPPf5U6hDBF+evFKBhea0G08NtDaHQxCd/z0t6uFVktoJn6N0HIlT/gJ0sEuCD/J7fFLxLOqEpqV2e1tryB007VytLWr9wify1qgLjQxdzhM3VxoYggr9JDDyuuITPZbC/3qJ13oJ+3lhrwnMpptfyL/KpRlH89Y7U2GHD/pLSWa0E8MQvOqYEdlyKGGMG3lEOZJOQ6pE3JcFnhA6EZuh7aZOmQ4/FRGHAahO03WDiKENouQ+bm5opVDTrTeXuifVCU7mFUdHdKvn7RKofD1J1lY/2QsoWWj3DOthiedL7dyaJY+M4kKpRS6XP+T6xPRd1loGYeoLYEQuumFfm42tZntnZZ209PeKqF729ptUujuto6uXsfT9m6j0HaTuaeLVR0vu8N4fcjxxPTk2bNn7WrTxqsXrLL35JWYyob59f5V2xN+K5G3qGlCm8qVOTbzsxdPTJWtHE9evVIb6MQXUmhW7XwlSmC+vr+96OCrVkMOfhlof/bq2ZOK9j8RcjxDyNGMQhPSZeUVpKeOipiiWyuYhdC8/Da1Pe2qCDmeP+WL9Xaa9IaSm95Y+YnVBNtE3Yv/rKPtJ1aEmtgQH+mQtwSftKkzlIV+oZegbL/bn1XE0Pz0aPvpb+ViWQ05WLVPzsjXJ1fN09z25KdXsjrKvn1i6kClsCWEFs1vvdf9MuN51/M6P9PrvevPR1+9qBl6YirfQxSWXlGdfFX5pQhTXtTeYX9hnFrnrvaLV/gtR2sJ3VC/h+ZC344XdX/mpN4ywY+TIDSEhtAQGkLDNQiN30MDCA2hf2hWH9jngZYVGo8CawgSDyx00Ljxv0NocM8UHvjpowstK/RXCN0QhB/UZ9ehcduHP0YIDaEfki/9Dyn0UuXGW6iI/gKhG4QPD+jzaNW2L36ECBpCPzBTD/fOoGT1tv/xAwQcEPqhST7Me1acCxe1275oiahjn0LoRqK4Pjf2nW32Ti9f8nLkw783udN//0eRQmjwAwGhAYQGAEIDAKEBuLHQmSyyAbQK2RNT7gTZAFqF05yJHiMbQKtw/Ifp36kS8gG0Bhepf5v+l8ohI0BrkEv9z/TXRQYZAVok4ij9ZfrrvyiiQWtwlvovE/ovmi4iL0DzU0zTv7jQ/zs9Rr0QND2l49P/CaH/+l8GRoNm5+L4hPkshP7rv9l0ATkCmplCOvvfvzSh//pfLnVygUwBTVs8n6Ry//tLF/qvv/6VTWVyRUQeoPli5+JZJpX9lyqyJvRff/37j5MUAE3I6R//KWusC80jj//8658ANBX/+s+fRof/P3D878IOJBz8AAAAAElFTkSuQmCC" alt="Форма «Зарегистрировать стенд» с выбранным хостингом iis">
       <div class="cap">Форма с выбранным хостингом <code>iis</code>: поля <code>iis_site</code> / <code>iis_app_pool</code>
@@ -884,8 +1159,9 @@ PY</div>
 <div class="sechead"><span class="num">05</span><h2>Виды хостинга</h2></div>
 <div class="secmeta"></div>
 <p class="lead">Два независимых измерения: <code>transport</code> — <b>где</b> вы управляете стендом,
-<code>host_kind</code> — <b>как</b> стенд хостится на своей машине. Их можно комбинировать свободно:
-<code>transport=agent</code> + <code>host_kind=docker</code> — это удалённый контейнер, которым управляет агент на его хосте.</p>
+<code>host_kind</code> — <b>как</b> стенд хостится на своей машине.</p>
+<p class="lead">Комбинируются свободно: <code>transport=agent</code> + <code>host_kind=docker</code> —
+это удалённый контейнер, которым управляет агент на его хосте.</p>
 
 <div class="diagram">
 <svg viewBox="0 0 760 210" xmlns="http://www.w3.org/2000/svg" font-family="Inter,sans-serif">
@@ -933,16 +1209,19 @@ PY</div>
   <tr><td><b>iis</b></td><td><code>iis_site</code> и/или <code>iis_app_pool</code></td>
       <td>Через <code>appcmd</code>. «Стенд» = его <b>Site</b>: диспетчер стартует и останавливает сайт и намеренно <b>не трогает App Pool</b> (пул может быть общим с другими приложениями). Пул задействуется, только если <code>iis_site</code> не задан вовсе</td></tr>
   <tr><td><b>docker</b></td><td><code>docker_container</code> <b>или</b> пара <code>docker_compose_file</code> + <code>docker_compose_service</code></td>
-      <td><code>docker start|stop|restart</code>, состояние — <code>State.Status</code> (приостановленный контейнер зелёным не показывается). Для compose — <code>docker compose up -d|stop|restart</code> с точным сравнением имени сервиса</td></tr>
+      <td><code>docker start|stop|restart</code>, состояние — <code>State.Status</code>: приостановленный
+      контейнер зелёным не показывается.<br>Для compose — <code>docker compose up -d|stop|restart</code>
+      с точным сравнением имени сервиса</td></tr>
   <tr><td><b>k8s</b></td><td><code>k8s_deployment</code></td>
       <td>Старт — <code>scale --replicas=N</code>, стоп — <code>scale --replicas=0</code>, рестарт — <code>rollout restart</code> с ожиданием выката. «Жив» — число готовых реплик</td></tr>
 </table>
 </div>
 
 <h3 style="margin-top:20px">Docker: какой адрес писать в реестр</h3>
-<p class="lead">Здесь ошибаются практически все, а расплата — ложный <code>http: down</code> при живом стенде.
-Диспетчер (и агент) работают <b>на хосте, вне контейнера</b>, поэтому в <code>stand_host</code>/<code>stand_port</code>
-идёт адрес, по которому до стенда достучаться <b>с хоста</b>. Не адрес слушания и не внутренний IP контейнера.</p>
+<p class="lead">Здесь ошибаются практически все, а расплата — ложный <code>http: down</code> при живом стенде.</p>
+<p class="lead">Диспетчер (и агент) работают <b>на хосте, вне контейнера</b>. Значит в
+<code>stand_host</code>/<code>stand_port</code> идёт адрес, по которому до стенда достучаться <b>с хоста</b>.</p>
+<p class="lead">Не адрес слушания и не внутренний IP контейнера.</p>
 <div class="grid g3">
   <div class="tile stop"><h3><span class="ico">🚫</span><code>0.0.0.0</code> — неверно</h3>
     <ul><li>Это адрес для bind внутри контейнера, а не адрес для обращения</li>
@@ -955,19 +1234,29 @@ PY</div>
   <div class="tile warn"><h3><span class="ico">📌</span>Внутренний IP не писать</h3>
     <ul><li><code>172.17.x.x</code> работает, но меняется при пересоздании контейнера</li>
         <li>То же правило для <code>db_host</code>/<code>db_port</code> и <code>redis_host</code>/<code>redis_port</code></li>
-        <li>Нет <code>redis_host</code>/<code>redis_port</code> — проба честно вернёт <b>unknown</b>, а не <code>down</code>: это «не настроено», а не авария</li></ul></div>
+        <li>Нет <code>redis_host</code>/<code>redis_port</code> — проба вернёт <b>unknown</b>, а не <code>down</code></li>
+        <li>Это «не настроено», а не авария: в подсказке ячейки так и написано —
+            «адрес Redis не задан в реестре»</li></ul></div>
 </div>
 
 <h3 style="margin-top:20px">Стенд за TLS: <code>stand_scheme</code> и <code>verify_tls</code></h3>
+<p class="lead">Оба поля задаются <b>из формы «Зарегистрировать стенд»</b> — править <code>projects.json</code>
+руками больше не нужно.</p>
+<p class="lead">Схема — выпадающий список. «Проверять сертификат» — чекбокс, который появляется
+<b>только при <code>https</code></b>: при <code>http</code> флаг ничего не значит и потому не показывается.</p>
+<p class="lead">Разбор формы поле за полем — в разделе <a href="#registry">Реестр стендов</a>.</p>
 <div class="grid g2">
   <div class="tile ok">
     <h3><span class="ico">🔐</span>Два поля записи</h3>
     <ul>
       <li><code>stand_scheme</code> — <code>http</code> (по умолчанию) или <code>https</code>: схема,
         по которой идёт HTTP-проба и строится ссылка «Открыть стенд» в таблице</li>
-      <li><code>verify_tls</code> — проверять ли цепочку сертификатов; по умолчанию <code>true</code>,
-        для <b>самоподписанного</b> сертификата дев-контура нужен <code>false</code></li>
-      <li>Дефолты полностью повторяют прежнее поведение — старые реестры править не нужно</li>
+      <li><code>verify_tls</code> — проверять ли цепочку сертификатов; по умолчанию <code>true</code></li>
+      <li>Для <b>самоподписанного</b> сертификата дев-контура нужен <code>false</code></li>
+      <li>Дефолты полностью повторяют прежнее поведение — старые реестры править не нужно.
+        Обратная сторона: <b>обновление пакета само по себе ничего не чинит</b>, поля надо выставить</li>
+      <li>Пока чекбокс скрыт (схема <code>http</code>), его значение на сервер не уходит вовсе — в записи остаётся
+        дефолт <code>verify_tls: true</code></li>
       <li>Мусор в <code>stand_scheme</code> не роняет чтение реестра: откат на <code>http</code>,
         а несоответствие поймает валидация записи</li>
     </ul>
@@ -1014,6 +1303,94 @@ PY</div>
       <li>«контейнер приостановлен», «контейнер в цикле перезапуска», «деплоймент масштабирован в 0 реплик», «готово 1 из 3 реплик»</li>
       <li>Вердикт по TCP-порту помечается как <b>неопределённый</b> — «зелёный по порту» не выдаётся за подтверждённый ответ CLI</li>
       <li>Порт может держать инфраструктура (http.sys у IIS, Service у k8s) даже при погашенном стенде</li>
+    </ul>
+  </div>
+</div>
+
+<h3 style="margin-top:20px">Каталог логов: как диспетчер его находит</h3>
+<p class="lead">Порядок один и тот же и для панели «Текущее состояние», и для кнопки «Открыть папку логов»,
+и для IIS-бэкенда — общий резолв, а не три копии строки <code>"logs"</code>.</p>
+<div class="grid g2">
+  <div class="tile ok">
+    <h3><span class="ico">🔠</span>Регистр имени больше не важен</h3>
+    <ul>
+      <li>BPMSoft раскладывает логи в <code>Logs</code> — с заглавной</li>
+      <li>Windows это всё время прощал: файловая система регистронезависима, и жёсткое <code>logs</code> попадало в <code>Logs</code></li>
+      <li>На Linux тот же путь не существовал — дашборд честно писал «каталог не найден» при живых логах</li>
+      <li>Теперь подкаталог ищется по факту: имена сравниваются без учёта регистра, подходят
+        <code>logs</code>, <code>Logs</code>, <code>LOGS</code></li>
+      <li>Жёсткой замены на <code>Logs</code> нет — контуры с нижним регистром не сломались</li>
+      <li>Если рядом лежат и <code>logs</code>, и <code>Logs</code> (на Linux так бывает), приоритет у точного совпадения — результат не зависит от порядка обхода</li>
+    </ul>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🗂️</span>Нестандартная раскладка — поле <code>logs_dir</code></h3>
+    <ul>
+      <li>Задаётся в форме регистрации, поле «Каталог логов»; пусто — работает поиск по каталогу стенда</li>
+      <li>Значение используется <b>как есть</b>: подкаталог <code>logs</code> внутри него не досбирается</li>
+      <li>Каталога по указанному пути нет — источник считается недоступным, а не «поищем рядом»:
+        тихий фолбэк маскировал бы опечатку в реестре</li>
+    </ul>
+    <div class="prompt">"stand_dir": "/opt/stands/stand-a",
+"logs_dir": "/var/log/bpmsoft/stand-a"</div>
+  </div>
+  <div class="tile warn">
+    <h3><span class="ico">🪟</span>IIS и .NET Framework — без изменений</h3>
+    <ul>
+      <li>Приоритет по-прежнему у <code>iis_stdout_log_dir</code>: задан — берётся он</li>
+      <li>Логи BPMSoft под .NET Framework лежат в <b>подпапках-датах</b> (<code>Logs\2026_08_17\Application.log</code>) —
+        и список файлов, и чтение обходят каталог рекурсивно</li>
+      <li>IIS-бэкенд читает сначала плоские <code>*.log</code> в каталоге и только при их отсутствии спускается в подпапки</li>
+      <li>Панель «Текущее состояние» берёт самый свежий файл <b>за сегодня</b> (дневных логов .NET бывают сотни),
+        и только если сегодня записей нет — самый свежий вообще</li>
+    </ul>
+  </div>
+  <div class="tile stop">
+    <h3><span class="ico">🛰️</span>Стенд за агентом: каталог не на этой машине</h3>
+    <ul>
+      <li>Путь в записи описывает файловую систему <b>хоста стенда</b>, а проверяет его хаб — у себя. Локально такого пути нет никогда</li>
+      <li>Поэтому вместо неверного «каталог не найден» хаб пишет прямо:</li>
+    </ul>
+    <div class="prompt">лог недоступен (источник «Стенд»: каталог логов живёт на хосте
+стенда; хаб проверяет его локально и потому не видит — /opt/stands/stand-a/logs)</div>
+    <ul>
+      <li>POSIX-путь удалённого стенда показывается прямыми слэшами даже на Windows-хабе — раньше в сообщение уезжало <code>\opt\stands\…</code></li>
+      <li>Хвост лога такого стенда смотрите на его хосте или через API агента: <code>GET /stand/&lt;имя&gt;/logs?n=100</code></li>
+    </ul>
+  </div>
+</div>
+
+<h3 style="margin-top:20px">Redis в реестре: поля модели, а не мешок <code>extra</code></h3>
+<div class="grid g3">
+  <div class="tile ok">
+    <h3><span class="ico">🧩</span>Два нормальных поля</h3>
+    <ul>
+      <li><code>redis_host</code> и <code>redis_port</code> — поля записи стенда и поля формы регистрации,
+        по образцу <code>db_host</code>/<code>db_port</code></li>
+      <li>До этого адрес жил только в нетипизированном <code>extra</code>: ни в форме, ни в модели его не было — искать было нечего</li>
+      <li>Номер базы (<code>redis_db</code>) — отдельная история: он включает кнопку 🗑 и задаётся пока правкой файла реестра</li>
+    </ul>
+    <div class="prompt">"redis_host": "127.0.0.1",
+"redis_port": 6379,
+"redis_db": 2</div>
+  </div>
+  <div class="tile warn">
+    <h3><span class="ico">📍</span>Адрес — с точки зрения хоста пробы</h3>
+    <ul>
+      <li>Пробу делает та сторона, что управляет стендом: ядро на этой машине или <b>агент на хосте стенда</b></li>
+      <li>Redis внутри compose без проброса наружу агенту виден, а оператору — нет</li>
+      <li>Не проброшен вообще — будет <code>down</code>, а не <code>unknown</code>: адрес задан, ответа нет. Та же грабля, что с <code>stand_host</code></li>
+    </ul>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">✅</span>Валидация и старые реестры</h3>
+    <ul>
+      <li>Пара валидна только целиком — половина даёт ошибку записи, а не тихий <code>unknown</code></li>
+      <li>Тексты ошибок: <code>redis_host задан без корректного redis_port (1–65535)</code>
+        и <code>redis_port задан без redis_host</code></li>
+      <li>Порт вне диапазона 1–65535 тоже отбивается на валидации</li>
+      <li>Реестры, где ключи лежали в <code>extra</code>, продолжают работать без правок</li>
+      <li>Приоритет у полей модели, <code>extra</code> — фолбэк</li>
     </ul>
   </div>
 </div>
@@ -1066,26 +1443,45 @@ PY</div>
 идентично локальному. Стенд объявляется удалённым одним полем <code>transport: "agent"</code>.</div>
 </div>
 
-<div class="note stopnote">🛑 <b>Правило №1.</b> Агент по HTTP запускает и останавливает процессы на своём хосте —
-это <b>поверхность удалённого исполнения кода по дизайну</b>. Никогда не выставляйте его в недоверенную сеть
-открытым HTTP. Только TLS с клиентской аутентификацией (mTLS) — либо loopback внутри VPN / SSH-туннеля.
-<br><br>Связка <code>--insecure</code> + <code>--host 0.0.0.0</code> на публичном IP означает, что Bearer-токен
-уходит открытым текстом через интернет. Поэтому: <b>(1)</b> порт закрыть firewall'ом на конкретные адреса
-(<code>ufw allow from &lt;IP&gt; to any port 8765 proto tcp</code>); <b>(2)</b> <code>--insecure</code> — только на
-первую проверку связи в доверенной сети, для постоянной работы TLS обязателен; <b>(3)</b> <code>agent.env</code> —
-<code>chmod 600</code>, токен не показывать в консоли и на скриншотах, при утечке перевыпускать;
-<b>(4)</b> пароли БД в <code>projects.json</code> (<code>db_password</code>) не писать — только
-<code>secret_ref_db</code>.</div>
+<h3 style="margin-top:20px">Прежде чем ставить: агент — это удалённое исполнение кода</h3>
+<div class="note stopnote">🛑 <b>Правило №1.</b> Агент по HTTP запускает и останавливает процессы на своём хосте.
+В недоверенную сеть — <b>никогда</b> открытым HTTP: только TLS с клиентской аутентификацией (mTLS)
+либо loopback внутри VPN / SSH-туннеля.</div>
+
+<div class="grid g4">
+  <div class="tile stop">
+    <h3><span class="ico">🧱</span>Порт — только своим</h3>
+    <p class="tmuted">Firewall на конкретные адреса управляющего контура, а не «любой адрес».</p>
+    <div class="prompt">ufw allow from &lt;IP&gt; to any port 8765 proto tcp</div>
+  </div>
+  <div class="tile warn">
+    <h3><span class="ico">🔓</span><code>--insecure</code> — разовый</h3>
+    <p class="tmuted">Только первая проверка связи в доверенной сети; для постоянной работы TLS обязателен.</p>
+    <p class="tmuted">Связка с <code>--host 0.0.0.0</code> на публичном IP = Bearer-токен открытым текстом через интернет.</p>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🔑</span><code>agent.env</code> — <code>chmod 600</code></h3>
+    <p class="tmuted">Токен не показывать в консоли и на скриншотах.</p>
+    <p class="tmuted">При утечке — перевыпустить.</p>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🗝️</span>Пароли БД — только ссылкой</h3>
+    <p class="tmuted"><code>db_password</code> в <code>projects.json</code> не писать.</p>
+    <p class="tmuted">Вместо него — <code>secret_ref_db</code>.</p>
+  </div>
+</div>
 
 <h3 style="margin-top:20px">Где что лежит на хосте агента</h3>
 <div class="grid g2">
   <div class="tile">
     <h3><span class="ico">📄</span>Реестр стендов агента</h3>
     <ul>
-      <li>Агент читает <b>свой</b> <code>projects.json</code> — в нём перечислены стенды <b>этого</b> хоста, и они остаются
-        <code>transport: "local"</code>: агент поднимает их у себя. Удалённым стенд становится только в реестре оператора</li>
-      <li>Путь задаётся флагом <code>--registry</code>. Без флага действует тот же порядок, что у дашборда:
-        <code>BPMSOFT_PROJECTS_FILE</code> → профиль пользователя → <code>./projects.json</code></li>
+      <li>Агент читает <b>свой</b> <code>projects.json</code> — в нём стенды <b>этого</b> хоста</li>
+      <li>Они остаются <code>transport: "local"</code>: агент поднимает их у себя. Удалённым стенд
+        становится только в реестре оператора</li>
+      <li>Путь задаётся флагом <code>--registry</code></li>
+      <li>Без флага — тот же порядок, что у дашборда: <code>BPMSOFT_PROJECTS_FILE</code> →
+        профиль пользователя → <code>./projects.json</code></li>
       <li><b>Для службы всегда задавайте <code>--registry</code> абсолютным путём:</b> у сервисной учётной записи
         свой профиль, и «тот самый» файл из вашей домашней папки она не увидит</li>
       <li>Реестр агента и реестр оператора — <b>разные файлы</b>, синхронизировать их не нужно</li>
@@ -1110,14 +1506,14 @@ C:\ProgramData\standkit\logs\audit.log</div>
   </div>
 </div>
 
-<h3 style="margin-top:20px">Установка агента — на каждом хосте стенда</h3>
+<h3 style="margin-top:20px">Установка агента: подготовка хоста</h3>
 <div class="tile">
 <div class="steps">
   <div class="st"><b>Поставить пакет в изолированное окружение</b>
-    <span class="tmuted">Тот же пакет <code>standkit</code>, что у оператора, — агент входит в него. Нужен Python 3.10+
-    и <code>dotnet</code> для запуска стендов (для <code>iis</code>/<code>docker</code>/<code>k8s</code> — соответствующий CLI).
-    Системный Python в Linux не трогаем: службе нужен предсказуемый путь к интерпретатору, поэтому для неё —
-    именно venv, а не pipx.</span>
+    <p class="tmuted">Тот же пакет <code>standkit</code>, что у оператора, — агент входит в него. Нужен Python 3.10+
+    и <code>dotnet</code> для запуска стендов (для <code>iis</code>/<code>docker</code>/<code>k8s</code> — соответствующий CLI).</p>
+    <p class="tmuted">Системный Python в Linux не трогаем: службе нужен предсказуемый путь к интерпретатору,
+    поэтому для неё — именно venv, а не pipx.</p>
     <div class="prompt">Linux
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin standkit
 sudo mkdir -p /opt/standkit/{tls,logs,run}
@@ -1130,10 +1526,10 @@ python -m venv C:\ProgramData\standkit\venv
 C:\ProgramData\standkit\venv\Scripts\pip install standkit</div></div>
 
   <div class="st"><b>Положить реестр стендов этого хоста</b>
-    <span class="tmuted">Файл <code>/opt/standkit/projects.json</code> (Windows — <code>C:\ProgramData\standkit\projects.json</code>).
-    Достаточно стендов этой машины; секретов в нём нет — только ссылки. Стенды здесь остаются
-    <code>transport: "local"</code>. Написать файл можно руками или скриптом —
-    рецепт <code>Registry.add_existing()</code> в разделе <a href="#registry">Реестр стендов</a>.</span>
+    <p class="tmuted">Файл <code>/opt/standkit/projects.json</code> (Windows — <code>C:\ProgramData\standkit\projects.json</code>).
+    Достаточно стендов этой машины; секретов в нём нет — только ссылки.</p>
+    <p class="tmuted">Стенды здесь остаются <code>transport: "local"</code>. Файл пишется руками или скриптом —
+    рецепт <code>Registry.add_existing()</code> в разделе <a href="#registry">Реестр стендов</a>.</p>
     <div class="prompt">{
   "default": "",
   "projects": {
@@ -1152,15 +1548,15 @@ C:\ProgramData\standkit\venv\Scripts\pip install standkit</div></div>
     }
   }
 }</div>
-    <span class="tmuted">⚠️ В <code>stand_host</code> — адрес <b>обращения</b> к стенду с этого хоста, а не адрес слушания:
-    <code>0.0.0.0</code> здесь даёт ложный <code>http: down</code>. Для контейнеров порт берётся из
-    <code>docker ps</code> — см. <a href="#hosting">Виды хостинга</a>.</span></div>
+    <p class="tmuted">⚠️ В <code>stand_host</code> — адрес <b>обращения</b> к стенду с этого хоста, а не адрес слушания:
+    <code>0.0.0.0</code> здесь даёт ложный <code>http: down</code>.</p>
+    <p class="tmuted">Для контейнеров порт берётся из <code>docker ps</code> — см. <a href="#hosting">Виды хостинга</a>.</p></div>
 
   <div class="st"><b>Задать токены агента</b>
-    <span class="tmuted">Токены не передаются в командной строке открытым текстом — только ссылкой на секрет.
-    Заведите разные токены для управления и для чтения. На сервере без keyring (обычный случай)
-    значение задаётся <b>переменной окружения</b>; имя — <code>STANDKIT_SECRET__</code> плюс ссылка
-    в верхнем регистре, где всё, кроме букв и цифр, заменено на <code>_</code>.</span>
+    <p class="tmuted">Токены не передаются в командной строке открытым текстом — только ссылкой на секрет.
+    Заведите разные токены для управления и для чтения.</p>
+    <p class="tmuted">На сервере без keyring (обычный случай) значение задаётся <b>переменной окружения</b>.
+    Имя — <code>STANDKIT_SECRET__</code> плюс ссылка в верхнем регистре, где всё, кроме букв и цифр, заменено на <code>_</code>.</p>
     <div class="prompt">python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # сгенерировать токен
 
 # /etc/standkit/agent.env — chmod 600, владелец = пользователь, под которым идёт агент
@@ -1169,20 +1565,29 @@ STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_READONLY_TOKEN=&lt;readonly-токе�
     <div class="twrap" style="margin:8px 0">
     <table>
       <tr><th style="width:42%">Ссылка на секрет в реестре</th><th>Переменная окружения</th></tr>
-      <tr><td><code>standkit:survey9:db</code></td><td><code>STANDKIT_SECRET__STANDKIT_SURVEY9_DB</code></td></tr>
-      <tr><td><code>standkit:survey9:agent-token</code></td><td><code>STANDKIT_SECRET__STANDKIT_SURVEY9_AGENT_TOKEN</code></td></tr>
+      <tr><td><code>standkit:stand-a:db</code></td><td><code>STANDKIT_SECRET__STANDKIT_STAND_A_DB</code></td></tr>
+      <tr><td><code>standkit:stand-a:agent-token</code></td><td><code>STANDKIT_SECRET__STANDKIT_STAND_A_AGENT_TOKEN</code></td></tr>
       <tr><td><code>standkit:client-uat:agent-readonly-token</code></td><td><code>STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_READONLY_TOKEN</code></td></tr>
     </table>
     </div>
-    <span class="tmuted"><b>Три грабли подряд, все живые.</b> (1) Забывают префикс <code>STANDKIT_SECRET__</code> —
-    имя выглядит правильным, а на старте <code>SecretError</code>. (2) Владелец <code>agent.env</code> должен совпадать
-    с пользователем службы: файл 600 под <code>root</code> и агент под <code>ubuntu</code> дают
-    <code>Permission denied</code> (<code>sudo chown ubuntu:ubuntu /etc/standkit/agent.env</code>).
-    (3) Имя переменной, посчитанное через <code>echo … | tr</code>, получает лишний <code>_</code> на конце из-за
-    перевода строки — используйте <code>printf '%s'</code> или просто впишите имя руками.</span>
-    <span class="tmuted">Keyring на headless-хосте обычно нерабочий (нет DBus и кошелька) — <b>для сервера основной путь именно env</b>.
-    На десктопе можно положить в keyring: <code>python -c "import getpass; from standkit.secrets import set_secret; set_secret('standkit:client-uat:agent-token', getpass.getpass())"</code>
-    (нужно дополнение <code>[secrets]</code>).</span></div>
+    <p class="tmuted"><b>Три грабли подряд, все живые.</b></p>
+    <div class="twrap" style="margin:8px 0">
+    <table>
+      <tr><th style="width:38%">Грабля</th><th style="width:22%">Что видно</th><th>Лечение</th></tr>
+      <tr><td>Забыт префикс <code>STANDKIT_SECRET__</code> — имя выглядит правильным</td>
+          <td><code>SecretError</code> на старте</td>
+          <td>Дописать префикс; полное имя — в таблице выше</td></tr>
+      <tr><td>Владелец <code>agent.env</code> не совпал с пользователем службы: файл 600 под <code>root</code>, агент под <code>ubuntu</code></td>
+          <td><code>Permission denied</code></td>
+          <td><code>sudo chown ubuntu:ubuntu /etc/standkit/agent.env</code></td></tr>
+      <tr><td>Имя посчитали через <code>echo … | tr</code> — на конце лишний <code>_</code> от перевода строки</td>
+          <td><code>SecretError</code> при верной на вид ссылке</td>
+          <td><code>printf '%s'</code> либо вписать имя руками</td></tr>
+    </table>
+    </div>
+    <p class="tmuted"><b>Keyring на headless-хосте обычно нерабочий</b> (нет DBus и кошелька) — для сервера основной путь именно env.</p>
+    <p class="tmuted">На десктопе значение можно положить в keyring (нужно дополнение <code>[secrets]</code>):</p>
+    <div class="prompt">python -c "import getpass; from standkit.secrets import set_secret; set_secret('standkit:client-uat:agent-token', getpass.getpass())"</div></div>
 
   <div class="st"><b>Выпустить сертификаты</b>
     <span class="tmuted">Нужны для доступа по сети: серверный сертификат агента и, крайне желательно, CA клиентских
@@ -1195,14 +1600,20 @@ openssl req -x509 -newkey rsa:4096 -nodes -days 365 \
     -keyout /opt/standkit/tls/clients-ca.key -out /opt/standkit/tls/clients-ca.crt \
     -subj "/CN=BPMkitStand clients CA"
 sudo chmod 600 /opt/standkit/tls/*.key && sudo chown standkit:standkit /opt/standkit/tls/*</div>
-    <span class="tmuted"><code>CN</code> серверного сертификата — то имя хоста, по которому к агенту будет ходить дашборд.</span></div>
+    <p class="tmuted"><code>CN</code> серверного сертификата — то имя хоста, по которому к агенту будет ходить дашборд.</p></div>
+</div>
+</div>
 
+<h3 style="margin-top:20px">Запуск, служба и проверка связи</h3>
+<div class="tile">
+<div class="steps">
   <div class="st"><b>Проверить запуск руками</b>
-    <span class="tmuted">Сначала убедитесь, что агент поднимается и видит стенды, и только потом оформляйте службу.
-    <b><code>--token-ref</code> обязателен</b> — без него argparse просто откажет, это самая частая первая ошибка.
-    Каталоги по умолчанию — <code>~/.standkit/run</code>, <code>~/.standkit/logs</code>, <code>~/.standkit/audit.log</code>:
-    у службы свой <code>$HOME</code>, поэтому <code>--run-dir</code>/<code>--log-dir</code>/<code>--audit-log</code>
-    задавайте явно. Все ключи — <code>--help</code>.</span>
+    <p class="tmuted">Сначала убедитесь, что агент поднимается и видит стенды, и только потом оформляйте службу.</p>
+    <p class="tmuted"><b><code>--token-ref</code> обязателен</b> — без него argparse просто откажет,
+    это самая частая первая ошибка. Все ключи — <code>--help</code>.</p>
+    <p class="tmuted">Каталоги по умолчанию — <code>~/.standkit/run</code>, <code>~/.standkit/logs</code>,
+    <code>~/.standkit/audit.log</code>. У службы свой <code>$HOME</code>, поэтому
+    <code>--run-dir</code>/<code>--log-dir</code>/<code>--audit-log</code> задавайте явно.</p>
     <div class="prompt">sudo -u standkit env $(cat /etc/standkit/agent.env | xargs) \
   /opt/standkit/venv/bin/python -m standkit_agent \
     --host 0.0.0.0 --port 8765 \
@@ -1213,13 +1624,14 @@ sudo chmod 600 /opt/standkit/tls/*.key && sudo chown standkit:standkit /opt/stan
     --tls-key /opt/standkit/tls/agent.key \
     --tls-client-ca /opt/standkit/tls/clients-ca.crt \
     --audit-log /opt/standkit/logs/audit.log</div>
-    <span class="tmuted">Для локальной отладки достаточно loopback без TLS:
-    <code>python -m standkit_agent --registry ./projects.json --token-ref standkit:client-uat:agent-token</code>.</span></div>
+    <p class="tmuted">Для локальной отладки достаточно loopback без TLS:</p>
+    <div class="prompt">python -m standkit_agent --registry ./projects.json --token-ref standkit:client-uat:agent-token</div></div>
 
   <div class="st"><b>Оформить службой</b>
-    <span class="tmuted"><b>Linux:</b> в пакете есть готовый least-privilege юнит — в репозитории
-    <code>standkit_agent/deploy/standkit-agent.service</code> (в установленный пакет он не входит, возьмите из репозитория
-    или напишите по образцу ниже). Подставьте свои пути, добавьте <code>EnvironmentFile</code> с токенами и включите службу.</span>
+    <p class="tmuted"><b>Linux:</b> готовый least-privilege юнит лежит в репозитории —
+    <code>standkit_agent/deploy/standkit-agent.service</code>.</p>
+    <p class="tmuted">В установленный пакет он не входит: возьмите из репозитория или напишите по образцу ниже.
+    Подставьте свои пути, добавьте <code>EnvironmentFile</code> с токенами и включите службу.</p>
     <div class="prompt">[Service]
 Type=simple
 User=standkit
@@ -1241,31 +1653,34 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/opt/standkit/run /opt/standkit/logs</div>
-    <span class="tmuted">В <code>ExecStart</code> — только абсолютные пути: у службы нет ни <code>~</code>, ни вашего
-    <code>PATH</code>. <code>User=</code> должен совпадать с владельцем <code>agent.env</code>, иначе
-    <code>Permission denied</code> на файле 600. Каталоги <code>--run-dir</code>/<code>--log-dir</code> задаём явно —
-    иначе агент уйдёт в <code>$HOME</code> сервисной учётки, которого при <code>ProtectHome=yes</code> фактически нет.</span>
+    <p class="tmuted">В <code>ExecStart</code> — только абсолютные пути: у службы нет ни <code>~</code>, ни вашего <code>PATH</code>.</p>
+    <p class="tmuted"><code>User=</code> должен совпадать с владельцем <code>agent.env</code>, иначе
+    <code>Permission denied</code> на файле 600.</p>
+    <p class="tmuted">Каталоги <code>--run-dir</code>/<code>--log-dir</code> задаём явно — иначе агент уйдёт
+    в <code>$HOME</code> сервисной учётки, которого при <code>ProtectHome=yes</code> фактически нет.</p>
     <div class="prompt">sudo cp standkit-agent.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now standkit-agent
 systemctl status standkit-agent</div>
-    <span class="tmuted"><b>Windows:</b> проще всего через NSSM под <b>выделенной</b> учётной записью (никогда не под
-    <code>LocalSystem</code>): <code>nssm install standkit-agent C:\ProgramData\standkit\venv\Scripts\python.exe -m standkit_agent --registry C:\ProgramData\standkit\projects.json --token-ref standkit:client-uat:agent-token …</code>,
-    затем <code>nssm set standkit-agent ObjectName .\standkit-agent &lt;пароль&gt;</code>. Учётной записи нужно право
-    «Log on as a service»; полные заметки — <code>standkit_agent/deploy/windows-service.md</code>.</span></div>
+    <p class="tmuted"><b>Windows:</b> проще всего через NSSM под <b>выделенной</b> учётной записью —
+    никогда не под <code>LocalSystem</code>.</p>
+    <div class="prompt">nssm install standkit-agent C:\ProgramData\standkit\venv\Scripts\python.exe -m standkit_agent --registry C:\ProgramData\standkit\projects.json --token-ref standkit:client-uat:agent-token …
+nssm set standkit-agent ObjectName .\standkit-agent &lt;пароль&gt;</div>
+    <p class="tmuted">Учётной записи нужно право «Log on as a service». Полные заметки —
+    <code>standkit_agent/deploy/windows-service.md</code>.</p></div>
 
   <div class="st"><b>Открыть доступ и проверить с машины оператора</b>
-    <span class="tmuted">Firewall: входящий порт агента — только для адресов управляющего контура, не «любой адрес».
-    Проверять лучше readonly-токеном, чтобы ничего не запустить.</span>
+    <p class="tmuted">Firewall: входящий порт агента — только для адресов управляющего контура, не «любой адрес».</p>
+    <p class="tmuted">Проверять лучше readonly-токеном, чтобы ничего не запустить.</p>
     <div class="prompt">sudo ufw allow from &lt;IP оператора&gt; to any port 8765 proto tcp
 
 # Linux / macOS
 curl --cacert agent.crt --cert client.crt --key client.key \
      -H "Authorization: Bearer &lt;readonly-токен&gt;" \
      https://client-host:8765/stands</div>
-    <span class="tmuted"><b>В PowerShell <code>curl</code> — это алиас <code>Invoke-WebRequest</code></b>, флаги
-    <code>-s -H</code> он не понимает и падает с <code>ParameterBindingException</code>. Нужен либо настоящий
-    <code>curl.exe</code>, либо родная команда:</span>
+    <p class="tmuted"><b>В PowerShell <code>curl</code> — это алиас <code>Invoke-WebRequest</code></b>: флаги
+    <code>-s -H</code> он не понимает и падает с <code>ParameterBindingException</code>.</p>
+    <p class="tmuted">Нужен либо настоящий <code>curl.exe</code>, либо родная команда:</p>
     <div class="prompt">curl.exe -s -H "Authorization: Bearer &lt;токен&gt;" https://client-host:8765/stands
 
 Invoke-RestMethod -Uri https://client-host:8765/stands `
@@ -1294,7 +1709,7 @@ Invoke-RestMethod -Uri https://client-host:8765/stands `
   }
 }</div>
     <ul>
-      <li>Тот же токен задайте секретом и на стороне оператора</li>
+      <li>Тот же токен задайте секретом и на стороне оператора — врезка «Токен агента живёт в двух местах» ниже</li>
       <li>Стенд появится в общем списке, в колонке «Транспорт» будет <code>agent</code></li>
       <li>Кнопки старт/стоп/рестарт, статус и логи работают так же — запросы прозрачно уходят к агенту</li>
     </ul>
@@ -1313,20 +1728,123 @@ Invoke-RestMethod -Uri https://client-host:8765/stands `
       <tr><td><code>POST /stand/{имя}/adopt</code></td><td>control</td><td>усыновить процесс, поднятый вне диспетчера</td></tr>
     </table>
     </div>
-    <p class="tmuted"><b>Эндпоинта <code>/health</code> у агента нет</b> — не ищите. Живость проверяется
-    <code>GET /stands</code> с токеном; без заголовка <code>Authorization</code> любой маршрут ответит отказом.
-    Мониторингу отдавайте <b>readonly</b>-токен: он видит статусы и логи, но ничего не запускает и не гасит.</p>
+    <p class="tmuted"><b>Эндпоинта <code>/health</code> у агента нет</b> — не ищите: живость проверяется
+    <code>GET /stands</code> с токеном.</p>
+    <p class="tmuted">Без заголовка <code>Authorization</code> любой маршрут ответит отказом. Мониторингу отдавайте
+    <b>readonly</b>-токен: он видит статусы и логи, но ничего не запускает и не гасит.</p>
     <p class="tmuted"><b>409 <code>adopt_required</code> — это фича, а не ошибка.</b> Так агент отвечает на
-    <code>stop</code>/<code>restart</code> стенда, поднятого мимо диспетчера: он возвращает описание найденного
-    процесса-кандидата и <b>ничего не трогает</b>. Согласие передаётся явно — повторить с <code>?force=1</code>
-    либо вызвать <code>POST /stand/&lt;имя&gt;/adopt</code>. Тихого <code>kill</code> по номеру порта не бывает.</p>
+    <code>stop</code>/<code>restart</code> стенда, поднятого мимо диспетчера.</p>
+    <p class="tmuted">Он возвращает описание найденного процесса-кандидата и <b>ничего не трогает</b>. Согласие
+    передаётся явно: повторить с <code>?force=1</code> либо вызвать <code>POST /stand/&lt;имя&gt;/adopt</code>.</p>
+    <p class="tmuted">Тихого <code>kill</code> по номеру порта не бывает.</p>
   </div>
 </div>
 
-<div class="note">🎛️ <b>Вкладка «Локальный агент»</b> в дашборде запускает и останавливает агента <b>на текущей машине</b>
-с параметрами из «Настроек» — она нужна администратору хоста, где живут стенды. Если вы управляете стендами
-с той же машины, где они запущены (<code>transport: local</code>), агент не нужен вообще: ядро работает со стендами напрямую.
-Блок «Агент (расширенное)» в настройках скрыт, пока в реестре нет удалённых стендов.</div>
+<h3 style="margin-top:20px">Токен агента живёт в двух местах</h3>
+<div class="note">🔑 <b>Один и тот же control-токен заводится дважды</b> — на хосте агента и на машине оператора.
+Ссылка на секрет при этом <b>одна и та же</b>, разное только хранилище значения.</div>
+
+<div class="grid g3">
+  <div class="tile">
+    <h3><span class="ico">📡</span>Сторона агента</h3>
+    <p class="tmuted">Значение лежит в <code>agent.env</code>.</p>
+    <p class="tmuted">Им агент <b>проверяет</b> входящие запросы.</p>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🖥️</span>Сторона оператора</h3>
+    <p class="tmuted">Значение лежит в keyring или в окружении процесса хаба.</p>
+    <p class="tmuted">Им хаб <b>представляется</b>.</p>
+  </div>
+  <div class="tile acc">
+    <h3><span class="ico">🔗</span>Ссылка общая</h3>
+    <p class="tmuted">В обоих реестрах — <code>standkit:stand-a:agent-token</code>.</p>
+    <p class="tmuted">Резолвит хаб у себя, в своём процессе: переменная окружения → keyring → открытый фолбэк.</p>
+  </div>
+</div>
+
+<div class="grid g2">
+  <div class="tile">
+    <h3><span class="ico">🧮</span>Имя переменной считается по формуле</h3>
+    <p class="tmuted"><code>STANDKIT_SECRET__</code> плюс ссылка в ВЕРХНЕМ регистре, где всё, кроме букв и цифр,
+    заменено на <code>_</code>. Формула одна и та же на обеих сторонах — у агента и у хаба.</p>
+    <div class="twrap">
+    <table>
+      <tr><th style="width:44%">Ссылка на секрет</th><th>Переменная окружения</th></tr>
+      <tr><td><code>standkit:stand-a:agent-token</code></td>
+          <td><code>STANDKIT_SECRET__STANDKIT_STAND_A_AGENT_TOKEN</code></td></tr>
+      <tr><td><code>standkit:client-uat:agent-readonly-token</code></td>
+          <td><code>STANDKIT_SECRET__STANDKIT_CLIENT_UAT_AGENT_READONLY_TOKEN</code></td></tr>
+    </table>
+    </div>
+    <div class="prompt">Windows (PowerShell) — текущая сессия
+$env:STANDKIT_SECRET__STANDKIT_STAND_A_AGENT_TOKEN = "&lt;control-токен&gt;"
+python -m standkit_hub
+
+Linux / macOS
+export STANDKIT_SECRET__STANDKIT_STAND_A_AGENT_TOKEN="&lt;control-токен&gt;"
+python3 -m standkit_hub</div>
+  </div>
+  <div class="tile warn">
+    <h3><span class="ico">⏱️</span>Переменная задаётся ДО старта хаба</h3>
+    <ul>
+      <li>Процесс получает окружение <b>в момент создания</b> — заданная позже (или в другом окне терминала)
+        переменная в уже запущенный хаб не попадёт</li>
+      <li>Симптом ровно один: дашборд показывает ошибку секрета при, казалось бы, выставленном значении</li>
+      <li>Ярлык на рабочем столе запускает хаб через <code>pythonw</code> и наследует окружение так же — <b>поменяли
+        токен, перезапустите хаб</b></li>
+      <li>Проверить, что значение вообще видно процессу, проще всего тем же интерпретатором, которым запускается хаб</li>
+    </ul>
+    <div class="prompt">python -c "from standkit.secrets import has_secret; print(has_secret('standkit:stand-a:agent-token'))"</div>
+  </div>
+</div>
+
+<div class="grid g2">
+  <div class="tile ok">
+    <h3><span class="ico">🔐</span>Для постоянной работы — keyring, а не env одной сессии</h3>
+    <ul>
+      <li>Машина оператора — обычно десктоп с рабочим хранилищем, в отличие от headless-хоста агента</li>
+      <li>Нужен extra: <code>pip install standkit[secrets]</code></li>
+      <li>Кнопка <b>«Задать секрет…»</b> в «Настройках» → «Агент (расширенное)» пишет значение для ссылки
+        из соседнего поля — это токены <b>локального</b> агента</li>
+      <li>Для чужой ссылки (<code>agent_secret_ref</code> удалённого стенда) надёжнее однострочник — он кладёт
+        значение в тот же keyring:</li>
+      <li>Значение из keyring переживает перезагрузку и не светится в истории команд</li>
+    </ul>
+    <div class="prompt">python -c "import getpass; from standkit.secrets import set_secret; set_secret('standkit:stand-a:agent-token', getpass.getpass('Токен: '))"</div>
+    <p class="tmuted">Переменная окружения приоритетнее keyring: забытый в профиле старый
+    <code>STANDKIT_SECRET__…</code> будет молча побеждать свежее значение из хранилища.</p>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">👁️</span>Хабу можно выдать readonly-токен</h3>
+    <ul>
+      <li>Если с этой машины нужен только просмотр, <code>agent_secret_ref</code> может указывать на
+        <b>readonly</b>-токен агента</li>
+      <li>Статусы и логи будут работать, а старт/стоп/рестарт честно получат
+        <code>403 forbidden: insufficient scope</code> — вместо тихой работы с полными правами «на всякий случай»</li>
+      <li>Типовой случай — дежурная или мониторинговая машина, где случайное нажатие «Стоп» стоит дороже удобства</li>
+      <li>Токены и ссылки на них разные: <code>…:agent-token</code> для управления,
+        <code>…:agent-readonly-token</code> для чтения</li>
+    </ul>
+  </div>
+</div>
+
+<h3 style="margin-top:20px">Вкладка «Локальный агент» — это про текущую машину</h3>
+<div class="grid g3">
+  <div class="tile">
+    <h3><span class="ico">🎛️</span>Что делает вкладка</h3>
+    <p class="tmuted">Запускает и останавливает агента <b>на текущей машине</b> с параметрами из «Настроек».</p>
+    <p class="tmuted">Нужна администратору хоста, где живут стенды.</p>
+  </div>
+  <div class="tile ok">
+    <h3><span class="ico">🏠</span>Когда агент не нужен вовсе</h3>
+    <p class="tmuted">Если стенды запущены на той же машине, откуда вы ими управляете (<code>transport: local</code>).</p>
+    <p class="tmuted">Ядро работает с ними напрямую.</p>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">👀</span>Куда делся блок настроек</h3>
+    <p class="tmuted">«Агент (расширенное)» скрыт, пока в реестре нет удалённых стендов.</p>
+  </div>
+</div>
 </section>
 <!-- ▲▲▲ END SECTION: remote ▲▲▲ -->
 
@@ -1434,7 +1952,8 @@ Invoke-RestMethod -Uri https://client-host:8765/stands `
       <td>Запускать модулем: <code>python -m standkit_hub</code>. Разбор — плитка ниже</td></tr>
   <tr><td>Linux: <code>error: externally-managed-environment</code> при <code>pip install</code></td>
       <td>Системный Python защищён от установки пакетов (PEP 668) — так во всех свежих дистрибутивах</td>
-      <td>Ставить в изолированное окружение: <code>pipx install "standkit[secrets]"</code> или venv (см. <a href="#start">Установка</a>). Не ломать защиту флагом <code>--break-system-packages</code></td></tr>
+      <td><code>pipx install "standkit[secrets]"</code> либо venv — см. <a href="#start">Установка</a>.<br>
+      Защиту флагом <code>--break-system-packages</code> не ломать</td></tr>
   <tr><td>Linux: поставил через pipx, команды нет</td>
       <td><code>~/.local/bin</code> не в <code>PATH</code></td>
       <td><code>pipx ensurepath</code> и <b>новый</b> вход в shell</td></tr>
@@ -1457,8 +1976,10 @@ Invoke-RestMethod -Uri https://client-host:8765/stands `
       <td>Регистрация не выполнялась — или ушла в другой файл реестра</td>
       <td>Проверить путь: агенту всегда задавать <code>--registry</code> явно; рецепт регистрации — в разделе <a href="#registry">Реестр стендов</a></td></tr>
   <tr><td><code>http: down</code> при живом стенде</td>
-      <td><code>stand_host=0.0.0.0</code>, порт не опубликован наружу — или стенд за TLS без <code>stand_scheme</code></td>
-      <td>Взять адрес обращения с хоста и левый порт из <code>docker ps</code>; для стенда за TLS — <code>stand_scheme: "https"</code> (и <code>verify_tls: false</code> для self-signed), см. <a href="#hosting">Виды хостинга</a></td></tr>
+      <td>Причин несколько, и <b>дашборд её называет</b>: наведите мышь на адрес в колонке HTTP (пунктирное подчёркивание = есть подсказка)</td>
+      <td>«сервер ответил не по протоколу HTTP» → <code>stand_scheme: "https"</code>;<br>
+      «соединение отклонено» → адрес/порт с точки зрения хоста пробы.<br>
+      Дерево решений — в раскрывашке ниже</td></tr>
   <tr><td>Статус не изменился после правки реестра</td>
       <td>Агент читает <code>projects.json</code> при старте</td>
       <td><code>sudo systemctl restart standkit-agent</code></td></tr>
@@ -1483,8 +2004,34 @@ Invoke-RestMethod -Uri https://client-host:8765/stands `
       <td><code>sc start WAS</code> или <code>iisreset /start</code></td></tr>
   <tr><td>Стоп/Рестарт отвечает отказом с описанием процесса</td><td>Стенд поднят вне диспетчера, pid неизвестен</td>
       <td>Подтвердить усыновление — или остановить процесс тем же способом, каким запускали</td></tr>
-  <tr><td>Кнопка «Очистить Redis» неактивна</td><td>Redis у стенда не настроен в реестре</td>
-      <td>Добавить <code>redis_host</code> / <code>redis_port</code> / <code>redis_db</code> в запись</td></tr>
+  <tr><td>Кнопка «Очистить Redis» неактивна</td>
+      <td>В записи нет <b>номера базы</b>: кнопку включает <code>redis_db</code>, а цвет ячейки даёт проба
+      <code>redis_host</code>/<code>redis_port</code> — это разные вещи</td>
+      <td><code>redis_host</code>/<code>redis_port</code> — из формы регистрации; <code>redis_db</code> пока задаётся правкой
+      записи в реестре (см. <a href="#registry">Реестр стендов</a>)</td></tr>
+  <tr><td>Агент падает сразу после старта: <code>Отказ старта: каталог логов … недоступен на запись пользователю …</code></td>
+      <td>Каталог run/логов/аудита принадлежит другому пользователю — типично после ручных запусков из-под root</td>
+      <td>Одна строка отказа вместо traceback, и в ней уже есть рецепт: выдать права или задать свои пути
+      <code>--run-dir</code> / <code>--log-dir</code> / <code>--audit-log</code>. Разбор — в раскрывашке ниже</td></tr>
+  <tr><td><code>Отказ старта: домашний каталог … недоступен … дефолты ~/.standkit/… нерабочие</code></td>
+      <td>Сервисный аккаунт заведён с <code>--no-create-home</code>, а дефолты путей упираются в <code>$HOME</code></td>
+      <td>Задать все три пути явно. Агент намеренно не создаёт <code>~/.standkit</code> в несуществующем <code>$HOME</code> и говорит об этом до старта</td></tr>
+  <tr><td><code>Отказ старта: не удалось привязаться к 127.0.0.1:8765 — порт уже занят другим процессом</code></td>
+      <td>Порт держит прежний агент: ручной запуск, который забыли остановить, или недоперезапущенная служба</td>
+      <td>Найти владельца и снять: <code>ss -ltnp | grep 8765</code>, затем <code>pkill -f standkit_agent</code> — либо поднять агента на другом порту через <code>--port</code></td></tr>
+  <tr><td><code>CERTIFICATE_VERIFY_FAILED</code> / «сертификат агента не доверенный» при обращении хаба к агенту</td>
+      <td>Сертификат агента самоподписанный, а хаб проверяет цепочку по системному хранилищу</td>
+      <td>Указать сертификат (или CA) агента в записи стенда — поле <code>agent_ca</code>.
+      <b><code>verify_tls</code> здесь ни при чём</b>: он относится к пробе <b>стенда</b>, а не к каналу до агента.
+      Разбор всех вариантов ошибки — в раскрывашке ниже</td></tr>
+  <tr><td>Логи стенда на Linux: «каталог не найден», хотя каталог есть <span class="badge b-ok">закрыто</span></td>
+      <td>BPMSoft пишет в <code>Logs</code> с заглавной; имя каталога было зашито строкой <code>logs</code>, и на регистрозависимой ФС не находилось</td>
+      <td>Обновить пакет: имя ищется без учёта регистра. Нестандартная раскладка задаётся полем <code>logs_dir</code>,
+      см. <a href="#hosting">Виды хостинга</a></td></tr>
+  <tr><td>«каталог логов живёт на хосте стенда; хаб … не видит»</td>
+      <td>Стенд за агентом: каталог принадлежит чужой файловой системе, а хаб проверяет путь у себя</td>
+      <td>Это не ошибка, а честная формулировка вместо неверного «каталог не найден». Хвост лога смотрите на хосте стенда
+      или через API агента: <code>GET /stand/&lt;имя&gt;/logs?n=100</code></td></tr>
   <tr><td>Агент не стартует, пишет про fail-closed</td><td>Внешний адрес без TLS</td>
       <td>Добавить <code>--tls-cert</code>/<code>--tls-key</code> (или <code>--insecure</code> — только dev)</td></tr>
   <tr><td><code>401 unauthorized</code></td><td>Токен у оператора ≠ токену на агенте</td>
@@ -1591,6 +2138,118 @@ python -m pip show standkit</div>
   </ul></div>
 </details>
 
+<details class="tile">
+  <summary>🌐 <code>http: down</code>, а стенд живой<span class="badge b-warn">частое</span><span class="chev">▶</span></summary>
+  <div class="body">
+    <p class="tmuted">Не гадайте: наведите мышь на адрес в колонке <b>HTTP</b> — пунктирное подчёркивание значит,
+    что подсказка есть. Дальше по тексту подсказки.</p>
+    <div class="twrap">
+    <table>
+      <tr><th style="width:42%">Текст подсказки</th><th>Что это и что делать</th></tr>
+      <tr><td>«сервер ответил не по протоколу HTTP» + «похоже, стенд за TLS…»</td>
+          <td>Проба по <code>http://</code> ушла в TLS-порт. Схема <code>https</code> в форме регистрации;
+          сертификат самоподписанный — снять «Проверять сертификат»</td></tr>
+      <tr><td>«сертификат не прошёл проверку: …»</td>
+          <td>Схема уже верная, не доверяем сертификату <b>стенда</b>. Дев-контур — <code>verify_tls: false</code>;
+          прод — выпустить сертификат доверенным CA</td></tr>
+      <tr><td>«соединение отклонено — на 10.0.0.10:5000 никто не слушает»</td>
+          <td>Порт закрыт или адрес не тот. Docker: нужен <b>левый</b> порт из <code>docker ps</code> и адрес,
+          видимый с хоста, а не <code>0.0.0.0</code></td></tr>
+      <tr><td>«нет ответа за 1.5 с»</td>
+          <td>Адрес верный, но ответа нет вовремя: стенд ещё прогревается либо между хабом и стендом firewall</td></tr>
+      <tr><td>«имя хоста не разрешается»</td>
+          <td>DNS. Проверьте имя из <code>stand_host</code> с той машины, что делает пробу (для agent-стенда — с хоста агента)</td></tr>
+      <tr><td>«сервер ответил 502» / «сервер ответил 500»</td>
+          <td>Стенд <b>отвечает</b> — ломается он сам или обратный прокси перед ним. Смотрите хвост лога, а не реестр.
+          Коды меньше 500 (401/403 до логина) отказом не считаются</td></tr>
+    </table>
+    </div>
+    <ul>
+      <li>В конце подсказки — URL, по которому реально стучались: сверьте схему, хост, порт</li>
+      <li>Причину считает та сторона, что делает пробу: для стенда за агентом — <b>агент</b>, его и обновлять первым</li>
+      <li>Обновление пакета само по себе <code>down</code> не лечит: <code>stand_scheme</code>/<code>verify_tls</code> надо выставить, дефолты повторяют прежнее поведение</li>
+    </ul>
+  </div>
+</details>
+
+<details class="tile">
+  <summary>🧱 Агент не стартует под systemd<span class="chev">▶</span></summary>
+  <div class="body">
+    <p class="tmuted">Отказ по путям проверяется <b>до</b> открытия сокета и до строки «слушаю …»: если в журнале
+    есть «слушаю», значит preflight пройден. Каждый отказ — одна строка с полным путём, именем пользователя
+    и подсказкой, какой флаг задать; traceback наружу не выходит.</p>
+    <div class="prompt">[standkit-agent] Отказ старта: каталог логов /opt/standkit/logs недоступен
+на запись пользователю standkit — задайте --log-dir или выдайте права</div>
+    <div class="prompt">[standkit-agent] Отказ старта: домашний каталог /home/standkit недоступен
+(не существует или не каталог), поэтому дефолты ~/.standkit/run, ~/.standkit/logs
+и ~/.standkit/audit.log нерабочие — при запуске под сервисным аккаунтом
+(useradd --no-create-home, systemd) задайте все три пути явно</div>
+    <div class="twrap">
+    <table>
+      <tr><th style="width:22%">Что задать</th><th style="width:30%">Зачем</th><th>Если не задать</th></tr>
+      <tr><td><code>--run-dir</code></td><td>pid-файлы стендов</td><td>Дефолт <code>~/.standkit/run</code> — у аккаунта с <code>--no-create-home</code> его нет</td></tr>
+      <tr><td><code>--log-dir</code></td><td>логи стендов, запущенных агентом</td><td>Тот же дефолт в <code>$HOME</code>; при чужом владельце каталога — отказ по правам</td></tr>
+      <tr><td><code>--audit-log</code></td><td>файл аудита операций агента</td><td>Частый случай: файл создан из-под root при ручном прогоне, служба под <code>standkit</code> в него не пишет</td></tr>
+    </table>
+    </div>
+    <ul>
+      <li>Проверяется и сам файл аудита, а не только его каталог: каталог писуч, а дописать в чужой файл нельзя</li>
+      <li>Каталог, которого ещё нет, — не ошибка: агент создаст его сам, если писуч ближайший существующий родитель</li>
+      <li>Лечение прав: <div class="prompt">sudo install -d -o standkit -g standkit -m 750 /opt/standkit/run /opt/standkit/logs
+sudo chown -R standkit:standkit /opt/standkit/run /opt/standkit/logs</div></li>
+      <li>Порт занят — отдельная строка того же вида: «не удалось привязаться к 127.0.0.1:8765 — порт уже занят
+        другим процессом (возможно, агент уже запущен)». Владелец ищется <code>ss -ltnp | grep 8765</code></li>
+      <li>Порт меньше 1024 — «нет прав на привязку к этому порту»: берите непривилегированный через <code>--port</code></li>
+      <li>Ещё до путей проверяется fail-closed по адресу: внешний адрес без TLS агент не примет — см. <a href="#remote">Удалённые стенды</a></li>
+    </ul>
+  </div>
+</details>
+
+<details class="tile">
+  <summary>🔏 Хаб не доверяет сертификату агента<span class="badge b-acc">TLS</span><span class="chev">▶</span></summary>
+  <div class="body">
+    <p class="tmuted">Ключевая путаница: <code>verify_tls</code> относится к пробе <b>стенда</b>, а канал
+    «хаб → агент» настраивается своей парой — <code>agent_ca</code> (файл сертификата или CA агента) и
+    <code>agent_verify_tls</code>. Оператор находит <code>verify_tls</code>, выключает его и обоснованно считает,
+    что проверку уже отключил, — а ошибка та же. Оба поля агента есть в форме регистрации, в блоке,
+    который открывается при транспорте <code>agent</code> (см. <a href="#registry">Реестр стендов</a>).</p>
+    <div class="twrap">
+    <table>
+      <tr><th style="width:44%">Что пишет дашборд</th><th style="width:26%">Что это</th><th>Рецепт</th></tr>
+      <tr><td>«сертификат агента не доверенный (self-signed certificate) — укажите agent_ca (путь к сертификату агента) в записи стенда»</td>
+          <td>CA агента не известен машине оператора</td>
+          <td>Положить <code>agent.crt</code> (или CA, которым он выпущен) на машину <b>хаба</b> и указать путь в поле
+          «Сертификат агента (<code>agent_ca</code>)». Промежуточный CA — собрать в файле полную цепочку</td></tr>
+      <tr><td>«имя в сертификате агента не совпадает с адресом (Hostname mismatch …) — имя в agent_url должно совпадать с CN/SAN сертификата агента»</td>
+          <td>В <code>agent_url</code> имя или IP, которых нет в сертификате</td>
+          <td>Обращаться ровно по тому имени, что в сертификате, либо перевыпустить его с нужным SAN.
+          <code>agent_ca</code> тут не поможет — проверяется не издатель, а имя</td></tr>
+      <tr><td>«файл сертификата агента не найден: /etc/standkit/agent.crt (поле agent_ca записи стенда)»</td>
+          <td>Путь указан, но файла нет или он не читается процессом хаба</td>
+          <td>Абсолютный путь на машине хаба, читаемый пользователем, под которым запущен хаб.
+          Соседний вариант того же — «не удалось прочитать сертификат агента …»</td></tr>
+      <tr><td>Регистрация не проходит: «agent_ca имеет смысл только при agent_url на https:// …»</td>
+          <td>Сертификат задан, а канал до агента — голый <code>http</code></td>
+          <td>Это намеренный отказ, а не придирка: молча проигнорированная настройка — ровно та ловушка,
+          из-за которой оператор ищет причину не там. Переведите агента на TLS или уберите <code>agent_ca</code></td></tr>
+    </table>
+    </div>
+    <ul>
+      <li>Проверить сам агент, минуя дашборд: <div class="prompt">curl --cacert /path/to/agent.crt https://example-host:8765/stands -H "Authorization: Bearer &lt;токен&gt;"</div>
+        <code>curl</code> отвечает, а хаб нет — дело именно в доверии на стороне хаба, а не в агенте или токене</li>
+      <li>Путь в <code>agent_ca</code> — путь на <b>машине хаба</b>, а не на хосте агента: одна и та же запись реестра
+        живёт с обеих сторон, и существование файла на валидации не проверяется — отказ будет в момент обращения, с указанием пути</li>
+      <li>Альтернатива на весь процесс сразу: переменная <code>SSL_CERT_FILE</code> с путём к CA, выставленная
+        <b>до</b> запуска хаба (после старта процесса она уже не действует). Годится, когда агентов много и CA у них общий</li>
+      <li><code>agent_verify_tls: false</code> — крайняя мера для дев-контура: канал остаётся шифрованным, но подмена
+        агента перестаёт ловиться. Для прода — доверенный CA</li>
+      <li>Не путайте с mTLS: <code>agent_ca</code> — это доверие <b>к серверу</b>. Агент, поднятый с
+        <code>--tls-client-ca</code>, требует ещё и <b>клиентский</b> сертификат, а полей для него у дашборда нет —
+        такой агент отвечает <code>curl</code>/скрипту, но не дашборду, см. <a href="#remote">Удалённые стенды</a></li>
+    </ul>
+  </div>
+</details>
+
 </div>
 </section>
 <!-- ▲▲▲ END SECTION: trouble ▲▲▲ -->
@@ -1619,8 +2278,8 @@ python -m pip show standkit</div>
   <div class="tile warn">
     <h3><span class="badge b-warn">🟡 каркас / заглушки</span></h3>
     <ul>
-      <li><b>Нет CLI регистрации стенда</b> — только кнопка в дашборде, правка <code>projects.json</code>
-        или <code>Registry.add_existing()</code> из Python</li>
+      <li><b>Нет CLI регистрации стенда</b> — только кнопка в дашборде, правка файла
+        или <code>Registry.add_existing()</code></li>
       <li>Глубокие пробы БД и Redis (<code>SELECT 1</code> / <code>PING</code>) — пока только проверка порта</li>
       <li>Живой follow лога — сейчас периодический tail</li>
       <li>UI-индикатор <code>host_kind</code> в таблице</li>
@@ -1648,7 +2307,7 @@ python -m pip show standkit</div>
   </div>
 </div>
 
-<div class="note">📈 Документ описывает поведение версии <b>0.6.x</b>. Если что-то в кукбуке разошлось с тем,
+<div class="note">📈 Документ описывает поведение версии <b>0.8.x</b>. Если что-то в кукбуке разошлось с тем,
 что вы видите на экране, источник правды — <code>docs/CHANGELOG.md</code> в репозитории; сообщите о расхождении,
 и кукбук поправят.</div>
 </section>
@@ -1677,9 +2336,10 @@ python -m pip show standkit</div>
       BPMkitStand — о документе
       <button class="mclose" id="modalClose" title="Закрыть">✕</button>
     </h2>
-    <div class="mver">Кукбук диспетчера стендов · версия документа 1.2 · август 2026 · описывает standkit 0.6.x</div>
+    <div class="mver">Кукбук диспетчера стендов · версия документа 1.3 · август 2026 · описывает standkit 0.8.x</div>
 
-    <div class="mrow"><span class="mk">Где лежит</span><span>В поставке — <code>standkit_hub/web/cookbook.html</code>; открывается кнопкой <b>?</b> в шапке дашборда и работает офлайн</span></div>
+    <div class="mrow"><span class="mk">Где лежит</span><span>В поставке — <code>standkit_hub/web/cookbook.html</code> (это статика дашборда, поэтому файл лежит внутри пакета, а не в <code>docs/</code>); открывается кнопкой <b>?</b> в шапке дашборда и работает офлайн</span></div>
+    <div class="mrow"><span class="mk">Соседние документы</span><span>Карта всей документации — <code>docs/README.md</code> в репозитории. Отдельно: <code>docs/COOKBOOK_LINUX.md</code> (агент на Linux пошагово) и <code>docs/GAPs/</code> (где сценарий оператора расходился с продуктом и как это закрыли)</span></div>
     <div class="mrow"><span class="mk">Создатель</span><span>Владимир Терновский</span></div>
     <div class="mrow"><span class="mk">Сайт</span><a href="https://bpmkit.pro" target="_blank" rel="noopener">bpmkit.pro</a></div>
     <div class="mrow"><span class="mk">Репозиторий</span><a href="https://github.com/thinkquattro/BPMkitStand" target="_blank" rel="noopener">github.com/thinkquattro/BPMkitStand</a></div>
@@ -1690,13 +2350,15 @@ python -m pip show standkit</div>
     <h3>Источники</h3>
     <p class="tmuted" style="font-size:13px;color:var(--muted)">Документ собран по <code>README.md</code>,
     <code>docs/ARCHITECTURE.md</code>, <code>docs/HOSTING.md</code>, <code>docs/REMOTE_STANDS.md</code>,
-    <code>SECURITY.md</code>, <code>docs/ROADMAP.md</code>, <code>docs/BACKLOG.md</code> и
-    <code>docs/CHANGELOG.md</code> репозитория BPMkitStand.</p>
+    <code>SECURITY.md</code>, <code>docs/ROADMAP.md</code>, <code>docs/BACKLOG.md</code>,
+    <code>docs/CHANGELOG.md</code>, <code>docs/COOKBOOK_LINUX.md</code> и <code>docs/GAPs/</code>
+    репозитория BPMkitStand. Карта документов — <code>docs/README.md</code>.</p>
 
     <h3>История изменений</h3>
     <div class="twrap">
     <table>
       <tr><th>Версия</th><th>Дата</th><th>Изменения</th></tr>
+      <tr><td>1.3</td><td>август 2026</td><td>Закрыты восемь гэпов живой приёмки. Разбор формы регистрации поле за полем (включая появившиеся <code>stand_scheme</code>, <code>verify_tls</code>, <code>redis_host</code>/<code>redis_port</code>, <code>logs_dir</code>, <code>agent_ca</code>); токен агента живёт в двух местах — рецепт для стороны хаба; подсказки с причиной отказа в колонках HTTP и Redis; каталог логов и его регистр; Redis как поля реестра; шесть новых строк траблшутинга и три разбора — отказы старта агента под systemd, недоверенный сертификат агента, «<code>http: down</code>, а стенд живой». Примеры анонимизированы, установка и обновление — только через PyPI.</td></tr>
       <tr><td>1.2</td><td>август 2026</td><td>Стенд за TLS больше не ограничение: описаны поля <code>stand_scheme</code> и <code>verify_tls</code> (ядро научилось пробовать https и не спотыкаться о самоподписанный сертификат).</td></tr>
       <tr><td>1.1</td><td>август 2026</td><td>По итогам живой установки агента на Ubuntu 24.04: установка раздельно Windows/Linux (pipx/venv, PEP 668), обновление диспетчера, регистрация стенда без CLI, правило адреса для Docker-стендов, формула имени переменной секрета, служба systemd/NSSM, известное ограничение HTTPS-пробы, кукбук встроен в дашборд (кнопка «?»), настоящие скриншоты.</td></tr>
       <tr><td>1.0</td><td>август 2026</td><td>Первая версия кукбука: обзор, установка, дашборд, реестр, виды хостинга, удалённые стенды и агент, безопасность, траблшутинг, границы.</td></tr>
@@ -1726,6 +2388,20 @@ python -m pip show standkit</div>
     try{localStorage.setItem(KEY,next);}catch(e){}
   });
 
+  /* ── Высота липкой стопки: от неё считается scroll-margin-top у разделов ── */
+  var stickyTop=document.getElementById("stickytop");
+  function syncStack(){
+    if(!stickyTop)return;
+    var h=Math.round(stickyTop.getBoundingClientRect().height);
+    if(h>0)document.documentElement.style.setProperty("--stack",h+"px");
+  }
+  syncStack();
+  if("ResizeObserver" in window){
+    try{new ResizeObserver(syncStack).observe(stickyTop);}catch(e){}
+  }
+  window.addEventListener("resize",syncStack);
+  window.addEventListener("load",syncStack);
+
   /* ── Модальное окно «О документе» ── */
   var overlay=document.getElementById("modalOverlay");
   document.getElementById("docmeta").addEventListener("click",function(){overlay.classList.add("open");});
@@ -1741,6 +2417,10 @@ python -m pip show standkit</div>
 
   /* ── Кнопки «копировать» на командах и фрагментах конфигов ── */
   document.querySelectorAll(".prompt").forEach(function(block){
+    var scroller=document.createElement("div");
+    scroller.className="pscroll";
+    while(block.firstChild)scroller.appendChild(block.firstChild);
+    block.appendChild(scroller);
     var b=document.createElement("button");
     b.className="copyBtn"; b.type="button"; b.textContent="копировать";
     b.addEventListener("click",function(ev){
@@ -1828,10 +2508,12 @@ python -m pip show standkit</div>
         if(m){any=true;hits++;
           if(u.tagName==="DETAILS"&&!u.open){u.open=true;u.setAttribute("data-autoopen","1");}}
       });
-      /* совпадение вне плиток (таблицы, диаграммы, заголовки) — показываем раздел целиком */
+      /* совпадение вне плиток (таблицы, диаграммы, заголовки) — показываем раздел
+         целиком и считаем ВСЕ показанные плитки, иначе счётчик врёт про экран */
       if(!any && sec.textContent.toLowerCase().indexOf(q)!==-1){
-        any=true;hits++;
+        any=true;
         units.forEach(function(u){u.classList.remove("hidden");});
+        hits+=units.length;
       }
       sec.classList.toggle("hidden",!any);
     });
@@ -1849,13 +2531,22 @@ python -m pip show standkit</div>
   input.addEventListener("input",applyFilter);
 
   /* ── Подсветка текущего раздела в чип-навигации ── */
+  var chipnav=document.getElementById("chipnav");
+  function revealChip(a){
+    if(!chipnav||chipnav.scrollWidth<=chipnav.clientWidth+1)return;
+    var nr=chipnav.getBoundingClientRect(),ar=a.getBoundingClientRect();
+    if(ar.left>=nr.left&&ar.right<=nr.right)return;
+    chipnav.scrollLeft+=(ar.left-nr.left)-(nr.width-ar.width)/2;
+  }
   if("IntersectionObserver" in window){
     var io=new IntersectionObserver(function(entries){
       entries.forEach(function(en){
         if(en.isIntersecting){
           var id=en.target.id;
           navLinks.forEach(function(a){
-            a.classList.toggle("active",a.getAttribute("href")==="#"+id);
+            var on=a.getAttribute("href")==="#"+id;
+            a.classList.toggle("active",on);
+            if(on)revealChip(a);
           });
         }
       });

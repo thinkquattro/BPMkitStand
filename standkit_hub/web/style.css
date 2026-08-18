@@ -939,6 +939,36 @@ body.hub-offline .stands-table-wrap {
   text-decoration: underline;
 }
 
+/* Значение, у которого сервер прислал причину состояния (http.reason /
+   redis.reason — см. GAP-002/GAP-003, app.js::reasonAttrs): голый title
+   ничем себя не выдаёт, поэтому под значением — тонкий пунктир «здесь есть
+   объяснение, наведи». Цвет берётся из currentColor, то есть из уже
+   применённого .value-ok/.value-down/.value-muted, — отдельных значений под
+   тёмную тему не нужно, правило работает в обеих. */
+.value-has-reason {
+  border-bottom: 1px dotted currentColor;
+}
+
+/* Курсор-вопрос — только у НЕинтерактивных значений: у ячейки HTTP это
+   ссылка, там курсор обязан остаться «рукой». */
+span.value-has-reason {
+  cursor: help;
+}
+
+/* Чекбокс в форме регистрации (verify_tls): #register-form label задаёт
+   display:block и по специфичности (id) перебивает .checkbox-label, поэтому
+   строку «флажок + подпись» восстанавливаем адресным правилом. */
+#register-form .checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#register-form .checkbox-label input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
 /* --- иконки действий (Старт/Стоп/Рестарт/Очистить Redis) --- */
 
 .icon-btn {
