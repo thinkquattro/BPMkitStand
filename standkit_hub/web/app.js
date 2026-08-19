@@ -771,6 +771,38 @@
     "Стенд запущен вне диспетчера: pid неизвестен. Стоп/Рестарт спросят подтверждение, " +
     "чтобы взять процесс под управление.";
 
+  // --- бейдж «чем поднят стенд» (host_kind) ---
+  //
+  // Транспорт отвечает на вопрос «ГДЕ стендом управляют» (сам хаб или агент на
+  // другой машине), а host_kind — «ЧЕМ он поднят». Разные вопросы, и по
+  // второму у оператора раньше не было ответа в таблице: чтобы понять, что
+  // стенд живёт в IIS (а значит, диспетчеру нужны права администратора) или в
+  // Docker, приходилось лезть в projects.json.
+
+  const HOST_KIND_LABELS = {
+    kestrel: ".NET",
+    iis: "IIS",
+    docker: "Docker",
+    k8s: "k8s",
+  };
+
+  const HOST_KIND_TITLES = {
+    kestrel: "Стенд поднят как процесс .NET (Kestrel) — диспетчер запускает и останавливает его сам",
+    iis: "Стенд размещён в IIS — операции идут через appcmd.exe и требуют прав администратора",
+    docker: "Стенд поднят в Docker — операции идут через docker/docker compose",
+    k8s: "Стенд поднят в Kubernetes — операции идут через kubectl (scale/rollout)",
+  };
+
+  function hostingBadge(hostKind) {
+    if (!hostKind) return "";
+    // Незнакомое значение (реестр правили руками, версия ядра новее фронта)
+    // показываем как есть, а не прячем: молча потерянный признак хуже.
+    const label = HOST_KIND_LABELS[hostKind] || hostKind;
+    const title = HOST_KIND_TITLES[hostKind] || `Хостинг стенда: ${hostKind}`;
+    const cls = HOST_KIND_LABELS[hostKind] ? ` hosting-${hostKind}` : "";
+    return `<span class="badge badge-hosting${cls}" title="${escapeAttr(title)}">${escapeHtml(label)}</span>`;
+  }
+
   function processCell(s) {
     if (startingStands.has(s.name)) {
       return '<span class="process-starting"><span class="mini-spinner" aria-hidden="true"></span>Запускается…</span>';
@@ -919,7 +951,7 @@
       if (s.name === selectedStand) tr.classList.add("selected");
       tr.innerHTML = `
         <td>${escapeHtml(s.name)}</td>
-        <td>${escapeHtml(s.transport)}</td>
+        <td class="transport-cell">${escapeHtml(s.transport)}${hostingBadge(s.host_kind)}</td>
         <td>${processCell(s)}</td>
         <td>${httpCell(http)}</td>
         <td>${valueSpan(db.name || "—", db.state)}</td>

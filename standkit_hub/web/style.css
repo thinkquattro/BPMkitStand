@@ -38,6 +38,12 @@
   --bpmkit-row-hover: #faf3ee;
   --bpmkit-row-selected: #fdece1;
   --bpmkit-code-bg: #f1efec;
+  /* Бейджи «чем поднят стенд» (host_kind) — справочный признак, не состояние:
+     оттенки приглушённые, чтобы не спорить с up/down в соседних колонках. */
+  --bpmkit-host-kestrel: #7a5ab0;
+  --bpmkit-host-iis: #2f6fb3;
+  --bpmkit-host-docker: #1f7fbf;
+  --bpmkit-host-k8s: #5566d6;
 }
 
 [data-theme="dark"] {
@@ -57,6 +63,10 @@
   --bpmkit-row-hover: #333029;
   --bpmkit-row-selected: #3d2c1f;
   --bpmkit-code-bg: #262523;
+  --bpmkit-host-kestrel: #b79ae0;
+  --bpmkit-host-iis: #74aae6;
+  --bpmkit-host-docker: #62b6ec;
+  --bpmkit-host-k8s: #9aa4f0;
 }
 
 /* Тема "auto": та же тёмная палитра, что и выше, но только при системной
@@ -82,6 +92,10 @@
     --bpmkit-row-hover: #333029;
     --bpmkit-row-selected: #3d2c1f;
     --bpmkit-code-bg: #262523;
+    --bpmkit-host-kestrel: #b79ae0;
+    --bpmkit-host-iis: #74aae6;
+    --bpmkit-host-docker: #62b6ec;
+    --bpmkit-host-k8s: #9aa4f0;
   }
 }
 
@@ -756,11 +770,13 @@ body.hub-offline .stands-table-wrap {
 }
 
 /* Ширины колонок (сумма = 100%); действия держат минимум под 4 кнопки. */
-.col-stand { width: 20%; }
-.col-transport { width: 11%; }
-.col-process { width: 15%; }
-.col-http { width: 20%; }
-.col-db { width: 11%; }
+.col-stand { width: 18%; }
+/* Шире прочих «узких»: колонка несёт два признака сразу — транспорт словом и
+   бейдж хостинга (host_kind) рядом. */
+.col-transport { width: 15%; }
+.col-process { width: 14%; }
+.col-http { width: 19%; }
+.col-db { width: 10%; }
 .col-redis { width: 8%; }
 .col-actions { width: 15%; }
 
@@ -851,6 +867,48 @@ body.hub-offline .stands-table-wrap {
   border: 1px solid var(--bpmkit-unknown);
   font-weight: 500;
   cursor: help;
+}
+
+/* Ячейка «Транспорт и хостинг»: слово транспорта + тихий бейдж host_kind. */
+.transport-cell {
+  white-space: nowrap;
+}
+
+/* «Чем поднят стенд» (kestrel/iis/docker/k8s) — СПРАВОЧНЫЙ признак, а не
+   состояние. Поэтому бейдж контурный и приглушённый: он не должен спорить
+   взглядом с up/down в соседних колонках. Цвет — только лёгкий акцент, смысл
+   несёт подпись. */
+.badge-hosting {
+  margin-left: 6px;
+  background: transparent;
+  color: var(--bpmkit-muted);
+  border: 1px solid var(--bpmkit-border);
+  font-weight: 500;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  padding: 1px 7px;
+  vertical-align: middle;
+  cursor: help;
+}
+
+.badge-hosting.hosting-iis {
+  color: var(--bpmkit-host-iis);
+  border-color: color-mix(in srgb, var(--bpmkit-host-iis) 45%, transparent);
+}
+
+.badge-hosting.hosting-docker {
+  color: var(--bpmkit-host-docker);
+  border-color: color-mix(in srgb, var(--bpmkit-host-docker) 45%, transparent);
+}
+
+.badge-hosting.hosting-k8s {
+  color: var(--bpmkit-host-k8s);
+  border-color: color-mix(in srgb, var(--bpmkit-host-k8s) 45%, transparent);
+}
+
+.badge-hosting.hosting-kestrel {
+  color: var(--bpmkit-host-kestrel);
+  border-color: color-mix(in srgb, var(--bpmkit-host-kestrel) 45%, transparent);
 }
 
 /* Строка кнопки «Определить автоматически» в форме регистрации (host_kind=iis). */

@@ -633,6 +633,46 @@ def test_api_stands_enriched_payload_shape(tmp_path):
     assert stand["process"]["logs_path"] == str(logs_dir)
 
 
+def test_api_stands_reports_host_kind(tmp_path):
+    """
+    В строке стенда есть host_kind — «чем стенд поднят» (kestrel/iis/docker/k8s).
+
+    Это НЕ дубль транспорта: транспорт отвечает, где стендом управляют (сам хаб
+    или агент), а host_kind — чем стенд поднят. Без него оператор не видел в
+    таблице, что стенд живёт в IIS (а значит, диспетчеру нужны права
+    администратора) — приходилось открывать projects.json.
+    """
+    from standkit.models import HostKind, Stand
+
+    registry_path = tmp_path / "projects.json"
+    Registry(
+        path=registry_path,
+        default="iis-stand",
+        stands={
+            "iis-stand": Stand(
+                name="iis-stand",
+                stand_dir=str(tmp_path / "iis-stand"),
+                host_kind=HostKind.IIS,
+                iis_site="iis-stand",
+            ),
+            "plain": Stand(name="plain", stand_dir=str(tmp_path / "plain")),
+        },
+    ).save()
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=token, poll=False)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    _wait_for_port(port)
+
+    # probe=0 — быстрая первая отрисовка: признак должен быть уже там, иначе
+    # бейдж в таблице появлялся бы только со вторым запросом.
+    status, body, _ = _request(f"http://127.0.0.1:{port}", "/api/stands?probe=0", token=token)
+    assert status == 200
+    kinds = {s["name"]: s["host_kind"] for s in body["stands"]}
+    assert kinds == {"iis-stand": "iis", "plain": "kestrel"}
+
+
 def test_api_stands_redis_number_null_when_not_in_registry(tmp_path):
     base_url, token, *_ = _start_hub(tmp_path)
     status, body, _ = _request(base_url, "/api/stands", token=token)

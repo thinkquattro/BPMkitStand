@@ -490,6 +490,11 @@ def _stand_entry(name: str, stand: Stand, status) -> dict:
     return {
         "name": name,
         "transport": stand.transport.value,
+        # Как стенд ХОСТИТСЯ (kestrel/iis/docker/k8s) — ортогонально транспорту
+        # (тот отвечает на вопрос «где им управляют», а не «чем он поднят»).
+        # Значение берётся из записи реестра: для transport=agent это описание
+        # удалённого стенда, сам хаб бэкенд хостинга в этом случае не вызывает.
+        "host_kind": stand.host_kind.value,
         "status": status_dict,
         # ``reason`` у http/redis — тот же приём, что у process.reason: без него
         # наружу уходил голый "down"/"—", и оператор не мог отличить закрытый
