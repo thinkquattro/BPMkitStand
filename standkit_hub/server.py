@@ -65,6 +65,7 @@ from urllib.parse import parse_qs, urlparse
 from standkit import __version__ as _standkit_version
 from standkit import lifecycle as _lifecycle
 from standkit import logs as _logs
+from standkit import platform as _platform
 from standkit.hosting import HostingError
 from standkit.lifecycle import AdoptionRequired, AdoptionUnavailable, LifecycleError
 from standkit.models import HostKind, Stand, Transport
@@ -74,6 +75,7 @@ from standkit_hub import logs_browser
 from standkit_hub import redis_min
 from standkit_hub import security as _security
 from standkit_hub.agent_control import AgentControlError, AgentController
+from standkit_hub import elevation as _elevation
 from standkit_hub.client import FederatedClient, RemoteCallError
 from standkit_hub.config import HubConfig
 from standkit_hub.poller import StatusPoller, StatusSnapshot
@@ -1482,6 +1484,70 @@ def make_handler(
                 return
             self._send_json(200, {"ok": stopped})
 
+        # --- API: права администратора ---
+
+        def _api_hub_elevation(self) -> None:
+            """
+            Работает ли диспетчер с правами администратора и можно ли
+            предложить перезапуск. Read-only, тот же ``_authorize_read``.
+
+            Дашборд рисует по этому ответу индикатор в шапке: без elevation
+            любая IIS-операция обречена (``appcmd.exe`` не читает даже свою
+            конфигурацию), и узнавать об этом из ошибки после клика «Старт» —
+            плохой сценарий.
+            """
+            can_restart, reason = _elevation.can_restart_elevated()
+            self._send_json(
+                200,
+                {
+                    "supported": _elevation.elevation_supported(),
+                    "elevated": _platform.is_elevated(),
+                    "can_restart": can_restart,
+                    "reason": reason,
+                },
+            )
+
+        def _api_hub_restart_elevated(self) -> None:
+            """
+            Перезапускает диспетчер «от имени администратора» (запрос UAC).
+
+            Порядок принципиален: сначала запрашиваем повышение прав и только
+            при УСПЕХЕ планируем собственное завершение. Иначе отказ в UAC
+            оставил бы пользователя вообще без диспетчера.
+
+            Ответ 202, а не 200: работа не завершена, а начата — новый процесс
+            ещё поднимается. Вкладка после этого просто ждёт, пока хаб снова
+            начнёт отвечать (сессия переезжает через файл передачи, см.
+            standkit_hub/elevation.py).
+            """
+            can_restart, reason = _elevation.can_restart_elevated()
+            if not can_restart:
+                self._send_json(400, {"error": reason})
+                return
+
+            config = _load_config(config_path)
+            handoff = _elevation.handoff_path(config.resolve_run_dir())
+            try:
+                _elevation.write_handoff(handoff, session_token)
+            except OSError as exc:
+                self._send_json(500, {"error": f"Не удалось подготовить передачу сессии: {exc}"})
+                return
+
+            params = _elevation.build_relaunch_params(
+                port=self._hub_port(), handoff=handoff, config_path=config_path
+            )
+            try:
+                _elevation.relaunch_elevated(params)
+            except _elevation.ElevationError as exc:
+                # И отказ в UAC, и сбой ShellExecuteW: файл передачи с токеном
+                # не должен пережить неудачную попытку.
+                _elevation.discard_handoff(handoff)
+                self._send_json(400, {"error": str(exc)})
+                return
+
+            self._send_json(202, {"ok": True, "restarting": True})
+            _schedule_shutdown(self.server)
+
         # --- API: ярлык ---
 
         def _api_shortcut_install(self) -> None:
@@ -1542,6 +1608,12 @@ def make_handler(
                 if not self._authorize_read():
                     return
                 self._api_agent_status()
+                return
+
+            if path == "/api/hub/elevation":
+                if not self._authorize_read():
+                    return
+                self._api_hub_elevation()
                 return
 
             m = _SECRET_RE.match(path)
@@ -1615,6 +1687,15 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_stand_register()
+                return
+
+            if path == "/api/hub/restart-elevated":
+                # Мутация в самом сильном смысле: процесс диспетчера будет
+                # заменён на elevated. Та же связка double-submit + локальный
+                # Origin, что у остальных мутаций.
+                if not self._authorize_mutation():
+                    return
+                self._api_hub_restart_elevated()
                 return
 
             if path == "/api/shortcut/install":
@@ -1703,6 +1784,30 @@ def make_handler(
         do_PATCH = do_PUT
 
     return Handler
+
+
+# Пауза перед самозавершением после успешного запроса UAC. Нужна, чтобы ответ
+# 202 успел уйти в браузер: закрой мы сокет сразу — вкладка увидела бы обрыв
+# соединения вместо подтверждения и решила бы, что перезапуск не начался.
+_SHUTDOWN_DELAY_SEC = 1.0
+
+
+def _schedule_shutdown(server, *, delay: float = _SHUTDOWN_DELAY_SEC) -> threading.Thread:
+    """
+    Планирует остановку хаба в ОТДЕЛЬНОМ потоке.
+
+    Отдельный поток обязателен: ``shutdown()`` ждёт выхода из цикла
+    ``serve_forever``, а вызванный из потока-обработчика запроса он бы ждал
+    сам себя (взаимная блокировка).
+    """
+
+    def _run() -> None:
+        time.sleep(delay)
+        server.shutdown()
+
+    thread = threading.Thread(target=_run, name="standkit-hub-shutdown", daemon=True)
+    thread.start()
+    return thread
 
 
 def poll_interval_of(config_path: Path) -> float:

@@ -277,6 +277,35 @@ body {
   text-decoration: none;
 }
 
+/* --- индикатор прав администратора (кнопка-предупреждение в шапке) --- */
+
+.elevation-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--bpmkit-down);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bpmkit-down) 12%, transparent);
+  color: var(--bpmkit-down);
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.elevation-btn:hover {
+  background: color-mix(in srgb, var(--bpmkit-down) 22%, transparent);
+}
+
+.elevation-btn[hidden] {
+  display: none;
+}
+
+.elevation-btn:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
 /* --- индикатор связи с хабом (точка + подпись, НЕ похож на меню) --- */
 
 .conn-status {

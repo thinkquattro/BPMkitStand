@@ -1348,6 +1348,98 @@
     });
   }
 
+  // --- права администратора ---
+  //
+  // Управление стендами IIS идёт через appcmd.exe, а он без прав
+  // администратора не работает В ПРИНЦИПЕ (не читает даже собственную
+  // конфигурацию). Раньше пользователь узнавал об этом из ошибки после клика
+  // «Старт», а совет «запустите диспетчер от имени администратора» было не
+  // так просто выполнить: повторный запуск ярлыка видел уже работающий
+  // экземпляр на том же порту и просто открывал браузер на нём.
+
+  const RESTART_WAIT_MS = 90000;
+  const RESTART_POLL_MS = 1000;
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  async function refreshElevation() {
+    const btn = document.getElementById("elevation-btn");
+    if (!btn) return;
+    try {
+      const data = await apiGet("/api/hub/elevation");
+      // Кнопку показываем ровно в одном случае: ОС умеет повышать права и
+      // сейчас их нет. На Linux/macOS (supported=false) её быть не должно —
+      // там «от администратора» решается службой, а не окном UAC.
+      btn.hidden = !data.can_restart;
+    } catch (e) {
+      btn.hidden = true;
+    }
+  }
+
+  function showRestartOverlay(text, hint) {
+    const overlay = document.getElementById("restart-overlay");
+    document.getElementById("restart-overlay-text").textContent = text;
+    const hintEl = document.getElementById("restart-overlay-hint");
+    hintEl.textContent = hint || "";
+    hintEl.hidden = !hint;
+    overlay.hidden = false;
+  }
+
+  async function waitForHubBack() {
+    const deadline = Date.now() + RESTART_WAIT_MS;
+    while (Date.now() < deadline) {
+      await sleep(RESTART_POLL_MS);
+      try {
+        await apiGet("/api/version");
+        window.location.reload();
+        return;
+      } catch (e) {
+        if (e && e.status === 401) {
+          // Хаб уже отвечает, но сессия не переехала (файл передачи протух
+          // или новый процесс запущен под другой учётной записью). Молчаливый
+          // reload дал бы пустую страницу с ошибками — честнее сказать прямо.
+          showRestartOverlay(
+            "Диспетчер перезапущен с правами администратора, но сессия не перенеслась.",
+            "Откройте дашборд заново — по ярлыку «BPMkit Диспетчер» на рабочем столе."
+          );
+          return;
+        }
+        // Обрыв связи — это и есть ожидаемая фаза перезапуска, ждём дальше.
+      }
+    }
+    showRestartOverlay(
+      "Не дождались перезапуска диспетчера.",
+      "Возможно, запрос UAC остался без ответа. Откройте дашборд заново по ярлыку."
+    );
+  }
+
+  function setupElevation() {
+    const btn = document.getElementById("elevation-btn");
+    if (!btn) return;
+    btn.addEventListener("click", async () => {
+      const ok = window.confirm(
+        "Перезапустить диспетчер с правами администратора?\n\n" +
+          "Windows покажет запрос UAC — подтвердите его. Диспетчер поднимется заново на том же " +
+          "адресе, страница переподключится сама. Запущенные стенды не останавливаются."
+      );
+      if (!ok) return;
+      btn.disabled = true;
+      try {
+        await apiSend("POST", "/api/hub/restart-elevated");
+      } catch (e) {
+        btn.disabled = false;
+        window.alert(`Не удалось перезапустить: ${describeApiError(e)}`);
+        return;
+      }
+      showRestartOverlay(
+        "Подтвердите запрос Windows (UAC), если он ещё открыт. Ждём, пока диспетчер поднимется заново…"
+      );
+      waitForHubBack();
+    });
+  }
+
   // --- локальный агент ---
 
   async function refreshAgentStatus() {
@@ -1707,6 +1799,7 @@
     setupViewToggle();
     setupTabs();
     setupAboutModal();
+    setupElevation();
     setupRegisterModal();
     setupAgentTab();
     setupSettingsForm();
@@ -1719,6 +1812,7 @@
     // Push-обновления; при их отсутствии работает резервный таймер ниже.
     setupEventStream();
     refreshAgentStatus();
+    refreshElevation();
     loadSettings().catch((e) => {
       document.getElementById("settings-status").textContent = `Ошибка загрузки настроек: ${describeApiError(e)}`;
     });

@@ -128,7 +128,10 @@ class AgentController:
     # --- пути ---
 
     def _run_dir(self) -> Path:
-        return Path(self.config.run_dir) if self.config.run_dir else Path.home() / ".standkit" / "run"
+        # Единый резолв каталога с runtime-файлами (см. HubConfig.resolve_run_dir):
+        # туда же кладут своё состояние сам хаб и перезапуск с правами
+        # администратора.
+        return self.config.resolve_run_dir()
 
     def _log_dir(self) -> Path:
         return Path(self.config.log_dir) if self.config.log_dir else Path.home() / ".standkit" / "logs"

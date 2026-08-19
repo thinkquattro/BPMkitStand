@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
+from standkit import platform as _platform
 from standkit.models import HostKind, Stand
 from standkit.platform import run_console
 
@@ -272,8 +273,10 @@ TRANSIENT_RPC_HINT = (
 # прав — одна формулировка на все места (start/stop/restart/list/wp).
 ELEVATION_HINT = (
     "\n\nПохоже, не хватает прав администратора: управление IIS через appcmd.exe "
-    "требует запуска диспетчера «от имени администратора» (elevated). Запустите "
-    "standkit-hub с правами администратора и повторите операцию."
+    "требует запуска диспетчера «от имени администратора» (elevated). В дашборде "
+    "это кнопка «без прав администратора» в шапке — она перезапускает диспетчер "
+    "через запрос UAC; в консоли — запуск standkit-hub от администратора. После "
+    "этого повторите операцию."
 )
 
 
@@ -302,15 +305,13 @@ def _process_is_elevated() -> Optional[bool]:
     неэлевированном процессе — про права, как бы Windows её ни сформулировала
     (живая приёмка 17.08.2026: неэлевированный ``list wp`` отвечает «Служба WAS
     недоступна», хотя служба работает).
-    """
-    if sys.platform != "win32":
-        return None
-    try:
-        import ctypes
 
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return None
+    Сама проверка живёт в ``standkit.platform.is_elevated`` — тот же OS-примитив
+    спрашивает и веб-хаб (индикатор «без прав администратора» и кнопка
+    перезапуска). Здесь остаётся тонкая обёртка: имя ``_process_is_elevated``
+    — точка подмены в тестах классификации ошибок appcmd.
+    """
+    return _platform.is_elevated()
 
 
 def _service_state(name: str) -> Optional[str]:

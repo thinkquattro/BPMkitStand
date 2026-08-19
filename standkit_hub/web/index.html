@@ -41,6 +41,15 @@
          не кнопка с обработчиком в app.js. -->
     <a id="help-btn" class="about-btn help-btn" href="/static/cookbook.html" target="_blank"
        rel="noopener" title="Справка — кукбук BPMkitStand" aria-label="Справка">?</a>
+    <!-- Индикатор прав администратора. Показывается ТОЛЬКО когда диспетчер
+         работает без них на Windows (см. GET /api/hub/elevation): без
+         elevation любая IIS-операция обречена — appcmd.exe не читает даже
+         собственную конфигурацию. Кнопка, а не значок: она же и чинит
+         ситуацию — перезапускает диспетчер через запрос UAC. -->
+    <button id="elevation-btn" class="elevation-btn" type="button" hidden
+            title="Диспетчер работает без прав администратора — управление стендами IIS недоступно. Нажмите, чтобы перезапустить его от имени администратора.">
+      <span aria-hidden="true">🛡</span><span>без прав администратора</span>
+    </button>
     <button id="about-btn" class="about-btn" type="button" title="О программе">ⓘ</button>
     <button id="view-toggle-btn" class="view-toggle-btn" type="button" title="Компактный режим">▭</button>
     <button id="theme-toggle-btn" class="theme-toggle-btn" type="button" title="Переключить тему">🌓</button>
@@ -57,6 +66,21 @@
        показывать последний снапшот как живой. Скрыт, пока связь есть. -->
   <div id="offline-banner" class="offline-banner" role="alert" hidden>
     <span id="offline-banner-text"></span>
+  </div>
+
+  <!-- Оверлей ожидания перезапуска с правами администратора: пока Windows
+       показывает запрос UAC, а старый процесс гаснет, вкладка ничего не может
+       — но и молчать ей нельзя, иначе перезапуск выглядит как зависание. -->
+  <div id="restart-overlay" class="modal-overlay" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="restart-overlay-title">
+      <div class="modal-header">
+        <h2 id="restart-overlay-title">Перезапуск с правами администратора</h2>
+      </div>
+      <div class="modal-body">
+        <p id="restart-overlay-text">Подтвердите запрос Windows (UAC). Страница переподключится сама.</p>
+        <p class="modal-note" id="restart-overlay-hint" hidden></p>
+      </div>
+    </div>
   </div>
 
   <div id="about-modal-overlay" class="modal-overlay" hidden>
