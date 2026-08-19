@@ -75,12 +75,23 @@ def _windows_local_appdata_bpmkit_dir() -> Path:
     return base / "BPMkit"
 
 
-def _windows_pythonw_executable() -> str:
-    """``pythonw.exe`` рядом с текущим интерпретатором (без консольного окна); фолбэк — ``sys.executable``."""
+def windows_pythonw_executable() -> str:
+    """
+    ``pythonw.exe`` рядом с текущим интерпретатором (без консольного окна);
+    фолбэк — ``sys.executable``.
+
+    Публичная: тем же интерпретатором хаб перезапускает сам себя с правами
+    администратора (``standkit_hub.elevation``) — консольное окно там так же
+    нежелательно, как и при запуске по ярлыку.
+    """
     candidate = Path(sys.executable).with_name("pythonw.exe")
     if candidate.exists():
         return str(candidate)
     return sys.executable
+
+
+# Прежнее приватное имя — на него ссылаются тесты ярлыка.
+_windows_pythonw_executable = windows_pythonw_executable
 
 
 def build_windows_shortcut_script(lnk_path: Path, target: str, icon_path: Path, working_dir: Path) -> str:

@@ -316,6 +316,22 @@ class HubConfig:
             os.fsync(f.fileno())
         os.replace(tmp, p)
 
+    def resolve_run_dir(self) -> Path:
+        """
+        Каталог runtime-файлов диспетчера: ``run_dir`` из конфига, иначе
+        ``~/.standkit/run``.
+
+        Один ответ на всех, кто туда пишет: pid-файл локального агента
+        (``standkit_hub.agent_control``), файл состояния экземпляра хаба и
+        файл передачи сессии при перезапуске с правами администратора
+        (``standkit_hub.instance`` / ``standkit_hub.elevation``). Раньше
+        дефолт был захардкожен в agent_control — вторая копия неизбежно
+        разъехалась бы с первой.
+
+        Папку НЕ создаёт: решение «создавать ли» принимает тот, кто пишет.
+        """
+        return Path(self.run_dir) if self.run_dir else Path.home() / ".standkit" / "run"
+
     def ensure_registry_dir(self) -> Path:
         """Создаёт папку файла реестра проектов (``registry_path``), если её ещё
         нет, и возвращает её.

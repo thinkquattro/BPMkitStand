@@ -129,6 +129,33 @@ def spawn_hidden(cmd: Sequence[str], cwd: Path, log_path: Path) -> int:
     return proc.pid
 
 
+def is_elevated() -> Optional[bool]:
+    """
+    Запущен ли ТЕКУЩИЙ процесс с правами администратора (Windows).
+
+    ``None`` — выяснить не удалось: не Windows (там понятия «elevated» в этом
+    смысле нет) либо ctypes недоступен. Именно ``None``, а не ``False``:
+    «не знаю» и «точно без прав» — разные ответы, и вызывающий код
+    (диагностика appcmd в ``standkit.hosting``, кнопка перезапуска в хабе)
+    ведёт себя по-разному.
+
+    Живёт здесь, а не в ``standkit.hosting``, потому что это OS-примитив того
+    же класса, что ``is_alive``/``stop``: его спрашивают и бэкенд хостинга
+    (честная классификация отказа appcmd), и веб-хаб (показать индикатор и
+    предложить перезапуск с правами администратора). Две копии одного
+    ``IsUserAnAdmin`` разъехались бы.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
+    except Exception:
+        # Любой сбой ctypes/WinAPI — честное «не знаю», а не «точно нет».
+        return None
+
+
 def is_alive(pid: int) -> bool:
     """Проверяет, жив ли процесс с данным pid (кроссплатформенно)."""
     if pid <= 0:

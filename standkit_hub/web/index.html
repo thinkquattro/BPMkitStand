@@ -71,6 +71,17 @@
        rel="noopener" title="Справка — кукбук BPMkitStand" aria-label="Справка">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5V14"/><circle cx="12" cy="17" r=".7" fill="currentColor" stroke="none"/></svg>
     </a>
+    <!-- Индикатор «без прав администратора» (GAP-311). Виден ТОЛЬКО когда
+         диспетчер работает без прав на Windows (GET /api/hub/elevation): без
+         них любая IIS-операция обречена — appcmd.exe не читает даже собственную
+         конфигурацию. Это кнопка, а не значок: по клику — перезапуск через UAC.
+         С правами щита нет вовсе (решение владельца 15.09.2026). -->
+    <button id="elevation-btn" class="topbar-btn elevation-btn" type="button" hidden
+            title="Диспетчер работает без прав администратора — управление стендами IIS недоступно. Нажмите, чтобы перезапустить его с правами администратора."
+            aria-label="Без прав администратора — перезапустить с правами">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 9.5C8 19.3 5 15.5 5 11V6z"/><path d="M12 8v4"/><circle cx="12" cy="15.5" r=".7" fill="currentColor" stroke="none"/></svg>
+      <span class="elevation-btn-label">без прав администратора</span>
+    </button>
     <!-- «О программе» — не модалка, а раздел настроек: то же содержимое, но
          его можно открыть рядом с версией MCP и путём к CLI, не теряя экран. -->
     <button id="about-btn" class="topbar-btn" type="button" title="О программе" aria-label="О программе">
@@ -104,6 +115,21 @@
   <div id="license-banner-crit" class="license-banner license-banner-crit" role="alert" hidden>
     <span><strong id="license-banner-crit-title">Срок лицензии истёк</strong><span id="license-banner-crit-text"></span></span>
     <button type="button" class="license-banner-open" data-open-license>Открыть лицензию</button>
+  </div>
+
+  <!-- Оверлей ожидания перезапуска с правами администратора: пока Windows
+       показывает запрос UAC, а старый процесс гаснет, вкладка ничего не может
+       — но и молчать ей нельзя, иначе перезапуск выглядит как зависание. -->
+  <div id="restart-overlay" class="modal-overlay" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="restart-overlay-title">
+      <div class="modal-header">
+        <h2 id="restart-overlay-title">Перезапуск с правами администратора</h2>
+      </div>
+      <div class="modal-body">
+        <p id="restart-overlay-text">Подтвердите запрос Windows (UAC). Страница переподключится сама.</p>
+        <p class="modal-note" id="restart-overlay-hint" hidden></p>
+      </div>
+    </div>
   </div>
 
   <!-- Модалка "Зарегистрировать стенд" — форма записи УЖЕ существующего
