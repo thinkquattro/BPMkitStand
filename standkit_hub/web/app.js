@@ -1228,6 +1228,14 @@
     if (!sseHealthy) refreshStands();
     refreshAgentStatus();
     if (selectedStand) refreshState();
+    // Канал обновлений опрашивается, только когда его вкладка открыта: тики у
+    // него редкие (минуты и сутки), и дёргать статус в фоне ради страницы, на
+    // которую никто не смотрит, — расход впустую. Значок «нужен перезапуск»
+    // при этом не теряется: он зажигается первым запросом при загрузке и после
+    // каждого действия.
+    if (companionAvailable && companionTabIsActive()) {
+      refreshCompanionStatus({ quiet: true });
+    }
   }
 
   function restartBackgroundTimer() {
@@ -1383,6 +1391,312 @@
     });
   }
 
+  // --- канал обновлений издателя (вкладка «Обновления») ---
+  //
+  // Ядро дашборда ничего не знает о платной редакции: оно спрашивает
+  // /api/companion/status и рисует то, что пришло. Свободная редакция отвечает
+  // 503 с человеческим текстом — это не ошибка связи, а честный ответ «такой
+  // возможности здесь нет», и показывается он как объяснение, а не как сбой.
+  //
+  // Значения проставляются ТОЛЬКО через textContent по статичной разметке (см.
+  // index.html): в карточки едут строки, пришедшие от издателя — описания
+  // отказов, номера версий, пути на диске. Сборка их через innerHTML означала бы
+  // исполнение чужой разметки в окне управления процессами.
+
+  const COMPANION_ACTION_PATHS = {
+    sync_patterns: "/api/companion/sync",
+    check_update: "/api/companion/check-update",
+    stage_update: "/api/companion/stage-update",
+    apply_update: "/api/companion/apply-update",
+    rollback: "/api/companion/rollback",
+    refresh_revocations: "/api/companion/revocations",
+  };
+
+  // Почему действие сейчас недоступно. Кнопка не прячется — она выключается и
+  // объясняется: спрятанная кнопка читается как «функции нет вовсе», и
+  // пользователь идёт искать её в настройках и в поддержке.
+  const COMPANION_ACTION_REASONS = {
+    apply_update: "Устанавливать нечего: сначала подготовьте обновление кнопкой «Подготовить»",
+    rollback: "Откатываться не на что: канал ещё не устанавливал обновлений на этой машине",
+  };
+  const COMPANION_DISABLED_REASON =
+    "Канал обновлений выключен в настройках (вкладка «Настройки» → «Канал обновлений»)";
+
+  // Человеческие подписи статусов цикла плюс класс цвета из общей палитры.
+  const COMPANION_STATUS_LABELS = {
+    ok: ["выполнен успешно", "value-ok"],
+    skipped: ["пропущен — делать нечего", "value-muted"],
+    error: ["завершился ошибкой", "value-down"],
+    never: ["ещё не выполнялся", "value-muted"],
+    disabled: ["выключен в настройках", "value-muted"],
+    halted: ["остановлен до вмешательства", "value-unknown"],
+  };
+
+  // Отдельная подпись действия для строки результата — чтобы сообщение об
+  // успехе звучало как ответ на нажатую кнопку, а не как отчёт системы.
+  const COMPANION_ACTION_DONE = {
+    sync_patterns: "Паттерны синхронизированы",
+    check_update: "Проверка обновления выполнена",
+    stage_update: "Обновление подготовлено",
+    apply_update: "Обновление установлено",
+    rollback: "Откат выполнен",
+    refresh_revocations: "Список отзывов обновлён",
+  };
+
+  let companionAvailable = true;
+  let companionBusy = false;
+
+  function companionEl(id) {
+    return document.getElementById(id);
+  }
+
+  function companionCard(cycle) {
+    return document.querySelector(`.companion-card[data-cycle="${cycle}"]`);
+  }
+
+  function setCompanionField(cycle, role, text, colorClass) {
+    const card = companionCard(cycle);
+    if (!card) return;
+    const el = card.querySelector(`[data-role="${role}"]`);
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove("value-ok", "value-down", "value-unknown", "value-muted");
+    if (colorClass) el.classList.add(colorClass);
+  }
+
+  function formatCompanionTime(value) {
+    // Метки состояния — UTC секундной точности с Z. Показываем локальное время:
+    // «когда это было» пользователь сверяет со своими часами, а не с UTC.
+    if (!value) return "ещё не было";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return String(value);
+    return parsed.toLocaleString("ru-RU");
+  }
+
+  function formatCompanionEta(seconds) {
+    if (seconds === null || seconds === undefined) return "по расписанию не запускается";
+    const value = Number(seconds);
+    if (!Number.isFinite(value)) return "—";
+    if (value <= 1) return "вот-вот";
+    return `через ${formatAge(value)}`;
+  }
+
+  function renderCompanionCycle(cycle, status) {
+    const cycles = (status && status.cycles) || {};
+    const state = (status && status.state) || {};
+    const info = cycles[cycle] || {};
+    const block = state[cycle] || {};
+
+    const card = companionCard(cycle);
+    const stateEl = card ? card.querySelector('[data-role="cycle-enabled"]') : null;
+    if (stateEl) {
+      const enabled = info.enabled !== false;
+      stateEl.textContent = enabled ? "по расписанию" : "расписание выключено";
+      stateEl.classList.toggle("companion-cycle-off", !enabled);
+    }
+
+    // Блокировка цикла (не-retriable отказ) важнее последнего статуса: она
+    // объясняет, почему повторов больше не будет, пока человек не вмешается.
+    let key = String(info.last_status || block.status || "never");
+    if (info.halted) key = "halted";
+    else if (info.enabled === false) key = "disabled";
+    const [label, colorClass] = COMPANION_STATUS_LABELS[key] || [key, "value-muted"];
+    setCompanionField(cycle, "last-status", label, colorClass);
+    setCompanionField(cycle, "last-time",
+      formatCompanionTime(block.last_run_at || block.last_check_at));
+    setCompanionField(cycle, "next-run",
+      info.enabled === false ? "—" : formatCompanionEta(info.next_run_in_sec));
+
+    const detailEl = card ? card.querySelector('[data-role="detail"]') : null;
+    if (detailEl) {
+      const detail = info.halted
+        ? `${info.halt_reason || "повтор бессмысленен"} — нажмите кнопку действия, чтобы попробовать снова`
+        : String(info.last_detail || block.detail || "");
+      detailEl.textContent = detail;
+      detailEl.hidden = !detail;
+    }
+  }
+
+  function renderCompanionStatus(status) {
+    const patterns = (status.state && status.state.patterns) || {};
+    const releases = (status.state && status.state.releases) || {};
+    const revocations = (status.state && status.state.revocations) || {};
+    const settings = status.settings || {};
+
+    companionEl("companion-cards").hidden = false;
+    companionEl("companion-unavailable").hidden = true;
+
+    const enabled = status.enabled !== false && settings.enabled !== false;
+    const editionEl = companionEl("companion-edition");
+    editionEl.textContent = enabled
+      ? "Канал обновлений: включён"
+      : "Канал обновлений: выключен в настройках";
+    editionEl.classList.toggle("companion-edition-off", !enabled);
+
+    ["patterns", "releases", "revocations"].forEach((cycle) =>
+      renderCompanionCycle(cycle, status));
+
+    setCompanionField("patterns", "applied-count", String(patterns.applied_count ?? "—"));
+    setCompanionField("patterns", "patterns-root", patterns.root || "по умолчанию, из поставки MCP");
+    setCompanionField("releases", "current-version", releases.current_version || "как в поставке");
+    setCompanionField("releases", "known-latest", releases.known_latest || "неизвестна — проверок ещё не было");
+    setCompanionField(
+      "releases",
+      "staged-version",
+      releases.staged_version
+        ? `${releases.staged_version}${releases.staged_signed === false ? " (подпись не подтверждена)" : ""}`
+        : "нет",
+      releases.staged_version ? "value-ok" : null
+    );
+    setCompanionField("revocations", "revoked-count", String(revocations.revoked_count ?? "—"));
+
+    // Цикл релизов выключен — говорим об этом честно и объясняем, от чего
+    // зависит его включение (ключ подписи артефактов и HTTPS у издателя).
+    const releasesOff = companionEl("companion-releases-off");
+    if (releasesOff) {
+      const releasesEnabled = ((status.cycles || {}).releases || {}).enabled;
+      releasesOff.hidden = releasesEnabled === true;
+    }
+
+    updateCompanionActions(status);
+    updateCompanionRestartBanner(releases);
+
+    const contextEl = companionEl("companion-context");
+    const context = status.context || {};
+    const parts = [];
+    if (context.detail) parts.push(`Лицензионный контекст: ${context.detail}`);
+    if (status.last_error) parts.push(`Последний сбой канала: ${status.last_error}`);
+    contextEl.textContent = parts.join(" · ");
+  }
+
+  function updateCompanionActions(status) {
+    const allowed = (status && status.actions) || {};
+    const enabled = !status || status.enabled !== false;
+    document.querySelectorAll("[data-companion-action]").forEach((btn) => {
+      const action = btn.dataset.companionAction;
+      const ok = allowed[action] === true && !companionBusy;
+      btn.disabled = !ok;
+      if (companionBusy) {
+        btn.title = "Дождитесь завершения текущего действия";
+      } else if (!enabled) {
+        btn.title = COMPANION_DISABLED_REASON;
+      } else if (allowed[action] !== true) {
+        btn.title = COMPANION_ACTION_REASONS[action] || "Сейчас действие недоступно";
+      } else {
+        btn.title = "";
+      }
+    });
+  }
+
+  function updateCompanionRestartBanner(releases) {
+    const banner = companionEl("companion-restart-banner");
+    const attention = companionEl("companion-tab-attention");
+    const required = !!(releases && releases.restart_required);
+    if (banner) banner.hidden = !required;
+    // Значок на кнопке вкладки: баннер лежит внутри панели, а знать о
+    // необходимости перезапуска нужно с любой вкладки.
+    if (attention) attention.hidden = !required;
+    const detail = companionEl("companion-restart-detail");
+    if (detail && required && releases && releases.current_version) {
+      detail.textContent =
+        `Установлена версия ${releases.current_version}. Она начнёт работать только после ` +
+        "полного перезапуска Claude Desktop: перезагрузка плагина MCP-сервер заново не поднимает.";
+    }
+  }
+
+  function showCompanionUnavailable(message) {
+    companionAvailable = false;
+    companionEl("companion-cards").hidden = true;
+    const editionEl = companionEl("companion-edition");
+    editionEl.textContent = "Свободная редакция";
+    editionEl.classList.add("companion-edition-off");
+    const note = companionEl("companion-unavailable");
+    note.hidden = false;
+    // Точку в конце ставим сами: серверный текст — это заголовок причины, он
+    // приходит без завершающей точки, и без неё две фразы слипаются в одну.
+    const reason = String(message || "").trim().replace(/[.\s]+$/, "");
+    note.textContent =
+      `${reason}. Канал доставки обновлений издателя (паттерны, обновления MCP, отзыв ` +
+      "лицензий) входит в платную редакцию BPMkit; управление стендами работает без него.";
+    companionEl("companion-tab-attention").hidden = true;
+  }
+
+  async function refreshCompanionStatus(options) {
+    const quiet = !!(options && options.quiet);
+    const errorEl = companionEl("companion-error");
+    if (!errorEl) return;
+    if (!quiet) errorEl.textContent = "";
+    try {
+      const data = await apiGet("/api/companion/status");
+      companionAvailable = true;
+      renderCompanionStatus(data);
+    } catch (e) {
+      if (e && e.status === 503 && e.data && e.data.edition === "free") {
+        // Не ошибка: так свободная редакция сообщает, что канала здесь нет.
+        showCompanionUnavailable(e.data.error || "Канал обновлений недоступен.");
+        errorEl.textContent = "";
+        return;
+      }
+      if (!quiet) errorEl.textContent = describeApiError(e);
+    }
+  }
+
+  async function runCompanionAction(action) {
+    const path = COMPANION_ACTION_PATHS[action];
+    if (!path) return;
+    const errorEl = companionEl("companion-error");
+    const statusEl = companionEl("companion-status-text");
+    errorEl.textContent = "";
+    statusEl.textContent = "Выполняется…";
+    companionBusy = true;
+    updateCompanionActions(null);
+    try {
+      // Версию не запрашиваем: «Подготовить» и «Откатить» без неё берут
+      // последнюю доступную и последний бэкап соответственно — ровно то, чего
+      // ждёт человек, нажавший кнопку. Выбор конкретной версии — работа CLI
+      // (python -m standkit_companion stage-update --version …), а не окна с
+      // вводом номера, в котором легко ошибиться.
+      const data = await apiSend("POST", path, {});
+      statusEl.textContent = COMPANION_ACTION_DONE[action] || "Готово";
+      if (data && data.status) {
+        renderCompanionStatus(data.status);
+      }
+    } catch (e) {
+      statusEl.textContent = "";
+      errorEl.textContent = describeApiError(e);
+    } finally {
+      companionBusy = false;
+      // Свежий статус после ЛЮБОГО исхода: отказ мог изменить состояние
+      // (например, снять подготовленное обновление), и кнопки обязаны это
+      // отразить, а не остаться в картине «до».
+      await refreshCompanionStatus({ quiet: true });
+    }
+  }
+
+  function setupCompanionTab() {
+    document.querySelectorAll("[data-companion-action]").forEach((btn) => {
+      btn.addEventListener("click", () => runCompanionAction(btn.dataset.companionAction));
+    });
+    const refreshBtn = companionEl("companion-refresh-btn");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", () => {
+        companionEl("companion-status-text").textContent = "";
+        refreshCompanionStatus();
+      });
+    }
+    // Отдельный обработчик на кнопке вкладки, а не правка setupTabs: сама
+    // механика вкладок работает по data-tab и знать про канал не должна.
+    const tabBtn = companionEl("companion-tab-btn");
+    if (tabBtn) {
+      tabBtn.addEventListener("click", () => refreshCompanionStatus({ quiet: true }));
+    }
+  }
+
+  function companionTabIsActive() {
+    const panel = document.getElementById("tab-companion");
+    return !!(panel && panel.classList.contains("active"));
+  }
+
   // --- настройки ---
 
   const SETTINGS_FIELDS = [
@@ -1514,6 +1828,26 @@
       }
     });
 
+    // Интервалы канала обновлений. Проверяются ЯВНЫМ списком полей секции
+    // (COMPANION_SETTINGS_MAP), а не через SETTINGS_FIELDS: секция вложенная и
+    // в плоский список не входит. Без этой проверки мусор в поле просто не
+    // уехал бы на сервер (см. collectCompanionSettings) — то есть пользователь
+    // увидел бы «Настройки сохранены» и прежнее значение в поле.
+    COMPANION_SETTINGS_MAP.forEach(([field, _path, unit]) => {
+      if (!unit) return;
+      const input = form.elements.namedItem(field);
+      if (!input) return;
+      setFieldError(input, "");
+      const raw = (input.value || "").trim();
+      if (!raw) return; // пусто = «оставить прежнее значение»
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value < 1) {
+        const msg = "интервал должен быть положительным числом";
+        setFieldError(input, msg);
+        problems.push(`${fieldLabel(input)}: ${msg}`);
+      }
+    });
+
     return problems;
   }
 
@@ -1568,6 +1902,99 @@
     }
   }
 
+  // --- настройки канала обновлений: вложенная секция в плоской форме ---
+  //
+  // SETTINGS_FIELDS/loadSettings/setupSettingsForm работают с ПЛОСКИМИ именами
+  // полей: имя поля = ключ конфига. У канала конфиг вложенный
+  // (companion.patterns.interval_sec), и подобрать его плоскими именами можно
+  // было бы только соглашением вида «подчёркивание = уровень вложенности» —
+  // молчаливым правилом, о которое спотыкается первый же ключ с подчёркиванием
+  // в имени (их тут два: interval_sec, auto_stage_release).
+  //
+  // Поэтому секция собирается и разбирается ЯВНОЙ парой функций ниже. Цена —
+  // одна таблица соответствия; выигрыш — форма остаётся честной: имя поля не
+  // притворяется ключом конфига, а единицы измерения (минуты/часы против
+  // секунд) конвертируются в одном месте, а не в трёх.
+
+  // Поле формы → [путь в конфиге, множитель к секундам]. Множитель 1 означает
+  // «не число времени» (строка/флаг).
+  const COMPANION_SETTINGS_MAP = [
+    ["companion_enabled", ["enabled"], 0],
+    ["companion_backend_url", ["backend_url"], 0],
+    ["companion_mcp_cli", ["mcp_cli"], 0],
+    ["companion_patterns_enabled", ["patterns", "enabled"], 0],
+    ["companion_patterns_interval_min", ["patterns", "interval_sec"], 60],
+    ["companion_releases_enabled", ["releases", "enabled"], 0],
+    ["companion_releases_interval_hours", ["releases", "interval_sec"], 3600],
+    ["companion_revocations_enabled", ["revocations", "enabled"], 0],
+    ["companion_revocations_interval_min", ["revocations", "interval_sec"], 60],
+    ["companion_auto_stage_release", ["auto_stage_release"], 0],
+    ["companion_require_pattern_signature", ["require_pattern_signature"], 0],
+  ];
+
+  function companionSettingValue(companion, path) {
+    let node = companion;
+    for (const key of path) {
+      if (node === null || node === undefined) return undefined;
+      node = node[key];
+    }
+    return node;
+  }
+
+  /** Разложить вложенную секцию `companion` из ответа /api/settings по полям формы. */
+  function fillCompanionSettings(form, companion) {
+    const data = companion || {};
+    COMPANION_SETTINGS_MAP.forEach(([field, path, unit]) => {
+      const input = form.elements.namedItem(field);
+      if (!input) return;
+      const value = companionSettingValue(data, path);
+      if (input.type === "checkbox") {
+        input.checked = !!value;
+        return;
+      }
+      if (unit) {
+        // Секунды → минуты/часы. Округляем вверх: округление вниз способно
+        // опустить значение ниже серверного минимума, и сервер поджал бы его
+        // обратно — поле «прыгало» бы при каждом сохранении.
+        const seconds = Number(value);
+        input.value = Number.isFinite(seconds) && seconds > 0
+          ? String(Math.ceil(seconds / unit))
+          : "";
+        return;
+      }
+      input.value = value === undefined || value === null ? "" : String(value);
+    });
+    const note = document.getElementById("companion-settings-note");
+    if (note) {
+      note.textContent = data.enabled === false ? " — выключен" : " — включён";
+    }
+  }
+
+  /** Собрать вложенную секцию `companion` из полей формы для POST /api/settings. */
+  function collectCompanionSettings(form) {
+    const companion = {};
+    COMPANION_SETTINGS_MAP.forEach(([field, path, unit]) => {
+      const input = form.elements.namedItem(field);
+      if (!input) return;
+      let value;
+      if (input.type === "checkbox") {
+        value = input.checked;
+      } else if (unit) {
+        const amount = Number(input.value);
+        // Пустое/битое поле не отправляем вовсе: сервер сохранит прежнее
+        // значение (секция мержится), а не подставит ноль, который он же
+        // потом поджал бы до минимума.
+        if (!Number.isFinite(amount) || amount <= 0) return;
+        value = Math.round(amount * unit);
+      } else {
+        value = String(input.value || "").trim();
+      }
+      const target = path.length === 1 ? companion : (companion[path[0]] = companion[path[0]] || {});
+      target[path[path.length - 1]] = value;
+    });
+    return companion;
+  }
+
   async function loadSettings() {
     const data = await apiGet("/api/settings");
     const form = document.getElementById("settings-form");
@@ -1596,6 +2023,8 @@
     currentAgents = (data.agents || []).map((a) => ({ ...a }));
     renderAgentsList();
     updateAgentBlockVisibility(lastStandsData);
+    // Вложенная секция канала — отдельной функцией (см. комментарий выше).
+    fillCompanionSettings(form, data.companion);
     await refreshSecretStatuses();
   }
 
@@ -1621,6 +2050,25 @@
 
   function setupSettingsForm() {
     const form = document.getElementById("settings-form");
+
+    // Нативная проверка number-полей (min/max) блокирует отправку формы МОЛЧА,
+    // если проблемное поле лежит в СВЁРНУТОЙ группе <details>: браузеру некуда
+    // показать подсказку у невидимого элемента, и кнопка «Сохранить» просто
+    // перестаёт отвечать — ни ошибки, ни сохранения. Поймано на секции «Канал
+    // обновлений» (интервалы с min), но касается любой свёрнутой группы.
+    // Событие invalid НЕ всплывает — слушаем на фазе захвата, раскрываем группу
+    // и передаём фокус, чтобы человек увидел и подсказку, и само поле.
+    form.addEventListener(
+      "invalid",
+      (evt) => {
+        const field = evt.target;
+        if (!field || !field.closest) return;
+        const group = field.closest("details");
+        if (group && !group.open) group.open = true;
+      },
+      true
+    );
+
     form.addEventListener("submit", async (evt) => {
       evt.preventDefault();
       const statusEl = document.getElementById("settings-status");
@@ -1647,6 +2095,9 @@
       });
       payload.insecure = form.elements.namedItem("insecure").checked;
       payload.agents = currentAgents;
+      // Вложенная секция канала: собирается отдельно и уходит одним объектом,
+      // сервер мержит её поверх текущей и сам поджимает интервалы к минимуму.
+      payload.companion = collectCompanionSettings(form);
       try {
         // Тему в payload сознательно НЕ кладём: её меняет только переключатель
         // в шапке, а сервер мержит тело поверх текущего конфига — значение
@@ -1656,6 +2107,12 @@
         // Новый refresh_interval_sec применяем немедленно, без перезагрузки
         // страницы (старый таймер снимается внутри applyRefreshInterval).
         applyRefreshInterval(saved && saved.refresh_interval_sec);
+        // Сервер мог поджать интервал канала к минимуму — показываем то, что
+        // реально сохранено, иначе форма врала бы про собственное значение.
+        fillCompanionSettings(form, saved && saved.companion);
+        // Настройки канала могли измениться — обновляем вкладку «Обновления»
+        // сразу, а не при следующем заходе на неё.
+        if (companionAvailable) refreshCompanionStatus({ quiet: true });
         await refreshSecretStatuses();
       } catch (e) {
         statusEl.textContent = `Ошибка сохранения: ${describeApiError(e)}`;
@@ -1709,6 +2166,7 @@
     setupAboutModal();
     setupRegisterModal();
     setupAgentTab();
+    setupCompanionTab();
     setupSettingsForm();
     setupStatePanel();
     setupActionStatus();
@@ -1719,6 +2177,10 @@
     // Push-обновления; при их отсутствии работает резервный таймер ниже.
     setupEventStream();
     refreshAgentStatus();
+    // Статус канала спрашивается сразу, ещё до открытия вкладки: только так
+    // значок «нужен перезапуск Claude Desktop» может зажечься на кнопке вкладки
+    // у человека, который сидит на «Стендах» и во вкладку не заглядывает.
+    refreshCompanionStatus({ quiet: true });
     loadSettings().catch((e) => {
       document.getElementById("settings-status").textContent = `Ошибка загрузки настроек: ${describeApiError(e)}`;
     });

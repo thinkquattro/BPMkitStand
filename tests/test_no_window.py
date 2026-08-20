@@ -241,6 +241,14 @@ _POPEN_EXCEPTIONS = {"standkit_hub/logs_browser.py"}
 
 _FORBIDDEN = ("subprocess.run(", "subprocess.check_output(", "subprocess.call(", "subprocess.check_call(")
 
+# Пакеты под статическим гардом. Список ЯВНЫЙ (а не «все каталоги репозитория»),
+# потому что появление нового пакета обязано быть осознанным шагом: пакет,
+# забытый здесь, молча выпадает из-под проверки и возвращает GAP-138.
+# ``standkit_companion`` — канал обновлений издателя: он тикает из процесса без
+# своей консоли (фоновый поток хаба) и запускает CLI BPMkit за лицензионным
+# конвертом, то есть попадает ровно в тот класс риска, ради которого гард и есть.
+_GUARDED_PACKAGES = ("standkit", "standkit_agent", "standkit_hub", "standkit_companion")
+
 
 def _package_root() -> Path:
     return Path(platform_module.__file__).resolve().parent.parent
@@ -248,8 +256,13 @@ def _package_root() -> Path:
 
 def _sources():
     root = _package_root()
-    for package in ("standkit", "standkit_agent", "standkit_hub"):
-        for path in sorted((root / package).rglob("*.py")):
+    for package in _GUARDED_PACKAGES:
+        package_dir = root / package
+        if not package_dir.is_dir():
+            # Пакет платной редакции может отсутствовать в свободной поставке —
+            # это не повод ронять набор тестов ядра.
+            continue
+        for path in sorted(package_dir.rglob("*.py")):
             yield path.relative_to(root).as_posix(), path.read_text(encoding="utf-8")
 
 

@@ -79,6 +79,27 @@ from standkit_hub.config import HubConfig
 from standkit_hub.poller import StatusPoller, StatusSnapshot
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
 
+# --- ТОЧКА РАСШИРЕНИЯ РЕДАКЦИИ: канал доставки обновлений издателя ------------
+#
+# Редакция определяется НАЛИЧИЕМ пакета ``standkit_companion``, и ничем больше:
+# ни флага в конфиге, ни имени файла, ни ключа лицензии в ядре. MIT-ядро обязано
+# собираться, запускаться и проходить тесты без этого пакета — поэтому импорт
+# мягкий, а весь код канала спрятан за проверкой ``companion_available()``.
+#
+# Ловится ``Exception``, а НЕ только ``ImportError``: пакет платной редакции
+# ставится отдельно и может оказаться битым (несовместимая версия, обрезанный
+# файл, падение на импорте из-за окружения). Такая установка не имеет права
+# уронить весь хаб — управление стендами обязано продолжать работать, а канал
+# честно покажется недоступным (``edition: "free"``). ``ImportError`` этот класс
+# отказов не покрывает: сломанный модуль падает чем угодно, вплоть до
+# ``SyntaxError``/``AttributeError`` на уровне модуля.
+try:
+    import standkit_companion as _companion
+    from standkit_companion import runner as _companion_runner
+except Exception:  # noqa: BLE001 - см. комментарий выше: битая платная редакция
+    _companion = None
+    _companion_runner = None
+
 # Порт хаба по умолчанию. ФИКСИРОВАННЫЙ осознанно: раньше хаб стартовал на
 # эфемерном порту, а origin (схема+хост+ПОРТ) — ключ браузерных хранилищ и
 # HTTP-кэша. Каждый запуск давал новый origin: пустой localStorage («тема не
@@ -563,6 +584,222 @@ def _snapshot_sources(config_path: Path) -> tuple:
         # Не смогли снять отпечаток — считаем источники «неизвестными».
         # Пустой кортеж не совпадёт ни с чем, и снапшот будет пересобран.
         return ()
+
+
+# --- канал обновлений издателя (companion) -----------------------------------
+#
+# Ядро знает о канале ровно три вещи: есть ли пакет, как спросить у него статус
+# и как попросить выполнить одно из шести разрешённых действий. Никакой логики
+# канала (лицензия, подписи, сеть) здесь нет и быть не должно — она целиком
+# живёт в ``standkit_companion``.
+
+#: Свободная редакция — пакета канала рядом нет.
+EDITION_FREE = "free"
+#: Редакция с каналом обновлений издателя.
+EDITION_COMPANION = "companion"
+
+#: Маршрут → имя действия раннера (``CompanionRunner.run_action``). Имена
+#: действий НЕ повторяют URL дословно: URL — часть публичного контракта фронта,
+#: а имена действий принадлежат каналу, и таблица делает эту границу видимой.
+COMPANION_ACTION_ROUTES = {
+    "/api/companion/sync": "sync_patterns",
+    "/api/companion/check-update": "check_update",
+    "/api/companion/stage-update": "stage_update",
+    "/api/companion/apply-update": "apply_update",
+    "/api/companion/rollback": "rollback",
+    "/api/companion/revocations": "refresh_revocations",
+}
+
+#: Действия, которые умеют адресоваться к конкретной версии (тело
+#: ``{"version": "0.307.0"}``). Для остальных поле в теле игнорируется — молча,
+#: потому что лишний ключ в JSON не повод отказать пользователю в операции.
+COMPANION_VERSION_ACTIONS = frozenset({"stage_update", "rollback"})
+
+#: ``CompanionError.kind`` → HTTP-код. Смысл группировки, а не «все ошибки 500»:
+#:
+#: * **402** — нужна лицензия или действие с ней: ключа нет, он отозван, истёк,
+#:   не вступил в силу, конверт не распознан или его подпись не подтверждена.
+#:   Единственная группа, которую чинит сам пользователь, обратившись к издателю;
+#: * **503** — канал временно не может работать: рядом нет CLI BPMkit, у которого
+#:   спрашивается лицензионный контекст. Ровно тот же код, что и у отсутствующего
+#:   пакета канала, — обе ситуации означают «возможность сейчас недоступна»;
+#: * **409** — конфликт с текущим состоянием: применять нечего, откатываться
+#:   некуда. Запрос корректен, но противоречит тому, что есть на диске;
+#: * **502** (умолчание) — отказ на стороне канала/бэкенда издателя: сеть,
+#:   неразобранный ответ, несошедшаяся контрольная сумма, недействительная
+#:   подпись артефакта. Хаб здесь — шлюз к чужой системе, и 502 честнее 500.
+COMPANION_ERROR_STATUS = {
+    "no_license": 402,
+    "revoked": 402,
+    "expired": 402,
+    "invalid_envelope": 402,
+    "signature_invalid": 402,
+    "not_yet_valid": 402,
+    "context_unavailable": 503,
+    "nothing_staged": 409,
+    "nothing_to_rollback": 409,
+}
+COMPANION_ERROR_STATUS_DEFAULT = 502
+
+#: Текст для свободной редакции. Отвечаем 503, а НЕ 404: маршрут существует и
+#: будет работать после установки платной редакции — недоступна возможность, а
+#: не адрес. 404 в этом месте читается как «опечатка в URL» и уводит и
+#: пользователя, и поддержку не туда.
+COMPANION_UNAVAILABLE_MESSAGE = (
+    "Канал обновлений недоступен: установлена свободная редакция BPMkitStand"
+)
+
+#: Текст для выключенного главного рубильника (``companion.enabled = false``).
+COMPANION_DISABLED_MESSAGE = "Канал обновлений выключен в настройках"
+
+
+def companion_available() -> bool:
+    """Установлена ли редакция с каналом обновлений.
+
+    Спрашивается именно ``is_available()``, а не «модуль импортировался»: пакет
+    оставляет себе право честно ответить «я здесь, но в этом окружении не
+    работаю». Любое исключение из чужого кода трактуется как «недоступен» — на
+    этот вопрос у хаба обязан быть ответ при любом состоянии платной редакции.
+    """
+    if _companion is None or _companion_runner is None:
+        return False
+    try:
+        return bool(_companion.is_available())
+    except Exception:  # noqa: BLE001 - битая редакция не роняет ядро
+        return False
+
+
+def companion_edition() -> str:
+    """``"companion"`` или ``"free"`` — то, что уходит в ``/api/version``."""
+    return EDITION_COMPANION if companion_available() else EDITION_FREE
+
+
+def companion_describe() -> dict:
+    """Карточка канала для ``/api/version`` (пустая в свободной редакции)."""
+    if not companion_available():
+        return {}
+    try:
+        described = _companion.describe()
+    except Exception:  # noqa: BLE001 - см. companion_available
+        return {}
+    return described if isinstance(described, dict) else {}
+
+
+def companion_error_status(kind: str) -> int:
+    """HTTP-код по ``CompanionError.kind`` (см. ``COMPANION_ERROR_STATUS``)."""
+    return COMPANION_ERROR_STATUS.get(kind or "", COMPANION_ERROR_STATUS_DEFAULT)
+
+
+def _is_companion_error(exc: BaseException) -> bool:
+    """Типизированный ли это отказ канала.
+
+    Проверка через ``getattr``-импорт, а не через глобальный ``except
+    CompanionError``: класса может не существовать вовсе (свободная редакция), и
+    ссылаться на него в теле обработчика — значит уронить ядро ``NameError`` там,
+    где оно обязано работать. Импорт локальный и защищённый по той же причине,
+    что и импорт самого пакета в шапке модуля.
+    """
+    if _companion is None:
+        return False
+    try:
+        from standkit_companion.errors import CompanionError
+    except Exception:  # noqa: BLE001 - битая редакция не роняет обработку ошибки
+        return False
+    return isinstance(exc, CompanionError)
+
+
+def companion_error_payload(exc) -> tuple[int, dict]:
+    """``CompanionError`` → (HTTP-код, тело ответа).
+
+    Ключ ``error`` обязателен и обязан быть человеческим текстом: именно его
+    читает фронт (``handleResponse`` в app.js) и показывает пользователю. Машинные
+    поля (``kind``/``retriable``/``user_visible``) идут рядом — по ним UI решает,
+    предлагать ли повтор и поднимать ли отказ как проблему, а не как строку в
+    подробностях. Решение принимает канал, а не хаб: подменять его здесь своей
+    таблицей значило бы завести вторую, расходящуюся.
+    """
+    info = exc.to_dict() if hasattr(exc, "to_dict") else {}
+    title = str(info.get("title") or "Ошибка канала обновлений")
+    message = str(info.get("message") or "")
+    text = f"{title}: {message}" if message and message != title else title
+    return companion_error_status(str(info.get("kind") or "")), {
+        "error": text,
+        "kind": info.get("kind") or "unknown",
+        "detail": info.get("detail") or "",
+        "retriable": bool(info.get("retriable")),
+        "user_visible": bool(info.get("user_visible")),
+    }
+
+
+def companion_status(config_path: Path, runner=None) -> dict:
+    """Карточка канала: у живого раннера — ``status()``, иначе — снимок с диска.
+
+    Раннера может не быть по двум ПОЛНОСТЬЮ разным причинам: канал выключен
+    настройкой либо его поток не поднялся. В обоих случаях UI обязан показать
+    состояние, а не пустоту, — за это отвечает ``status_snapshot`` (та же форма
+    ответа, ``running: false``, сроки следующего запуска отсутствуют).
+    """
+    if runner is not None:
+        return runner.status()
+    return _companion_runner.status_snapshot(config_path)
+
+
+def merge_companion_section(current: dict, incoming: object) -> dict:
+    """Слить присланную секцию ``companion`` поверх текущей, НЕ теряя непереданное.
+
+    Зачем отдельная функция. ``_api_settings_post`` мержит тело в конфиг обычным
+    ``dict.update`` — он ПЛОСКИЙ, и вложенная секция заменяется целиком. Для
+    ``agents`` это правильно (список — атомарное значение), а для ``companion``
+    губительно: форма, приславшая только ``{"companion": {"enabled": true}}``,
+    молча обнулила бы адрес бэкенда, путь к CLI и все три интервала, потому что
+    ``CompanionSettings.from_dict`` достроит недостающее ДЕФОЛТАМИ. Пользователь
+    при этом увидел бы «Настройки сохранены».
+
+    Мержим два уровня: сама секция и вложенные циклы (``patterns``/``releases``/
+    ``revocations``) — глубже структуры нет. Валидация и КЛАМП интервала остаются
+    за ``CompanionSettings.from_dict``: свою вторую границу здесь не заводим,
+    иначе они разойдутся (в конфиге границы уже есть — см. ``CompanionCycle``).
+    """
+    merged = dict(current or {})
+    if not isinstance(incoming, dict):
+        return merged
+    for key, value in incoming.items():
+        if key in _companion_cycle_names() and isinstance(value, dict):
+            cycle = dict(merged.get(key) or {})
+            cycle.update(value)
+            merged[key] = cycle
+        else:
+            merged[key] = value
+    return merged
+
+
+def _companion_cycle_names() -> tuple:
+    """Имена циклов канала. Берутся у самого канала, если он установлен, — там
+    они и объявлены (``runner.CYCLES``). В свободной редакции секция всё равно
+    присутствует в конфиге (см. ``HubConfig.companion``), поэтому имена нужны и
+    без пакета — держим их дословной копией с явной ссылкой на источник."""
+    if _companion_runner is not None:
+        try:
+            return tuple(_companion_runner.CYCLES)
+        except Exception:  # noqa: BLE001 - битая редакция не роняет настройки
+            pass
+    return ("patterns", "releases", "revocations")
+
+
+def build_companion_runner(config_path: Path):
+    """Собрать и запустить планировщик канала. Возвращает ``(раннер, ошибка)``.
+
+    Отказ старта НЕ поднимается наружу: хаб — про управление стендами, и канал
+    обновлений не имеет права помешать ему подняться. Текст отказа возвращается
+    вторым элементом и живёт на сервере (``companion_error``), чтобы попасть в
+    статус, а не потеряться.
+    """
+    try:
+        runner = _companion_runner.build_runner(config_path)
+        runner.start()
+        return runner, ""
+    except Exception as exc:  # noqa: BLE001 - см. докстринг
+        return None, f"канал обновлений не запущен: {type(exc).__name__}: {exc}"
 
 
 def make_handler(
@@ -1381,8 +1618,17 @@ def make_handler(
             """
             Версия ядра ``standkit`` (для модалки «О программе» на фронте) —
             read-only, тот же ``_authorize_read``, что у прочих ``GET /api/*``.
+
+            Плюс ``edition`` — единственное место, где фронт узнаёт редакцию.
+            Ключи ``version``/``name`` не трогаем: их уже читает модалка «О
+            программе», и переименование сломало бы её молча.
             """
-            self._send_json(200, {"version": _standkit_version, "name": "BPMkitStand"})
+            payload = {"version": _standkit_version, "name": "BPMkitStand",
+                       "edition": companion_edition()}
+            described = companion_describe()
+            if described.get("companion_version"):
+                payload["companion_version"] = described["companion_version"]
+            self._send_json(200, payload)
 
         # --- API: настройки ---
 
@@ -1406,6 +1652,13 @@ def make_handler(
             # ``defaults`` — справочное поле ответа GET (см. _api_settings_get),
             # не часть конфига. Если форма вернула его назад — молча выбрасываем.
             data.pop("defaults", None)
+            if "companion" in body:
+                # Вложенная секция канала: плоский update выше заменил бы её
+                # целиком, потеряв всё, чего форма не прислала (см.
+                # merge_companion_section). Валидация и кламп интервалов — на
+                # CompanionSettings.from_dict внутри HubConfig.from_dict.
+                data["companion"] = merge_companion_section(
+                    current.companion.to_dict(), body.get("companion"))
             new_config = HubConfig.from_dict(data)
             new_config.save(config_path)
             # Сброс кэша сразу после собственной записи — не полагаемся на
@@ -1416,6 +1669,16 @@ def make_handler(
             poller = self._poller()
             if poller is not None:
                 poller.poke()
+            # Тот же смысл для канала: человек только что включил цикл и ждёт
+            # первого прогона сейчас, а не через сутки (интервал релизов).
+            # poke() заодно снимает блокировку не-retriable отказа — правка
+            # настроек и есть сообщение «я починил то, на что вы жаловались».
+            companion = self._companion_scheduler()
+            if companion is not None:
+                try:
+                    companion.poke()
+                except Exception:  # noqa: BLE001 - канал не роняет сохранение настроек
+                    pass
             self._send_json(200, new_config.to_dict())
 
         # --- API: секреты ---
@@ -1492,6 +1755,136 @@ def make_handler(
             result = uninstall_desktop_shortcut()
             self._send_json(200 if result.ok else 400, {"ok": result.ok, "path": result.path, "message": result.message})
 
+        # --- API: канал обновлений издателя ---
+        #
+        # Шесть действий и один статус. Все действия — мутации (ходят в сеть,
+        # пишут файлы, подменяют исполняемый файл MCP), поэтому проходят
+        # ``_authorize_mutation`` наравне со start/stop стенда: double-submit
+        # заголовок плюс локальный Origin/Referer. Послаблений «это же
+        # служебный вызов» здесь нет и быть не может (SECURITY.md §4.1).
+
+        def _companion_scheduler(self):
+            """Планировщик канала этого сервера (``server.companion_runner``), если он поднят.
+
+            Тем же способом, что и ``_poller``: атрибут сервера, а не глобаль.
+            ``None`` означает три разные вещи — свободная редакция, выключенный
+            настройкой канал, не поднявшийся поток; их разводит ``_api_companion_*``.
+
+            Назван ``_scheduler``, а не ``_runner``, чтобы не затенять модульное
+            имя ``_companion_runner`` — это МОДУЛЬ канала, и путать объект
+            планировщика с модулем в одном методе слишком легко.
+            """
+            return getattr(self.server, "companion_runner", None)
+
+        def _companion_guard(self) -> bool:
+            """Свободная редакция → 503 и явный ``edition``. False = ответ отправлен."""
+            if companion_available():
+                return True
+            self._send_json(503, {"error": COMPANION_UNAVAILABLE_MESSAGE,
+                                  "edition": EDITION_FREE})
+            return False
+
+        def _companion_enabled(self) -> bool:
+            """Главный рубильник ``companion.enabled`` из свежего конфига.
+
+            Битый/недоступный конфиг трактуется как «выключен»: предлагать
+            действия канала, не сумев прочитать его настройки, — способ сходить
+            в сеть с чужим ключом, а не удобство.
+            """
+            try:
+                return bool(_load_config(config_path).companion.enabled)
+            except (OSError, ValueError, AttributeError):
+                return False
+
+        def _companion_status_dict(self) -> dict:
+            """Статус канала для ответа. Отказ канала не имеет права уронить ответ
+            хаба, поэтому ошибка превращается в поле ``last_error`` той же формы."""
+            try:
+                return companion_status(config_path, self._companion_scheduler())
+            except Exception as exc:  # noqa: BLE001 - см. докстринг
+                return {"running": False, "edition": EDITION_COMPANION,
+                        "last_error": f"статус канала не получен: {type(exc).__name__}: {exc}"}
+
+        def _api_companion_status(self) -> None:
+            """Карточка канала. Выключенный канал — тоже 200.
+
+            Отвечать ошибкой на статус выключенного канала нельзя: UI обязан
+            показать, ПОЧЕМУ ничего не происходит, и дать включить обратно. Отказ
+            в этом месте оставил бы пользователя с пустой вкладкой и без объяснения.
+            """
+            if not self._companion_guard():
+                return
+            status = self._companion_status_dict()
+            status["edition"] = EDITION_COMPANION
+            status["enabled"] = self._companion_enabled()
+            self._send_json(200, status)
+
+        def _api_companion_action(self, action: str) -> None:
+            """Одно явное действие человека (кнопка UI) → ``runner.run_action``.
+
+            Возвращаем и результат, и СВЕЖИЙ статус: после ``apply_update``
+            меняется всё разом — доступные действия, флаг перезапуска, текущая
+            версия, — и второй запрос за статусом успел бы разъехаться с первым.
+
+            Конверт лицензии в ответ не попадает ни при каком исходе: тело
+            собирается только из результата канала и его же типизированной
+            ошибки; присланное клиентом тело наружу не возвращается вовсе.
+            """
+            if not self._companion_guard():
+                return
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            if not self._companion_enabled():
+                # 409, а не 403: запрос корректен и разрешён, он противоречит
+                # текущему состоянию — рубильнику, который выключил сам человек.
+                self._send_json(409, {"error": COMPANION_DISABLED_MESSAGE,
+                                      "edition": EDITION_COMPANION, "enabled": False})
+                return
+
+            version = None
+            if action in COMPANION_VERSION_ACTIONS:
+                raw = body.get("version")
+                if raw is not None and not isinstance(raw, str):
+                    self._send_json(400, {"error": "поле 'version' должно быть строкой"})
+                    return
+                version = (raw or "").strip() or None
+
+            try:
+                runner = self._companion_scheduler()
+                if runner is None:
+                    # Канал включён, но планировщика нет (поток не поднялся). Работаем
+                    # одноразовым раннером: ручное действие человека не должно зависеть
+                    # от фонового потока — иначе диагностика «почему не работает»
+                    # требовала бы перезапуска хаба. Сборка внутри try намеренно:
+                    # исключение отсюда обязано стать ответом, а не оборванным
+                    # соединением с трейсбеком в консоли (http.server на не пойманном
+                    # исключении не отвечает вовсе).
+                    runner = _companion_runner.build_runner(config_path)
+                result = runner.run_action(action, version=version)
+            except Exception as exc:  # noqa: BLE001 - разбор ниже
+                # Ловится всё, а разбирается по типу. Отдельной ветки под
+                # ValueError здесь НЕТ намеренно: единственный ValueError,
+                # который умеет бросить канал, — «неизвестное действие», а это
+                # ошибка маршрутизации ХАБА (таблица маршрутов разошлась с
+                # ACTIONS), то есть честные 500, а не 400 «клиент неправ».
+                # Отвечать 400 на ValueError вообще опасно: любой ValueError из
+                # глубины канала (разбор чужого JSON) стал бы «неверным запросом».
+                if _is_companion_error(exc):
+                    code, payload = companion_error_payload(exc)
+                    self._send_json(code, payload)
+                    return
+                # Незнакомое исключение: наружу — только класс и текст, без
+                # трейсбека. Трейсбек в браузере — это пути установки и куски
+                # чужого кода в ответе, который пользователь пришлёт в поддержку.
+                self._send_json(500, {
+                    "error": f"Внутренняя ошибка канала обновлений: {type(exc).__name__}: {exc}",
+                    "kind": "unknown"})
+                return
+
+            self._send_json(200, {"ok": True, "result": result,
+                                  "status": self._companion_status_dict()})
+
         # --- маршрутизация ---
 
         def do_GET(self) -> None:  # noqa: N802 - сигнатура BaseHTTPRequestHandler
@@ -1542,6 +1935,15 @@ def make_handler(
                 if not self._authorize_read():
                     return
                 self._api_agent_status()
+                return
+
+            if path == "/api/companion/status":
+                # Чтение статуса канала — обычный GET /api/*: токен из cookie
+                # ИЛИ заголовка. Отвечает и при выключенном канале (см.
+                # _api_companion_status), и в свободной редакции (503).
+                if not self._authorize_read():
+                    return
+                self._api_companion_status()
                 return
 
             m = _SECRET_RE.match(path)
@@ -1598,6 +2000,15 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_settings_post()
+                return
+
+            action = COMPANION_ACTION_ROUTES.get(path)
+            if action is not None:
+                # Все действия канала — мутации без исключений: даже «просто
+                # проверить обновление» ходит в сеть с лицензионным конвертом.
+                if not self._authorize_mutation():
+                    return
+                self._api_companion_action(action)
                 return
 
             if path == "/api/agent/start":
@@ -1724,13 +2135,21 @@ def poll_interval_of(config_path: Path) -> float:
 
 class HubHTTPServer(ThreadingHTTPServer):
     """
-    ``ThreadingHTTPServer`` + фоновый опрос стендов.
+    ``ThreadingHTTPServer`` + фоновый опрос стендов + канал обновлений издателя.
 
     Поллер живёт ровно столько же, сколько сам сервер: стартует после
     успешного bind (если бы bind упал, лишний поток вообще не создавался бы) и
     останавливается в ``server_close()``. Обработчики достают его через
     ``self.server.status_poller`` (см. ``Handler._poller``) — атрибут может
     быть ``None``, если сервер подняли с ``poll=False``.
+
+    Планировщик канала (``companion_runner``) поднимается там же и по тем же
+    правилам, но при ДВУХ дополнительных условиях: установлена редакция с
+    каналом (пакет ``standkit_companion``) и включён главный рубильник
+    ``companion.enabled``. Выключенный настройкой канал не поднимает поток
+    вовсе — «выключен» обязано означать «ничего не тикает», а не «тикает, но
+    молчит»; статус в этом случае отдаётся снимком с диска
+    (``runner.status_snapshot``).
     """
 
     daemon_threads = True
@@ -1739,6 +2158,32 @@ class HubHTTPServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_cls)
         self.config_path = config_path
         self.status_poller: Optional[StatusPoller] = None
+        # Канал обновлений: атрибуты существуют ВСЕГДА, включая свободную
+        # редакцию, — обработчики читают их через getattr и не обязаны знать,
+        # какая редакция установлена.
+        self.companion_runner = None
+        self.companion_error = ""
+        # Канал поднимается ДО поллера намеренно. Он читает конфиг и файл
+        # состояния, то есть занимает несколько миллисекунд, — и делай он это
+        # ПОСЛЕ старта поллера, эти миллисекунды растянули бы промежуток между
+        # первым фоновым опросом и первым запросом клиента. Промежуток не
+        # безобидный: ``_api_stands`` отдаёт готовый снапшот поллера, как только
+        # тот появился, и «свежесть» ответа сразу после старта зависела бы от
+        # того, сколько работы успело набежать между ними.
+        if companion_available():
+            try:
+                enabled = bool(HubConfig.load(config_path).companion.enabled)
+            except Exception as exc:  # noqa: BLE001 - битый конфиг не роняет хаб
+                enabled = False
+                self.companion_error = f"настройки канала не прочитаны: {exc}"
+            if enabled:
+                # Отказ старта канала НЕ роняет сервер: хаб — про управление
+                # стендами, и они обязаны работать, даже если канал обновлений
+                # не поднялся. Причина оседает в состоянии сервера и уходит в
+                # статус вкладки «Обновления», а не в трейсбек при запуске.
+                self.companion_runner, error = build_companion_runner(config_path)
+                if error:
+                    self.companion_error = error
         if poll:
             self.status_poller = StatusPoller(
                 build=lambda: build_snapshot(config_path, probe=True),
@@ -1747,12 +2192,22 @@ class HubHTTPServer(ThreadingHTTPServer):
             self.status_poller.start()
 
     def server_close(self) -> None:
-        # Сначала гасим фоновый поток, потом закрываем сокет: иначе поллер
-        # мог бы продолжать пробы уже после «остановки» хаба.
+        # Сначала гасим фоновые потоки, потом закрываем сокет: иначе поллер мог
+        # бы продолжать пробы, а канал — тик уже после «остановки» хаба. Для
+        # канала это к тому же испорченные соседние тесты: забытый поток
+        # продолжает дёргать модульные функции, которые следующий тест
+        # подменяет через monkeypatch (ровно та история, что у поллера).
         poller = getattr(self, "status_poller", None)
         if poller is not None:
             poller.stop()
             self.status_poller = None
+        companion = getattr(self, "companion_runner", None)
+        if companion is not None:
+            try:
+                companion.stop()
+            except Exception:  # noqa: BLE001 - уборка не имеет права упасть
+                pass
+            self.companion_runner = None
         super().server_close()
 
 
