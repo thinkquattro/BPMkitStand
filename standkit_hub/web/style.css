@@ -195,6 +195,12 @@ body {
 [data-view="compact"] .state-panel,
 [data-view="compact"] #tab-agent,
 [data-view="compact"] #tab-settings,
+/* Вкладка «Обновления» и её кнопка — по тем же причинам, что агент и
+   настройки: окно-виджет показывает только стенды и их старт/стоп. Кнопка
+   перечислена отдельно от `.topbar .tabs` выше не ради дублирования, а чтобы
+   правило пережило вынос вкладок из шапки. */
+[data-view="compact"] #tab-companion,
+[data-view="compact"] .tab-btn[data-tab="companion"],
 [data-view="compact"] .stands-table thead,
 /* Колонка «Транспорт» (2-я) — в окне-виджете это шум: у подавляющего
    большинства пользователей все стенды локальные. */
@@ -1316,4 +1322,191 @@ span.value-has-reason {
 
 .agent-row button {
   background: var(--bpmkit-down);
+}
+
+/* --- Вкладка «Обновления» (канал доставки обновлений издателя) -------------
+ *
+ * Ни одного захардкоженного цвета: всё через те же переменные палитры, что и
+ * остальной дашборд, — значит и светлая, и тёмная тема получаются сами (см.
+ * :root и [data-theme="dark"] в начале файла). Карточки повторяют геометрию
+ * панелей стендов: та же рамка, тот же радиус, тот же фон, чтобы вкладка не
+ * выглядела приклеенной из другого приложения.
+ */
+
+.companion-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.companion-edition {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--bpmkit-ok);
+}
+
+/* Выключенный канал/свободная редакция — приглушённый, а не красный: человек
+   выключил это сам либо просто не покупал, и тревожный цвет здесь был бы
+   ложной тревогой. */
+.companion-edition-off {
+  color: var(--bpmkit-muted);
+  font-weight: 500;
+}
+
+.companion-head-actions {
+  margin-bottom: 6px;
+}
+
+/* Заметный баннер: после подмены бинаря MCP нужен ПОЛНЫЙ перезапуск Claude
+   Desktop, и узнать об этом пользователь обязан не из мелкой строки статуса.
+   Геометрия и логика — как у .offline-banner, но внутри панели. */
+.companion-banner {
+  padding: 12px 16px;
+  margin: 0 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--bpmkit-unknown);
+  border-left-width: 4px;
+  background: color-mix(in srgb, var(--bpmkit-unknown) 12%, transparent);
+  color: var(--bpmkit-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.companion-banner[hidden] {
+  display: none;
+}
+
+.companion-banner-warn strong {
+  color: var(--bpmkit-unknown);
+}
+
+/* Значок внимания на кнопке вкладки — единственный способ узнать о
+   необходимости перезапуска, не заходя во вкладку. */
+.tab-attention {
+  margin-left: 6px;
+  font-size: 10px;
+  line-height: 1;
+  vertical-align: middle;
+  color: var(--bpmkit-unknown);
+}
+
+.tab-btn.active .tab-attention {
+  color: var(--bpmkit-primary-contrast);
+}
+
+.tab-attention[hidden] {
+  display: none;
+}
+
+.companion-note {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--bpmkit-border);
+  background: var(--bpmkit-code-bg);
+  color: var(--bpmkit-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.companion-note[hidden] {
+  display: none;
+}
+
+.companion-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.companion-cards[hidden] {
+  display: none;
+}
+
+.companion-card {
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  background: var(--bpmkit-panel-bg);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.companion-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.companion-card-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+/* Подпись «по расписанию / расписание выключено»: справочная, не тревожная. */
+.companion-cycle-state {
+  font-size: 12px;
+  color: var(--bpmkit-ok);
+  white-space: nowrap;
+}
+
+.companion-cycle-state.companion-cycle-off {
+  color: var(--bpmkit-muted);
+}
+
+/* Строка «почему у этого цикла такая политика» — она объясняет, почему
+   паттерны едут часто, а бинарь не применяется без подписи. */
+.companion-card-why {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--bpmkit-muted);
+}
+
+.companion-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  font-size: 13px;
+}
+
+.companion-facts > div {
+  display: contents;
+}
+
+.companion-facts dt {
+  color: var(--bpmkit-muted);
+  font-size: 12px;
+}
+
+.companion-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.companion-detail {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--bpmkit-muted);
+}
+
+.companion-detail[hidden] {
+  display: none;
+}
+
+/* Кнопки действий прижаты к низу карточки: карточки в ряду разной высоты, и
+   без этого кнопки «плавали» бы по вертикали от карточки к карточке. */
+.companion-card-actions {
+  margin-top: auto;
+  padding-top: 12px;
+  margin-bottom: 0;
+  flex-wrap: wrap;
 }

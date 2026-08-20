@@ -33,6 +33,15 @@
     <nav class="tabs">
       <button class="tab-btn active" data-tab="stands">Стенды</button>
       <button class="tab-btn" data-tab="agent">Локальный агент</button>
+      <!-- Вкладка канала обновлений издателя. Есть ВСЕГДА, в том числе в
+           свободной редакции: там она честно объясняет, что канал не установлен.
+           Спрятанная вкладка читается как «такой возможности нет вовсе» — и
+           пользователь свободной редакции никогда не узнаёт, чего лишён.
+           Значок внимания (data-attention) зажигается, когда после подмены
+           бинаря MCP требуется перезапуск Claude Desktop — иначе об этом можно
+           узнать, только заглянув во вкладку. -->
+      <button class="tab-btn" data-tab="companion" id="companion-tab-btn">Обновления<span
+        class="tab-attention" id="companion-tab-attention" hidden>●</span></button>
       <button class="tab-btn" data-tab="settings">Настройки</button>
     </nav>
     <!-- Кукбук — обычная статика (/static/cookbook.html), один самодостаточный
@@ -434,6 +443,133 @@
       <span id="agent-error" class="error-text"></span>
     </section>
 
+    <!--
+      Вкладка «Обновления» — канал доставки обновлений издателя
+      (пакет standkit_companion, см. standkit_hub/server.py::/api/companion/*).
+
+      Разметка СТАТИЧНАЯ, значения проставляет app.js через textContent: в
+      карточки едут тексты от издателя (описания отказов, номера версий, пути),
+      и собирать их строками innerHTML — прямой путь к внедрению разметки из
+      чужого ответа. Единственное, что меняет JS, — текст, класс цвета и
+      атрибуты disabled/title у кнопок.
+
+      Кнопки недоступных действий НЕ прячутся, а выключаются с подсказкой
+      почему: спрятанная кнопка читается как «функции нет» и заставляет искать
+      её в настройках, документации и поддержке.
+    -->
+    <section id="tab-companion" class="tab-panel">
+      <!-- Перезапуск после подмены бинаря. Требование постановки: пользователь
+           ОБЯЗАН увидеть внятное сообщение, а не тихое «обновлено» — перезапуск
+           плагина MCP-сервер заново не поднимает, нужен рестарт всего
+           приложения. Баннер держится, пока состояние канала помнит флаг. -->
+      <div id="companion-restart-banner" class="companion-banner companion-banner-warn"
+           role="alert" hidden>
+        <strong>Перезапустите Claude Desktop.</strong>
+        <span id="companion-restart-detail">Обновление MCP применено, но новая версия
+          начнёт работать только после полного перезапуска приложения: перезагрузка
+          плагина MCP-сервер заново не поднимает.</span>
+      </div>
+
+      <div class="companion-head">
+        <p id="companion-edition" class="companion-edition">Проверяем редакцию…</p>
+        <div class="panel-toolbar companion-head-actions">
+          <button type="button" id="companion-refresh-btn" class="secondary">Обновить состояние</button>
+          <span id="companion-status-text" class="status-text"></span>
+        </div>
+      </div>
+
+      <p id="companion-unavailable" class="companion-note" hidden></p>
+      <p id="companion-error" class="error-text"></p>
+
+      <div id="companion-cards" class="companion-cards" hidden>
+        <!-- ── Паттерны ─────────────────────────────────────────────────── -->
+        <article class="companion-card" data-cycle="patterns">
+          <header class="companion-card-head">
+            <h3>Паттерны разработки</h3>
+            <span class="companion-cycle-state" data-role="cycle-enabled"></span>
+          </header>
+          <p class="companion-card-why">
+            Markdown, а не исполняемый код: достаточно проверки контрольной суммы,
+            поэтому цикл включён по умолчанию и ходит часто.
+          </p>
+          <dl class="companion-facts">
+            <div><dt>Последний прогон</dt><dd data-role="last-status">—</dd></div>
+            <div><dt>Когда</dt><dd data-role="last-time">—</dd></div>
+            <div><dt>Следующий</dt><dd data-role="next-run">—</dd></div>
+            <div><dt>Применено паттернов</dt><dd data-role="applied-count">—</dd></div>
+            <div><dt>Корень базы паттернов</dt><dd data-role="patterns-root">—</dd></div>
+          </dl>
+          <p class="companion-detail" data-role="detail"></p>
+          <div class="panel-toolbar companion-card-actions">
+            <button type="button" data-companion-action="sync_patterns">Синхронизировать</button>
+          </div>
+        </article>
+
+        <!-- ── Обновление MCP ───────────────────────────────────────────── -->
+        <article class="companion-card" data-cycle="releases">
+          <header class="companion-card-head">
+            <h3>Обновление MCP</h3>
+            <span class="companion-cycle-state" data-role="cycle-enabled"></span>
+          </header>
+          <p class="companion-card-why">
+            Исполняемый файл: политика строго fail-closed — без подтверждённой подписи
+            обновление не применяется, и это не отключается настройкой. Подмену бинаря
+            запускает только человек, автоматика доходит максимум до подготовки.
+          </p>
+          <dl class="companion-facts">
+            <div><dt>Последняя проверка</dt><dd data-role="last-status">—</dd></div>
+            <div><dt>Когда</dt><dd data-role="last-time">—</dd></div>
+            <div><dt>Следующая</dt><dd data-role="next-run">—</dd></div>
+            <div><dt>Установленная версия</dt><dd data-role="current-version">—</dd></div>
+            <div><dt>Известная у издателя</dt><dd data-role="known-latest">—</dd></div>
+            <div><dt>Подготовлено к установке</dt><dd data-role="staged-version">—</dd></div>
+          </dl>
+          <p class="companion-detail" data-role="detail"></p>
+          <!-- Честная строка про выключенный по умолчанию цикл релизов: он
+               остаётся выключенным, пока издатель не выпустит ключ подписи
+               артефактов и не переедет на HTTPS. -->
+          <p id="companion-releases-off" class="companion-note" hidden>
+            Цикл обновления MCP <b>выключен по умолчанию</b>. Он включится не раньше, чем
+            издатель выпустит ключ подписи артефактов и переведёт канал на HTTPS: до тех пор
+            подпись бинаря подтвердить нечем. Без валидной подписи обновление не применяется
+            в принципе — это не отключается флагом, и включение цикла в настройках такой
+            проверки не отменяет.
+          </p>
+          <div class="panel-toolbar companion-card-actions">
+            <button type="button" data-companion-action="check_update">Проверить обновление</button>
+            <button type="button" data-companion-action="stage_update">Подготовить</button>
+            <button type="button" data-companion-action="apply_update">Установить</button>
+            <button type="button" data-companion-action="rollback" class="secondary">Откатить</button>
+          </div>
+        </article>
+
+        <!-- ── Отзыв лицензий ───────────────────────────────────────────── -->
+        <article class="companion-card" data-cycle="revocations">
+          <header class="companion-card-head">
+            <h3>Отзыв лицензий</h3>
+            <span class="companion-cycle-state" data-role="cycle-enabled"></span>
+          </header>
+          <p class="companion-card-why">
+            Публичный список, подпись проверяется всегда и без исключений: подделка этого
+            файла означала бы снятие отзыва. Запрашивается даже тогда, когда основной канал
+            уже ответил «лицензия отозвана», — иначе об отзыве нельзя было бы узнать.
+          </p>
+          <dl class="companion-facts">
+            <div><dt>Последняя проверка</dt><dd data-role="last-status">—</dd></div>
+            <div><dt>Когда</dt><dd data-role="last-time">—</dd></div>
+            <div><dt>Следующая</dt><dd data-role="next-run">—</dd></div>
+            <div><dt>Отозвано ключей в списке</dt><dd data-role="revoked-count">—</dd></div>
+          </dl>
+          <p class="companion-detail" data-role="detail"></p>
+          <div class="panel-toolbar companion-card-actions">
+            <button type="button" data-companion-action="refresh_revocations">Обновить список</button>
+          </div>
+        </article>
+      </div>
+
+      <p id="companion-context" class="hint-text"></p>
+    </section>
+
     <section id="tab-settings" class="tab-panel">
       <form id="settings-form" class="settings-form">
         <fieldset>
@@ -531,6 +667,98 @@
           <label>Окно блокировки, сек
             <input type="number" name="lockout_window_sec" min="1" max="86400" />
           </label>
+        </details>
+
+        <!--
+          Канал обновлений издателя. Секция в конфиге ВЛОЖЕННАЯ (companion.*), а
+          остальная форма работает с плоскими именами полей — поэтому её сборку
+          и разбор делает отдельная пара функций в app.js
+          (fillCompanionSettings / collectCompanionSettings), а не подбор имён.
+          Имена полей здесь намеренно с префиксом companion_: они НЕ совпадают с
+          ключами конфига, чтобы никто не соблазнился отправить их плоско.
+
+          Интервалы показаны в минутах и часах (человеку удобно), а в API уходят
+          в секундах (конфиг обязан быть однозначным). Нижние границы дублируют
+          границы сервера — он всё равно поджимает значение сам (CompanionCycle).
+        -->
+        <details class="settings-group" id="settings-companion">
+          <summary>Канал обновлений<span class="settings-group-note" id="companion-settings-note"></span></summary>
+          <p class="settings-group-help">
+            Доставка от издателя: паттерны разработки, обновления MCP и список отозванных
+            лицензий. Состояние и кнопки — на вкладке <b>«Обновления»</b>. В свободной
+            редакции секция ни на что не влияет.
+          </p>
+          <label class="checkbox-label">
+            <input type="checkbox" name="companion_enabled" />
+            Канал обновлений включён
+          </label>
+          <p class="field-hint">
+            Главный рубильник. Выключен — фоновые проверки не выполняются и кнопки действий
+            недоступны; статус при этом продолжает показываться.
+          </p>
+          <label>Адрес бэкенда издателя
+            <input type="text" name="companion_backend_url" />
+            <small class="field-hint">
+              Пусто — используется адрес по умолчанию из клиентского MCP. Своей второй
+              константы адреса канал не заводит.
+            </small>
+          </label>
+          <label>Путь к CLI BPMkit
+            <input type="text" name="companion_mcp_cli" />
+            <small class="field-hint">
+              У него канал спрашивает лицензионный контекст (<code>bpmkit.exe</code> либо
+              <code>python -m bpmkit</code>). Пусто — автодетект рядом с поставкой.
+              Диагностика «лицензионный контекст недоступен» чинится именно здесь.
+            </small>
+          </label>
+
+          <label class="checkbox-label">
+            <input type="checkbox" name="companion_patterns_enabled" />
+            Паттерны: проверять по расписанию
+          </label>
+          <label>Паттерны — интервал, мин
+            <input type="number" name="companion_patterns_interval_min" min="5" max="1440" />
+            <small class="field-hint">Не чаще пяти минут: слишком частый опрос выглядит у издателя как перебор ключа.</small>
+          </label>
+
+          <label class="checkbox-label">
+            <input type="checkbox" name="companion_releases_enabled" />
+            Обновление MCP: проверять по расписанию
+          </label>
+          <label>Обновление MCP — интервал, ч
+            <input type="number" name="companion_releases_interval_hours" min="1" max="168" />
+            <small class="field-hint">Не чаще раза в час. По умолчанию — раз в сутки.</small>
+          </label>
+          <p class="field-hint field-hint-warn">
+            Цикл выключен по умолчанию и остаётся таким, пока издатель не выпустит ключ
+            подписи артефактов и не переведёт канал на HTTPS. Включение НЕ отменяет проверку
+            подписи бинаря: без валидной подписи обновление не применяется в принципе.
+          </p>
+
+          <label class="checkbox-label">
+            <input type="checkbox" name="companion_revocations_enabled" />
+            Отзыв лицензий: проверять по расписанию
+          </label>
+          <label>Отзыв лицензий — интервал, мин
+            <input type="number" name="companion_revocations_interval_min" min="5" max="1440" />
+          </label>
+
+          <label class="checkbox-label">
+            <input type="checkbox" name="companion_auto_stage_release" />
+            Скачивать обновление заранее (без установки)
+          </label>
+          <p class="field-hint">
+            Файл кладётся в каталог подготовки и проверяется, но ничего в поставке не
+            меняется: установку запускает только кнопка «Установить».
+          </p>
+          <label class="checkbox-label">
+            <input type="checkbox" name="companion_require_pattern_signature" />
+            Требовать подпись у каждого паттерна
+          </label>
+          <p class="field-hint">
+            Ужесточение на будущее: механизма подписи markdown у издателя пока нет, и
+            включение сегодня остановит доставку паттернов целиком.
+          </p>
         </details>
 
         <div class="panel-toolbar">

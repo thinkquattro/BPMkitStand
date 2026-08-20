@@ -10,7 +10,8 @@
 | Первый запуск, «просто хочу дашборд» | [Кукбук](../standkit_hub/web/cookbook.html) → разделы 01–03 |
 | Ставлю агента на Linux-хост | [COOKBOOK_LINUX.md](COOKBOOK_LINUX.md) — пошагово, по живому прогону |
 | Настраиваю удалённые стенды | [REMOTE_STANDS.md](REMOTE_STANDS.md) + [Кукбук](../standkit_hub/web/cookbook.html) §06 |
-| Что-то не работает | [Кукбук](../standkit_hub/web/cookbook.html) §08 «Траблшутинг», для Linux-агента — [COOKBOOK_LINUX.md](COOKBOOK_LINUX.md) «Типичные проблемы» |
+| Что-то не работает | [Кукбук](../standkit_hub/web/cookbook.html) §09 «Траблшутинг», для Linux-агента — [COOKBOOK_LINUX.md](COOKBOOK_LINUX.md) «Типичные проблемы» |
+| Настраиваю канал обновлений | [Кукбук](../standkit_hub/web/cookbook.html) §08 «Канал обновлений» + [ADR-0005](adr/0005-companion-transport-in-mit-core.md) |
 | Правлю код | [ARCHITECTURE.md](ARCHITECTURE.md) → [adr/](adr/) → [BACKLOG.md](BACKLOG.md) |
 | Планирую работы | [ROADMAP.md](ROADMAP.md) + [GAPs/](GAPs/README.md) |
 
@@ -20,7 +21,7 @@
 
 | Документ | О чём | Формат |
 |---|---|---|
-| [**Кукбук**](../standkit_hub/web/cookbook.html) | Главный документ продукта: обзор, установка (Windows и Linux раздельно), дашборд экран за экраном, реестр стендов, виды хостинга, удалённые стенды и агент, безопасность, траблшутинг, границы free/paid | HTML, один самодостаточный файл |
+| [**Кукбук**](../standkit_hub/web/cookbook.html) | Главный документ продукта: обзор, установка (Windows и Linux раздельно), дашборд экран за экраном, реестр стендов, виды хостинга, удалённые стенды и агент, безопасность, канал обновлений, траблшутинг, границы free/paid | HTML, один самодостаточный файл |
 | [COOKBOOK_LINUX.md](COOKBOOK_LINUX.md) | Развёртывание агента на Linux: PEP 668 и pipx/venv, реестр, секреты, systemd, TLS/mTLS, эксплуатация, подключение из дашборда | Markdown |
 | [REMOTE_STANDS.md](REMOTE_STANDS.md) | Удалённые стенды: контракт агента, поля реестра, установка службы, TLS | Markdown |
 | [HOSTING.md](HOSTING.md) | Виды хостинга (`host_kind`): kestrel / iis / docker / k8s — что делает диспетчер под капотом | Markdown |
@@ -37,7 +38,7 @@
 | Документ | О чём |
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Краткое зеркало архитектуры: что за что отвечает, границы модулей |
-| [adr/](adr/) | Архитектурные решения с разбором альтернатив — [0001 хостинг-бэкенды](adr/0001-hosting-backends.md) · [0002 k8s](adr/0002-k8s-backend.md) · [0003 логи удалённых стендов](adr/0003-remote-log-browsing.md) · [0004 IIS по Site](adr/0004-iis-site-scoped-lifecycle.md) |
+| [adr/](adr/) | Архитектурные решения с разбором альтернатив — [0001 хостинг-бэкенды](adr/0001-hosting-backends.md) · [0002 k8s](adr/0002-k8s-backend.md) · [0003 логи удалённых стендов](adr/0003-remote-log-browsing.md) · [0004 IIS по Site](adr/0004-iis-site-scoped-lifecycle.md) · [0005 транспорт канала обновлений в MIT-ядре](adr/0005-companion-transport-in-mit-core.md) |
 | [CHANGELOG.md](CHANGELOG.md) | История изменений по версиям (Keep a Changelog + SemVer) |
 | [research/](research/) | Проработки без принятых решений — [companion v2: CI/CD через тонкого агента](research/companion-v2-cicd-thin-agent.md) |
 
