@@ -741,3 +741,33 @@ def test_staged_info_reports_nothing_when_file_disappeared(env):
 
     assert releases.staged_info(state) is None, (
         "иначе UI предложит кнопку «применить», которая гарантированно упадёт")
+
+
+def test_head_404_without_body_is_release_not_configured(env, monkeypatch):
+    """404 на `HEAD` классифицируется как «релиз не выложен», а не как ошибка канала.
+
+    Находка ЖИВОГО прогона 20.08.2026 против бэкенда издателя. `HEAD` по определению
+    отдаёт ответ без тела, поэтому разбор `detail` из JSON на нём слеп и падал в общий
+    `http_error` — пользователь видел «Бэкенд ответил ошибкой» вместо штатного «владелец
+    ещё не выложил релиз». Под `/v1/content/releases/*` других 404 не бывает: второй
+    возможный (`signature not available`) живёт только на `.../signature`, куда `check`
+    не ходит.
+    """
+    state, ctx = env
+
+    class _HeadNotFound:
+        def head(self, path, **kwargs):
+            raise ChannelError("Бэкенд ответил ошибкой", kind="http_error",
+                               http_status=404, detail="")
+
+        def get_json(self, path, **kwargs):  # pragma: no cover - не должен вызываться
+            raise AssertionError("после отказа HEAD за /meta ходить незачем")
+
+    report = releases.check(_HeadNotFound(), state, ctx)
+
+    assert report["available"] is False
+    assert report["reason"] == "release_not_configured", (
+        "пустое тело 404 обязано доклассифицироваться по коду и пути, иначе штатное "
+        "состояние показывается пользователю как поломка")
+    assert state.releases["last_status"] == "skipped", (
+        "«релиз не выложен» — пропуск тика, а не ошибка: чинить пользователю нечего")

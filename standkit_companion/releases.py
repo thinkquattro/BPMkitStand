@@ -339,6 +339,17 @@ def check(client, state, ctx) -> dict:
             "reason": "not_modified", "target": LATEST, "filename": None, "sha256": None,
         }
     except ChannelError as exc:
+        # 404 БЕЗ разобранного `detail` — не «неизвестная ошибка», а тот же самый
+        # «релиз не выложен». Живой прогон 20.08.2026 против бэкенда издателя: `HEAD`
+        # по определению отдаёт ответ БЕЗ ТЕЛА, поэтому классификатор, который читает
+        # `detail` из JSON, на нём слеп и падает в общий `http_error`. Под
+        # `/v1/content/releases/*` других 404 не бывает: `signature not available`
+        # возможен только на `.../signature`, куда `check` не ходит вовсе. Поэтому
+        # доклассифицируем по коду и пути — иначе штатное «владелец ещё не выложил
+        # релиз» показывалось бы пользователю как поломка канала.
+        if exc.kind == "http_error" and exc.http_status == 404:
+            exc = ChannelError(str(exc), kind="release_not_configured",
+                               http_status=404, detail=exc.detail)
         if exc.kind == "release_not_configured":
             state.mark("releases", "skipped", exc.title())
             state.save()
