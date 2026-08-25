@@ -82,6 +82,8 @@ KIND_TITLES = {
     "disabled": ("Цикл выключен в настройках", False, False),
     "blocked_by_policy": ("Заблокировано политикой безопасности", False, True),
     "local_io": ("Локальная ошибка файловой системы", True, True),
+    "mcp_running": ("Обнаружен запущенный MCP-сервер BPMkit — закройте Claude Desktop",
+                    True, True),
     "nothing_staged": ("Подготовленного обновления нет", False, False),
     "nothing_to_rollback": ("Откатываться не на что: предыдущая версия не сохранена",
                             False, True),

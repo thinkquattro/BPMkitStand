@@ -202,6 +202,20 @@ def env(tmp_path):
     return state, ctx
 
 
+@pytest.fixture(autouse=True)
+def _no_real_mutex_probe(monkeypatch):
+    """GAP-161: `apply_staged` теперь спрашивает `mcp_mutex.server_mutex_exists()` ДО
+    бэкапа. Реальный WinAPI здесь недопустим: машина, на которой гоняются эти тесты,
+    вполне может держать живой `bpmkit.exe` под тем же именем мьютекса (обычный дневной
+    случай для разработчика самого MCP) — тогда КАЖДЫЙ тест `apply_staged` ловил бы
+    `mcp_running` независимо от того, что он на самом деле проверяет. Автоприменяемый
+    фикстур глушит реальный детект (`False` по умолчанию, «мьютекса не видно»); тесты
+    самого детекта — `tests/test_companion_mcp_mutex.py`, тесты пути «мьютекс найден» —
+    ниже, они переопределяют этот мок явно.
+    """
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
+
+
 def _staging(ctx) -> Path:
     return releases.companion_workdir(ctx) / releases.STAGING_DIRNAME
 
@@ -771,3 +785,122 @@ def test_head_404_without_body_is_release_not_configured(env, monkeypatch):
         "состояние показывается пользователю как поломка")
     assert state.releases["last_status"] == "skipped", (
         "«релиз не выложен» — пропуск тика, а не ошибка: чинить пользователю нечего")
+
+
+# ======================================================================================
+# 15. GAP-161: детект мьютекса и файловая проба — отказ ДО бэкапа
+# ======================================================================================
+def test_apply_staged_refuses_before_backup_when_mutex_detected(env, monkeypatch):
+    """Мьютекс сервера виден — канал отказывает СРАЗУ, не трогая бэкап/подпись/пробу."""
+    state, ctx = env
+    client, _blob_bytes, _meta_dict = _client("0.307.0")
+    old_bytes = Path(ctx.binary_path).read_bytes()
+    releases.stage(client, state, ctx)
+
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+
+    def must_not_be_called(*args, **kwargs):
+        raise AssertionError(
+            "мьютекс обнаружен — до файловой пробы/бэкапа дело дойти не должно")
+
+    monkeypatch.setattr(fsutil, "probe_writable", must_not_be_called)
+    monkeypatch.setattr(fsutil, "backup_copy", must_not_be_called)
+
+    with pytest.raises(ChannelError) as excinfo:
+        releases.apply_staged(state, ctx)
+
+    assert excinfo.value.kind == "mcp_running", (
+        "детект мьютекса обязан давать СВОЙ, отличимый от local_io код отказа — иначе UI "
+        "не сможет сказать «сервер точно занят» вместо обычной файловой ошибки")
+    text = str(excinfo.value).lower()
+    assert "закройте claude desktop" in text or "claude desktop" in text
+    assert Path(ctx.binary_path).read_bytes() == old_bytes, (
+        "установленная версия не тронута")
+    assert not _backups(ctx).exists() or list(_backups(ctx).iterdir()) == [], (
+        "бэкап не должен быть создан вовсе — отказ произошёл раньше")
+    assert state.releases["restart_required"] is False
+    assert releases.staged_info(state) is not None, (
+        "подготовленное обновление обязано пережить отказ — повторная попытка не должна "
+        "заново качать файл")
+
+
+def test_apply_staged_refuses_before_backup_when_target_file_is_probed_busy(env, monkeypatch):
+    """Мьютекса не видно (старый сервер без него/чужой процесс), но файл всё равно занят —
+    файловая проба ловит это ДО бэкапа, тем же текстом, каким закончилась бы настоящая
+    подмена."""
+    state, ctx = env
+    client, _blob_bytes, _meta_dict = _client("0.307.0")
+    old_bytes = Path(ctx.binary_path).read_bytes()
+    releases.stage(client, state, ctx)
+
+    def probe_says_busy(path):
+        raise PermissionError(32, "The process cannot access the file")
+
+    backup_calls: list = []
+    original_backup_copy = fsutil.backup_copy
+
+    def spy_backup_copy(*args, **kwargs):
+        backup_calls.append(args)
+        return original_backup_copy(*args, **kwargs)
+
+    monkeypatch.setattr(fsutil, "probe_writable", probe_says_busy)
+    monkeypatch.setattr(fsutil, "backup_copy", spy_backup_copy)
+
+    with pytest.raises(ChannelError) as excinfo:
+        releases.apply_staged(state, ctx)
+
+    assert excinfo.value.kind == "local_io"
+    text = str(excinfo.value).lower()
+    assert "claude desktop" in text and "запущен" in text, (
+        f"тот же внятный текст, каким закончилась бы настоящая подмена: {text!r}")
+    assert backup_calls == [], "проба обязана отказать РАНЬШЕ, чем начат бэкап"
+    assert Path(ctx.binary_path).read_bytes() == old_bytes
+    assert not _backups(ctx).exists() or list(_backups(ctx).iterdir()) == []
+    assert state.releases["restart_required"] is False
+    assert releases.staged_info(state) is not None
+
+
+def test_mutex_check_runs_before_signature_and_probe_when_server_is_running(env, monkeypatch):
+    """Порядок: мьютекс — самая дешёвая проверка, идёт первой. Если он говорит «сервер
+    работает», ни проверка подписи, ни файловая проба не должны выполняться."""
+    state, ctx = env
+    client, _blob_bytes, _meta_dict = _client("0.307.0")
+    releases.stage(client, state, ctx)
+
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+
+    def must_not_be_called(*args, **kwargs):
+        raise AssertionError("мьютекс уже сказал 'сервер работает' — идти дальше незачем")
+
+    monkeypatch.setattr(sigmod, "verify_artifact", must_not_be_called)
+    monkeypatch.setattr(fsutil, "probe_writable", must_not_be_called)
+
+    with pytest.raises(ChannelError) as excinfo:
+        releases.apply_staged(state, ctx)
+
+    assert excinfo.value.kind == "mcp_running"
+
+
+def test_mutex_not_detected_does_not_block_normal_apply(env, monkeypatch):
+    """Явная проверка обратного пути: мьютекс явно не найден (детект отработал и вернул
+    False, а не просто не был вызван) — применение идёт штатно, ничего не блокируется.
+    Дублирует часть смысла `test_apply_staged_backs_up_replaces_and_demands_restart`,
+    но здесь факт вызова детекта проверяется явным счётчиком, а не только автофикстурой.
+    """
+    state, ctx = env
+    client, blob, _meta_dict = _client("0.307.0")
+    releases.stage(client, state, ctx)
+
+    calls: list = []
+
+    def fake_no_mutex(*a, **k):
+        calls.append(1)
+        return False
+
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", fake_no_mutex)
+
+    result = releases.apply_staged(state, ctx)
+
+    assert calls == [1], "детект обязан быть вызван ровно один раз"
+    assert result["applied"] is True
+    assert Path(ctx.binary_path).read_bytes() == blob
