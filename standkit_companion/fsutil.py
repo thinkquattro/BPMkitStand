@@ -30,6 +30,7 @@ __all__ = [
     "replace_with_retry",
     "backup_copy",
     "sha256_file",
+    "probe_writable",
 ]
 
 PathLike = Union[str, "os.PathLike[str]"]
@@ -93,6 +94,33 @@ def replace_with_retry(src: PathLike, dst: PathLike,
                 time.sleep(pause)
     assert last is not None
     raise last
+
+
+def probe_writable(path: PathLike) -> None:
+    """Неразрушающая проба «можно ли сейчас подменить этот файл» (GAP-161).
+
+    Открывает файл в режиме `r+b` (чтение+запись, БЕЗ усечения — `truncate` здесь не
+    вызывается вовсе) и сразу закрывает, не изменив ни байта. Смысл именно в этом режиме:
+    на Windows работающий `.exe` обычно открыт загрузчиком с долей `FILE_SHARE_READ`, без
+    `FILE_SHARE_WRITE`/`FILE_SHARE_DELETE` — и тогда `open(path, "r+b")` падает тем же
+    `PermissionError`, каким закончилась бы настоящая подмена (`replace_with_retry`).
+    Вызывающий получает этот сигнал РАНЬШЕ, чем сделан бэкап и затронута установленная
+    версия — можно честно отказать, не начиная мутацию вовсе.
+
+    Файла нет на диске (`path` не существует) — тихий выход: пробовать нечего, и это НЕ
+    признак занятости, а отдельный (штатный) случай, который решает вызывающий код.
+
+    Это не абсолютная гарантия: между пробой и настоящей подменой файл теоретически может
+    и освободиться, и занятся заново (TOCTOU) — поэтому проба ДОПОЛНЯЕТ обработку
+    `OSError` из `replace_with_retry`, а не отменяет её. Бросает исходный `OSError` как
+    есть — классификацию (`kind`, текст для пользователя) делает вызывающий, как и для
+    ошибки самой подмены.
+    """
+    target = Path(path)
+    if not target.is_file():
+        return
+    with open(target, "r+b"):
+        pass
 
 
 def backup_copy(path: PathLike, backup_dir: PathLike, name: str) -> Optional[Path]:

@@ -485,6 +485,12 @@ def test_non_string_version_is_rejected(tmp_path, monkeypatch):
     ("offline", 502),
     ("integrity_mismatch", 502),
     ("artifact_signature_invalid", 502),
+    ("local_io", 502),
+    # GAP-161: детект мьютекса MCP-сервера — новый kind, в COMPANION_ERROR_STATUS
+    # намеренно НЕ выделен отдельным кодом (тот же дефолт, что у local_io, его
+    # ближайшего родственника по природе отказа — оба локальные, не про бэкенд
+    # издателя); кейс здесь фиксирует это явно, а не оставляет непроверенным.
+    ("mcp_running", 502),
     ("unknown", 502),
 ])
 def test_companion_error_kind_maps_to_http_status(tmp_path, monkeypatch, kind, expected):
