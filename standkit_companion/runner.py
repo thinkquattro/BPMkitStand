@@ -369,6 +369,12 @@ class CompanionRunner:
                 "обращаться; задайте его в настройках хаба (companion.backend_url)",
                 kind="context_unavailable",
                 detail="пустой backend_url в лицензионном контексте")
+        # Схему адреса здесь НЕ проверяем: fail-closed политика транспорта («только
+        # https», исключение — локальный бэкенд) живёт в самом `BackendClient` и
+        # срабатывает в его конструкторе. Отказ приезжает сюда как
+        # `ChannelError(kind="insecure_transport")` и разбирается общим
+        # `except CompanionError` вокруг `_session`: цикл встаёт с названной причиной,
+        # а не уходит в сеть по открытому каналу.
         return BackendClient(base_url, getattr(ctx, "envelope", "") or "")
 
     def _session(self, settings) -> _Session:
