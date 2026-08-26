@@ -18,6 +18,15 @@
 * **ETag передаётся ДОСЛОВНО**, вместе с двойными кавычками. Сервер сравнивает
   `If-None-Match` строкой байт-в-байт: снятые кавычки, добавленный `W/` или `*` дают
   промах кэша и полную перекачку на каждом тике вместо дешёвого 304;
+* **только `https`, кроме локального бэкенда.** По каналу едет ИСПОЛНЯЕМЫЙ файл MCP,
+  поэтому открытый `http://` на внешний хост — отказ ДО сетевого вызова
+  (`insecure_transport`), а не «сходим и посмотрим»: разбираться со схемой по факту
+  ответа поздно, запрос вместе с заголовком авторизации уже ушёл. Исключение ровно
+  одно — loopback: именно так поднимается настоящий бэкенд рядом (интеграционные тесты
+  транспорта и живая приёмка канала), и такой трафик машину не покидает. Аварийный
+  выход для отладки — именованный `allow_insecure=True` у клиента, и только он:
+  переменной окружения, тихо снимающей запрет, здесь нет намеренно — обход обязан быть
+  виден в коде вызывающего (тот же приём, что `--insecure` у `standkit_agent`);
 * **редиректы за пределы `base_url` запрещены.** Это канал доставки ИСПОЛНЯЕМОГО кода:
   308 на чужой хост — готовая подмена бинаря (и заодно утечка заголовка авторизации
   третьей стороне). Разрешён только редирект внутри собственного префикса, всё
@@ -35,6 +44,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import socket
 import urllib.error
@@ -127,6 +137,96 @@ def _detail_from_body(body: bytes) -> str:
     return _clip(text)
 
 
+def _is_loopback_host(hostname: Optional[str]) -> bool:
+    """Loopback ли хост: `localhost`, `::1` или ЛЮБОЙ адрес из 127.0.0.0/8.
+
+    Вся сеть 127.0.0.0/8, а не один `127.0.0.1`: тесты транспорта берут свободный порт,
+    а локальные сборки бэкенда спокойно живут и на 127.0.0.2. Разбор через `ipaddress`,
+    а не сравнение строк — иначе `127.0.0.1.evil.example` прошёл бы как «начинается
+    на 127.».
+
+    Двойник этой функции есть в `standkit_agent.security.is_loopback_host` (там она
+    решает, можно ли слушать открытый HTTP). Общего модуля намеренно нет: пакеты
+    поставляются раздельно, и сцеплять канал обновлений с агентом ради шести строк —
+    размен хуже, чем повтор с этой ссылкой.
+    """
+    host = (hostname or "").strip().lower()
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _ensure_secure_transport(base_url: str, *, allow_insecure: bool = False) -> None:
+    """Отказ ДО сетевого вызова, если адрес издателя не защищён TLS.
+
+    Fail-closed, и по той же причине, по которой fail-closed вся политика подписи: по
+    этому каналу приезжает исполняемый файл MCP. Открытый `http://` на внешний хост
+    означает, что содержимое ответа может подменить любой, кто стоит на пути, а
+    заголовок авторизации (лицензионный конверт) уезжает открытым текстом. Проверять
+    это в момент ответа поздно — запрос уже ушёл, поэтому проверка стоит в конструкторе
+    клиента: собрать транспорт к незащищённому адресу нельзя вовсе.
+
+    Разрешено ровно два случая:
+
+    * `https://` — штатный адрес издателя;
+    * `http://` на loopback — так поднимается настоящий бэкенд рядом: интеграционные
+      тесты транспорта (`127.0.0.1:<свободный порт>`) и живая приёмка канала
+      (`localhost:8000`). Этот трафик не покидает машину.
+
+    Всё остальное — `insecure_transport`: и `http://` на внешний хост, и адрес без
+    схемы (`api.example`, который `urllib` всё равно не откроет), и экзотика вроде
+    `ftp://`. `allow_insecure=True` снимает запрет ТОЛЬКО с `http://`: это отладочный
+    обход TLS, а не разрешение открыть неоткрываемое.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(base_url or "")
+        scheme = (parsed.scheme or "").lower()
+        hostname = parsed.hostname
+    except ValueError:
+        # Неразбираемый адрес (битые скобки IPv6 и т.п.) — тот же отказ, что и у
+        # незащищённой схемы: доверять такому адресу не на чем.
+        scheme, hostname = "", None
+    if scheme == "https":
+        return
+    if scheme == "http" and (_is_loopback_host(hostname) or allow_insecure):
+        return
+    raise ChannelError(
+        "Адрес бэкенда издателя не защищён TLS — канал доставки обновлений BPMkit по "
+        "нему не работает: по каналу едет исполняемый файл MCP, и по открытому "
+        "соединению его можно подменить по дороге. Укажите адрес издателя как "
+        "https://… (в хабе: «Канал обновлений» → адрес бэкенда, поле "
+        "companion.backend_url); http:// допустим только для локального бэкенда "
+        "(localhost, 127.0.0.1, ::1)",
+        kind="insecure_transport",
+        detail=_clip(f"схема: {scheme or '(не указана)'}; адрес: {base_url}"),
+    )
+
+
+def _inside_base_url(newurl: str, base_url: str) -> bool:
+    """Ведёт ли `Location` внутрь собственного адреса издателя.
+
+    Сравнение префиксом, и его ДОСТАТОЧНО, чтобы запретить downgrade `https→http`:
+    схема — часть префикса, поэтому `http://api.example/...` не начинается с
+    `https://api.example` и отсекается тем же условием, что и чужой хост. Отдельной
+    проверки схемы на редиректе нет намеренно: две политики про одно и то же однажды
+    разъедутся, а разъедутся они молча.
+
+    Чего голому `startswith` не хватает — ГРАНИЦЫ: `https://api.example` формально
+    является префиксом `https://api.example.evil.test/`, то есть чужой хост проходил бы
+    как свой. Поэтому за префиксом обязан идти разделитель (`/`, `?`, `#`) или конец
+    строки.
+    """
+    if not base_url or not newurl.startswith(base_url):
+        return False
+    rest = newurl[len(base_url):]
+    return rest == "" or rest[0] in "/?#"
+
+
 class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Редиректы только внутрь `base_url`.
 
@@ -135,6 +235,9 @@ class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
     подменил ответ сервера (или сам сервер после компрометации), уводит клиента на свой
     хост и отдаёт свой `.exe`. Поэтому чужой `Location` — не «следуем и проверим потом»,
     а немедленный отказ `blocked_by_policy`, до какого-либо чтения тела.
+
+    Этой же проверкой закрыт downgrade `https→http`: схема входит в префикс `base_url`,
+    поэтому отдельной политики схемы на редиректе нет (см. `_inside_base_url`).
     """
 
     max_redirections = _MAX_REDIRECTS
@@ -143,7 +246,7 @@ class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
         self._base_url = base_url
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
-        if not newurl.startswith(self._base_url):
+        if not _inside_base_url(newurl, self._base_url):
             raise ChannelError(
                 "Бэкенд перенаправил запрос за пределы адреса издателя — "
                 "переход заблокирован политикой безопасности",
@@ -172,8 +275,15 @@ class BackendClient:
     """Транспорт к бэкенду издателя. Ничего не знает о смысле эндпоинтов."""
 
     def __init__(self, base_url: str, envelope: Optional[str] = None, *,
-                 timeout: float = 15.0, opener=None) -> None:
+                 timeout: float = 15.0, opener=None,
+                 allow_insecure: bool = False) -> None:
         self.base_url = (base_url or "").rstrip("/")
+        # Схема проверяется ЗДЕСЬ, раньше всего остального: клиент, который нельзя
+        # собрать, не сходит в сеть ни одним из трёх циклов — включая подменённый
+        # `opener`. `allow_insecure` именованный и без парного env-переключателя:
+        # отладочный обход обязан быть виден в коде вызывающего.
+        _ensure_secure_transport(self.base_url, allow_insecure=allow_insecure)
+        self.allow_insecure = bool(allow_insecure)
         # Конверт — приватным полем: он не должен попасть ни в `repr`, ни в текст ошибки.
         self._envelope = (envelope or "").strip()
         self.timeout = float(timeout)

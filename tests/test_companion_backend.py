@@ -7,6 +7,10 @@
 только то, что мы сами же и написали в подмену; реальный `http.server` ловит настоящие
 ошибки заголовков и статусов. Тот же приём, что в tests/test_hub_server.py.
 
+Исключение — раздел 13 (политика схемы транспорта): там проверяется, что запрос НЕ уходит
+вовсе, и настоящий сервер этому только мешал бы (внешний адрес упёрся бы в DNS, а тест стал
+бы медленным и зависящим от сети). Там подставлен считающий обращения `opener`.
+
 Сервер поднимается на 127.0.0.1:0 (свободный порт) в daemon-потоке и гасится фикстурой.
 """
 
@@ -16,11 +20,16 @@ import json
 import socket
 import threading
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from standkit_companion.backend import AUTH_SCHEME, BackendClient
+from standkit_companion.backend import (
+    AUTH_SCHEME,
+    BackendClient,
+    _SameOriginRedirectHandler,
+)
 from standkit_companion.errors import ChannelError, NotModified
 
 ENVELOPE = "BPMKIT1.eyJsaWMiOiJ0ZXN0In0.c2ln"
@@ -514,3 +523,184 @@ def test_client_repr_does_not_leak_envelope(backend):
 
     assert ENVELOPE not in text
     assert "authorized=True" in text
+
+
+# --------------------------------------------------------------------------------------
+# 13. Политика схемы транспорта: fail-closed https
+# --------------------------------------------------------------------------------------
+# Канал доставляет ИСПОЛНЯЕМЫЙ файл MCP, поэтому открытый `http://` на внешний хост
+# отвергается ДО сетевого вызова. Здесь настоящий сервер не нужен и вреден: проверяется
+# как раз ОТСУТСТВИЕ обращения, а живой внешний адрес превратил бы тест в поход в DNS.
+
+# Адрес издателя для тестов схемы. Домен из зарезервированного RFC 2606 `example` —
+# в сеть по нему всё равно никто не пойдёт, но если политика однажды сломается, спрос
+# будет с теста, а не с чужого хоста.
+HTTPS_BASE = "https://updates.example"
+HTTP_BASE = "http://updates.example"
+
+
+class _RecordingOpener:
+    """Opener, который считает обращения и никуда не ходит.
+
+    Нужен ровно затем, чтобы отличить «отказали ДО сети» от «сходили и не понравилось»:
+    пустой журнал `opened` — единственное наблюдаемое доказательство первого.
+    """
+
+    class _Response:
+        status = 200
+        headers = {"Content-Type": "application/json"}
+
+        def read(self, size=-1):
+            return b'{"latest": "9.9.9"}' if size == -1 else b""
+
+        def close(self):
+            pass
+
+    def __init__(self) -> None:
+        self.opened: list = []
+
+    def open(self, req, timeout=None):
+        self.opened.append(req.full_url)
+        return self._Response()
+
+
+def test_external_http_backend_is_refused_before_any_request():
+    """Открытый `http://` на внешний хост — отказ ДО запроса, а не «сходим и посмотрим»:
+    к моменту ответа лицензионный конверт уже уехал бы открытым текстом, а тело мог бы
+    подменить любой на пути. Тест ловит поломку по пустому журналу opener'а."""
+    opener = _RecordingOpener()
+
+    with pytest.raises(ChannelError) as info:
+        BackendClient(HTTP_BASE, ENVELOPE, opener=opener)
+
+    err = info.value
+    assert err.kind == "insecure_transport"
+    assert err.retriable is False, "повтор по тому же открытому адресу ничего не изменит"
+    assert err.user_visible is True, "молча выключенный канал обновлений никто не заметит"
+    assert "https" in str(err), "текст обязан назвать человеку, чем это чинится"
+    assert opener.opened == [], "запрос ушёл в сеть по незащищённому адресу"
+    assert ENVELOPE not in str(err) and ENVELOPE not in err.detail
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    "http://[::1]:8000",
+    # Не только `127.0.0.1`: свободный порт тесты берут на произвольном loopback-адресе.
+    "http://127.0.0.2:9000",
+])
+def test_loopback_http_backend_is_allowed(base_url):
+    """Единственное исключение из запрета — локальный бэкенд: именно так он и
+    поднимается рядом (интеграционные тесты транспорта, живая приёмка канала), и такой
+    трафик машину не покидает. Запрет без этого исключения остановил бы и сами тесты —
+    парный смысл к предыдущему тесту."""
+    opener = _RecordingOpener()
+
+    payload, _headers = BackendClient(base_url, ENVELOPE,
+                                      opener=opener).get_json("/v1/content/releases")
+
+    assert payload == {"latest": "9.9.9"}
+    assert opener.opened == [f"{base_url}/v1/content/releases"], \
+        "локальный бэкенд перестал быть доступен — канал не поднять даже рядом"
+
+
+def test_https_backend_is_allowed():
+    """Штатный адрес издателя. Парный смысл ко всему разделу: политика обязана
+    ПРОПУСКАТЬ защищённый транспорт, иначе «fail-closed» стало бы «закрыто всегда»."""
+    opener = _RecordingOpener()
+
+    payload, _headers = BackendClient(HTTPS_BASE, ENVELOPE,
+                                      opener=opener).get_json("/v1/content/releases")
+
+    assert payload == {"latest": "9.9.9"}
+    assert opener.opened == [f"{HTTPS_BASE}/v1/content/releases"]
+
+
+@pytest.mark.parametrize("base_url, why", [
+    ("updates.example", "адрес без схемы — `urllib` его не откроет вовсе"),
+    ("", "пустой адрес не может считаться защищённым по умолчанию"),
+    ("ftp://updates.example", "не-http схема мимо политики проходить не должна"),
+    ("http://127.0.0.1.evil.test",
+     "хост лишь НАЧИНАЕТСЯ на 127.0.0.1 — это чужое имя, а не loopback"),
+])
+def test_non_https_addresses_are_refused(base_url, why):
+    """Не-`https` адрес отвергается целиком, а не только явный внешний `http://`:
+    неразобранная схема — это «неизвестно, защищено ли», и fail-closed трактует такое
+    как «не защищено»."""
+    with pytest.raises(ChannelError) as info:
+        BackendClient(base_url, ENVELOPE, opener=_RecordingOpener())
+
+    assert info.value.kind == "insecure_transport", why
+
+
+def test_allow_insecure_lifts_the_ban_only_when_asked_explicitly():
+    """Аварийный выход для отладки существует и работает — но именно как именованный
+    аргумент: след обхода остаётся в коде вызывающего, а не в чужом окружении."""
+    opener = _RecordingOpener()
+
+    client = BackendClient(HTTP_BASE, ENVELOPE, opener=opener, allow_insecure=True)
+    client.get_json("/v1/content/releases")
+
+    assert client.allow_insecure is True
+    assert opener.opened == [f"{HTTP_BASE}/v1/content/releases"]
+    with pytest.raises(ChannelError):
+        BackendClient(HTTP_BASE, ENVELOPE, opener=_RecordingOpener())
+
+
+def test_allow_insecure_does_not_turn_garbage_into_an_address():
+    """Обход снимает требование TLS, а не превращает мусор в адрес: схемы у строки нет,
+    открыть её нечем, и отказ обязан остаться внятным."""
+    with pytest.raises(ChannelError) as info:
+        BackendClient("updates.example", ENVELOPE, allow_insecure=True)
+
+    assert info.value.kind == "insecure_transport"
+
+
+def test_no_environment_variable_lifts_the_ban(monkeypatch):
+    """Осознанное отсутствие фичи: переменной окружения, снимающей запрет, нет и быть
+    не должно — это тихо выключенная защита на чужой машине. Тест сторожит именно то,
+    что такой переменной не появится «для удобства»."""
+    for name in ("STANDKIT_COMPANION_ALLOW_INSECURE", "STANDKIT_ALLOW_INSECURE",
+                 "COMPANION_ALLOW_INSECURE", "STANDKIT_COMPANION_INSECURE"):
+        monkeypatch.setenv(name, "1")
+
+    with pytest.raises(ChannelError) as info:
+        BackendClient(HTTP_BASE, ENVELOPE, opener=_RecordingOpener())
+
+    assert info.value.kind == "insecure_transport"
+
+
+@pytest.mark.parametrize("newurl, why", [
+    (f"http://{HTTPS_BASE[len('https://'):]}/v1/content/releases/latest",
+     "downgrade https→http: тот же хост, но канал уже открытый"),
+    ("https://updates.example.evil.test/v1/content/releases/latest",
+     "чужой хост, для которого адрес издателя оказался ПРЕФИКСОМ строки"),
+    ("https://evil.test/v1/content/releases/latest",
+     "просто чужой хост"),
+])
+def test_redirect_leaving_https_base_url_is_blocked(newurl, why):
+    """Политика схемы действует и на редиректе. Отдельной проверки схемы там нет и не
+    нужно: схема входит в префикс `base_url`, поэтому `http://` тем же условием и
+    отсекается (раздел 10). Проверяются все три способа уйти наружу разом — включая тот,
+    где чужое имя лишь начинается с адреса издателя."""
+    handler = _SameOriginRedirectHandler(HTTPS_BASE)
+    req = urllib.request.Request(f"{HTTPS_BASE}/v1/content/releases/latest")
+
+    with pytest.raises(ChannelError) as info:
+        handler.redirect_request(req, None, 302, "Found", {}, newurl)
+
+    assert info.value.kind == "blocked_by_policy", why
+    assert info.value.retriable is False
+
+
+def test_redirect_inside_https_base_url_is_followed_by_the_handler():
+    """Парный смысл к предыдущему: обработчик не «запрещает всё». Внутренний переход
+    (`latest` → конкретная версия в пределах того же защищённого адреса) обязан
+    проходить, иначе канал сломается на первом же 302 у издателя."""
+    handler = _SameOriginRedirectHandler(HTTPS_BASE)
+    req = urllib.request.Request(f"{HTTPS_BASE}/v1/content/releases/latest")
+
+    new_req = handler.redirect_request(
+        req, None, 302, "Found", {}, f"{HTTPS_BASE}/v1/content/releases/0.307.0")
+
+    assert new_req.full_url == f"{HTTPS_BASE}/v1/content/releases/0.307.0"

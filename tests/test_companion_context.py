@@ -39,7 +39,7 @@ OK_PAYLOAD = {
     "ok": True,
     "envelope": ENVELOPE,
     "license_status": "valid",
-    "backend_url": "http://publisher.example/",
+    "backend_url": "https://publisher.example/",
     "mcp_version": "0.355.0",
     "package_root": "/opt/BPMkit",
     "shipped_patterns_root": "/opt/BPMkit/skills/bpmsoft-dev/references",
@@ -148,7 +148,7 @@ def test_resolve_parses_context(tmp_path):
     assert ctx.cli == [str(cli)]
     assert ctx.raw["ok"] is True
     # Хвостовой слэш адреса срезан: иначе каждый путь склеится через двойной `//`.
-    assert ctx.backend_url == "http://publisher.example"
+    assert ctx.backend_url == "https://publisher.example"
     assert runner.calls == [[str(cli), *CONTEXT_ARGV_TAIL]]
 
 
@@ -156,11 +156,11 @@ def test_resolve_settings_backend_url_overrides_context(tmp_path):
     """Адрес, заданный человеком в настройках хаба, сильнее дефолта из поставки —
     иначе настройка молча игнорируется."""
     cli = _cli(tmp_path)
-    settings = _settings(cli, backend_url="http://stand.local:8000/")
+    settings = _settings(cli, backend_url="https://stand.local:8000/")
 
     ctx = resolve(settings, run=_ok_runner(), cache_ttl=0)
 
-    assert ctx.backend_url == "http://stand.local:8000"
+    assert ctx.backend_url == "https://stand.local:8000"
 
 
 def test_resolve_tolerates_banner_before_json(tmp_path):
@@ -303,7 +303,7 @@ def test_cache_key_accounts_for_backend_url_override(tmp_path):
     runner = _ok_runner()
 
     first = resolve(_settings(cli), run=runner, cache_ttl=300.0)
-    second = resolve(_settings(cli, backend_url="http://other.local"),
+    second = resolve(_settings(cli, backend_url="https://other.local"),
                      run=runner, cache_ttl=300.0)
 
     assert len(runner.calls) == 2
