@@ -45,6 +45,7 @@ from .fsutil import PathLike, sha256_file
 __all__ = [
     "SIG_FORMAT",
     "PUBLISHER_LICENSE_PUBKEY_B64",
+    "PUBLISHER_REVOCATION_PUBKEY_B64",
     "RAW_KEY_LEN",
     "decode_pubkey",
     "load_pubkey_file",
@@ -60,6 +61,20 @@ SIG_FORMAT = "bpmkit-artifact-sig-v1"
 #: намеренно: файл отзыва лицензий должен проверяться даже на машине, где поставка
 #: повреждена или ключ артефактов отсутствует. Это НЕ ключ артефактов.
 PUBLISHER_LICENSE_PUBKEY_B64 = "h6xtHY+JFiWFox6ZN4DRROzvJSjt0xdGcgO8cYIGPns="
+
+#: Публичный ключ КАНАЛА ОТЗЫВА издателя (стандартный base64 от 32 сырых байт) — ОТДЕЛЬНАЯ
+#: пара от лицензионной (разделение ключей, dev-репо BPMkit:
+#: docs/design_revocation_channel_key_2026-08-26.md). Приватная половина живёт на бэкенде
+#: издателя и автоматически подписывает revocations.json (еженедельный timer); лицензионный
+#: приватный ключ бэкенд не покидает машину издателя и revocations.json им НЕ подписывается.
+#: Значение обязано совпадать с REVOCATION_PUBLIC_KEY_B64 клиентского модуля
+#: BPMkit/server/bpmkit/licensing.py — это один и тот же ключ, вшитый в два потребителя.
+#:
+#: BE-02 (аудит 01.09.2026, GAP-205 dev-репо): до этой правки verify_revocations_document по
+#: умолчанию проверяла документ ТОЛЬКО лицензионным ключом, а сервер подписывал его ключом
+#: отзыва — резервный канал отзыва через companion был мёртв молча (каждый документ
+#: отбрасывался как «подпись не подтверждена»).
+PUBLISHER_REVOCATION_PUBKEY_B64 = "bZlirWicneRUQ1zM9cgfQmzJ0M5bupU+pdzCkB3LOQU="
 
 #: Длина сырого Ed25519-ключа. В проекте везде Raw-кодирование, никаких PEM/DER.
 RAW_KEY_LEN = 32
@@ -334,7 +349,14 @@ def canonical_revocations_payload(doc: dict) -> bytes:
 def verify_revocations_document(doc: dict, pubkey_raw: Optional[bytes] = None) -> list[str]:
     """Проверить подпись документа отзыва лицензий и вернуть список отозванных id.
 
-    Ключ по умолчанию — вшитый `PUBLISHER_LICENSE_PUBKEY_B64` (ключ ЛИЦЕНЗИЙ, не артефактов).
+    Ключи по умолчанию (pubkey_raw не задан) — вшитые ключи издателя, пробуются по порядку:
+    сначала `PUBLISHER_REVOCATION_PUBKEY_B64` (ключ КАНАЛА ОТЗЫВА — именно им бэкенд
+    подписывает revocations.json), затем `PUBLISHER_LICENSE_PUBKEY_B64` (ключ ЛИЦЕНЗИЙ —
+    исторический канал, обратная совместимость с документами, подписанными до разделения
+    ключей). Ни один из них — не ключ артефактов. Та же пара кандидатов, что у клиентского
+    `licensing._verify_revocations_signature` (BE-02: раньше companion пробовал только
+    лицензионный ключ и отбрасывал каждый документ, подписанный сервером). Явный
+    `pubkey_raw` — ровно один ключ, без фолбэков (тесты и внешние вызыватели).
 
     Все отказы схлопнуты в один `kind`: с точки зрения последствий «подписи нет», «подпись
     не разобрана» и «подпись не сошлась» одинаковы — документу отзыва верить нельзя, а
@@ -355,9 +377,14 @@ def verify_revocations_document(doc: dict, pubkey_raw: Optional[bytes] = None) -
             kind="revocations_signature_invalid",
         )
 
-    key = bytes(pubkey_raw) if pubkey_raw is not None else decode_pubkey(
-        PUBLISHER_LICENSE_PUBKEY_B64
-    )
+    if pubkey_raw is not None:
+        candidate_keys = [bytes(pubkey_raw)]
+    else:
+        # BE-02: порядок — ключ отзыва (им подписывает сервер), затем лицензионный (история).
+        candidate_keys = [
+            decode_pubkey(PUBLISHER_REVOCATION_PUBKEY_B64),
+            decode_pubkey(PUBLISHER_LICENSE_PUBKEY_B64),
+        ]
 
     try:
         payload = canonical_revocations_payload(doc)
@@ -370,10 +397,10 @@ def verify_revocations_document(doc: dict, pubkey_raw: Optional[bytes] = None) -
     # Подписаны СЫРЫЕ байты канонического JSON, без промежуточного sha256 — в отличие от
     # артефакта. Документ маленький, лишний хеш только добавил бы шаг, где можно разойтись
     # с подписывателем издателя.
-    if not ed25519.verify(key, signature, payload):
+    if not any(ed25519.verify(key, signature, payload) for key in candidate_keys):
         raise ChannelError(
-            "Подпись документа отзыва лицензий не подтверждена ключом издателя — "
-            "документ отброшен",
+            "Подпись документа отзыва лицензий не подтверждена ни ключом канала отзыва, "
+            "ни лицензионным ключом издателя — документ отброшен",
             kind="revocations_signature_invalid",
         )
 
