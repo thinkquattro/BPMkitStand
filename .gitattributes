@@ -1,0 +1,43 @@
+# ── Концы строк (02.09.2026) ───────────────────────────────────
+# Проблема: репозиторий разрабатывается с Windows-хоста, где Git for Windows ставит
+# core.autocrlf=true в system-конфиг (C:/Program Files/Git/etc/gitconfig), а те же файлы
+# читает/правит Linux-VM (мост Cowork, CI) с autocrlf по умолчанию (false). Индекс
+# хранит LF, рабочая копия лежит в CRLF — и Linux-git показывает весь репозиторий
+# «переписанным целиком» (замер 02.09: 115 файлов, 45447 insertions / 45447 deletions
+# при пустом `git diff --ignore-cr-at-eol`). Риск: такой шум однажды уедет в коммит.
+#
+# Директивы ниже фиксируют политику правилом самого репозитория: от настроек
+# клонирующей машины больше ничего не зависит. Аналогично сделано в головном
+# репозитории BPMkit (.gitattributes от 27.08.2026).
+#
+# Индекс на 02.09 уже чист: 115 текстовых файлов i/lf, ноль CRLF — массовый
+# `git add --renormalize .` не требуется и намеренно не выполнялся.
+
+*  text=auto eol=lf
+
+# cmd.exe и PowerShell ломаются на LF в многострочных конструкциях и метках goto —
+# скрипты для Windows обязаны оставаться CRLF. Inno Setup (.iss) — по той же причине.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+*.iss  text eol=crlf
+
+# Шелл-скрипты и systemd-юниты исполняются на Linux: CR в shebang даёт "bad interpreter".
+*.sh       text eol=lf
+*.service  text eol=lf
+
+# Бинарные артефакты: ни diff, ни нормализация концов строк к ним не применяются.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.pdf    binary
+*.zip    binary
+*.mcpb   binary
+*.exe    binary
+*.dll    binary
+*.sqlite binary
+*.docx   binary
+*.xlsx   binary
+*.pptx   binary
