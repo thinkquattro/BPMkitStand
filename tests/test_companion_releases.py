@@ -53,8 +53,12 @@ def _blob(version: str, size: int = 8192) -> bytes:
 
     Не `b"x" * n`: побайтное сравнение после докачки на однородном буфере прошло бы даже
     при склейке кусков в неправильном порядке.
+
+    Начинается с `MZ` (GAP-212): тело релиза -- исполняемый файл Windows, и `apply_staged`
+    теперь это проверяет. Фикстура без PE-заголовка описывала бы артефакт, которого в канале
+    не бывает, и прятала бы сам гард от тестов подмены.
     """
-    out = bytearray()
+    out = bytearray(b"MZ")
     chunk = hashlib.sha256(f"BPMkit {version}".encode("utf-8")).digest()
     while len(out) < size:
         out += chunk
@@ -904,3 +908,63 @@ def test_mutex_not_detected_does_not_block_normal_apply(env, monkeypatch):
     assert calls == [1], "детект обязан быть вызван ровно один раз"
     assert result["applied"] is True
     assert Path(ctx.binary_path).read_bytes() == blob
+
+
+# ======================================================================================
+# 14. GAP-212: тип артефакта обязан подходить цели подмены
+# ======================================================================================
+def test_apply_staged_refuses_bundle_instead_of_binary(env):
+    """Издательский конвейер до 02.09.2026 публиковал `.mcpb` -- ZIP-бандл, -- а канал
+    подменяет им бинарь MCP. Подпись такого артефакта СОВЕРШЕННО ЧЕСТНАЯ, поэтому все
+    проверки подлинности проходят: единственное, что стоит между клиентом и архивом на
+    месте `bpmkit.exe`, -- этот гард."""
+    state, ctx = env
+    version = "0.307.0"
+    blob = _blob(version)
+    meta = _meta(version, blob, filename=f"bpmkit-{version}.mcpb")
+    sidecar = _sidecar(meta["filename"], blob)
+    client = FakeClient(meta, blob, sidecar=sidecar)
+    old_bytes = Path(ctx.binary_path).read_bytes()
+    releases.stage(client, state, ctx)
+
+    with pytest.raises(ChannelError) as excinfo:
+        releases.apply_staged(state, ctx)
+
+    assert excinfo.value.kind == "artifact_type_mismatch", (
+        "отдельный kind обязателен: это не файловая ошибка и не подделка, а «издатель "
+        "выложил не тот артефакт»")
+    assert Path(ctx.binary_path).read_bytes() == old_bytes, "установленная версия не тронута"
+    assert not list(_backups(ctx).iterdir()) if _backups(ctx).exists() else True, (
+        "отказ обязан случиться ДО бэкапа")
+    assert releases.staged_info(state) is not None, (
+        "подготовленное обновление не выбрасывается: чинить нечего на стороне клиента")
+
+
+def test_apply_staged_refuses_archive_renamed_to_exe(env):
+    """Расширение «правильное», содержимое -- нет: подпись и здесь сошлась бы, потому что
+    подписывают файл, а не его смысл."""
+    state, ctx = env
+    version = "0.307.0"
+    blob = b"PK\x03\x04" + _blob(version)[2:]
+    meta = _meta(version, blob)
+    sidecar = _sidecar(meta["filename"], blob)
+    client = FakeClient(meta, blob, sidecar=sidecar)
+    old_bytes = Path(ctx.binary_path).read_bytes()
+    releases.stage(client, state, ctx)
+
+    with pytest.raises(ChannelError) as excinfo:
+        releases.apply_staged(state, ctx)
+
+    assert excinfo.value.kind == "artifact_type_mismatch"
+    assert Path(ctx.binary_path).read_bytes() == old_bytes
+
+
+def test_artifact_type_mismatch_is_not_retriable_and_visible(env):
+    """Повтор на следующем тике бессмыслен (скачается тот же файл), а молчать нельзя:
+    молча выключенный канал обновлений -- ровно то состояние, которое не замечают."""
+    from standkit_companion import errors as companion_errors
+
+    title, retriable, user_visible = companion_errors.KIND_TITLES["artifact_type_mismatch"]
+    assert title
+    assert retriable is False
+    assert user_visible is True
