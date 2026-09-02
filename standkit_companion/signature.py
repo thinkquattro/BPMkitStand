@@ -59,7 +59,10 @@ SIG_FORMAT = "bpmkit-artifact-sig-v1"
 #: Публичный ключ ЛИЦЕНЗИЙ издателя (стандартный base64 от 32 сырых байт). Вшит в код
 #: намеренно: файл отзыва лицензий должен проверяться даже на машине, где поставка
 #: повреждена или ключ артефактов отсутствует. Это НЕ ключ артефактов.
-PUBLISHER_LICENSE_PUBKEY_B64 = "h6xtHY+JFiWFox6ZN4DRROzvJSjt0xdGcgO8cYIGPns="
+#: РОТАЦИЯ 02.09.2026 (плановая, перед первым коммерческим релизом): ключ 21.07 (h6xtHY...) выведён из
+#: обращения. Эта константа -- ДВОЙНИК licensing.PUBLISHER_PUBLIC_KEY_B64 в BPMkit-dev
+#: и обязана меняться ВМЕСТЕ с ней (процедура: docs/license_renewal_procedure.md §6 dev-репо).
+PUBLISHER_LICENSE_PUBKEY_B64 = "kF8zBEeracMEY3AT7zN6z7mcCiJjnLuLnMZnn8ilorU="
 
 #: Длина сырого Ed25519-ключа. В проекте везде Raw-кодирование, никаких PEM/DER.
 RAW_KEY_LEN = 32
