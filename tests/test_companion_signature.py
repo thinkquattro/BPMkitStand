@@ -518,6 +518,60 @@ def test_verify_revocations_uses_vendored_license_key_by_default():
     assert excinfo.value.kind == "revocations_signature_invalid"
 
 
+OTHER_SEED = bytes(range(32, 64))
+
+
+def _b64(raw: bytes) -> str:
+    return base64.b64encode(raw).decode("ascii")
+
+
+def test_revocation_pubkey_constant_is_raw_key_distinct_from_license_key():
+    """BE-02: вшитый ключ канала отзыва — валидный сырой Ed25519-ключ и НЕ совпадает с
+    лицензионным (разделение ключей — смысл всей правки)."""
+    rev = sigmod.decode_pubkey(sigmod.PUBLISHER_REVOCATION_PUBKEY_B64)
+    lic = sigmod.decode_pubkey(sigmod.PUBLISHER_LICENSE_PUBKEY_B64)
+    assert len(rev) == sigmod.RAW_KEY_LEN and len(lic) == sigmod.RAW_KEY_LEN
+    assert rev != lic
+
+
+def test_verify_revocations_default_accepts_revocation_channel_key(monkeypatch):
+    """BE-02 (аудит 01.09.2026): документ, подписанный ключом КАНАЛА ОТЗЫВА (так подписывает
+    сервер), обязан приниматься без явного pubkey_raw. До правки companion пробовал только
+    лицензионный ключ и отбрасывал КАЖДЫЙ серверный документ."""
+    monkeypatch.setattr(sigmod, "PUBLISHER_REVOCATION_PUBKEY_B64", _b64(_public_key(FAKE_SEED)))
+    monkeypatch.setattr(sigmod, "PUBLISHER_LICENSE_PUBKEY_B64", _b64(_public_key(OTHER_SEED)))
+    doc = _sign_revocations({"v": 1, "generated_at": "2026-09-01T00:00:00Z",
+                             "revoked": ["lic-0009"]}, seed=FAKE_SEED)
+    assert sigmod.verify_revocations_document(doc) == ["lic-0009"]
+
+
+def test_verify_revocations_default_falls_back_to_license_key(monkeypatch):
+    """Обратная совместимость: документ, подписанный лицензионным ключом (исторический канал),
+    по-прежнему принимается вторым кандидатом."""
+    monkeypatch.setattr(sigmod, "PUBLISHER_REVOCATION_PUBKEY_B64", _b64(_public_key(OTHER_SEED)))
+    monkeypatch.setattr(sigmod, "PUBLISHER_LICENSE_PUBKEY_B64", _b64(_public_key(FAKE_SEED)))
+    doc = _sign_revocations({"v": 1, "revoked": ["lic-0001"]}, seed=FAKE_SEED)
+    assert sigmod.verify_revocations_document(doc) == ["lic-0001"]
+
+
+def test_verify_revocations_default_rejects_foreign_key(monkeypatch):
+    """Документ, подписанный третьим ключом, не проходит ни по одному из двух кандидатов."""
+    monkeypatch.setattr(sigmod, "PUBLISHER_REVOCATION_PUBKEY_B64", _b64(_public_key(OTHER_SEED)))
+    monkeypatch.setattr(sigmod, "PUBLISHER_LICENSE_PUBKEY_B64", _b64(_public_key(bytes(range(64, 96)))))
+    doc = _sign_revocations({"v": 1, "revoked": ["lic-0001"]}, seed=FAKE_SEED)
+    with pytest.raises(ChannelError) as excinfo:
+        sigmod.verify_revocations_document(doc)
+    assert excinfo.value.kind == "revocations_signature_invalid"
+
+
+def test_verify_revocations_explicit_key_has_no_fallback(monkeypatch):
+    """Явный pubkey_raw — ровно один ключ: вшитые кандидаты НЕ подмешиваются."""
+    monkeypatch.setattr(sigmod, "PUBLISHER_REVOCATION_PUBKEY_B64", _b64(_public_key(FAKE_SEED)))
+    doc = _sign_revocations({"v": 1, "revoked": ["lic-0001"]}, seed=FAKE_SEED)
+    with pytest.raises(ChannelError):
+        sigmod.verify_revocations_document(doc, _public_key(OTHER_SEED))
+
+
 def test_verify_revocations_missing_signature():
     with pytest.raises(ChannelError) as excinfo:
         sigmod.verify_revocations_document(
