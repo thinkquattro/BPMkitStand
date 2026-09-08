@@ -326,7 +326,10 @@ class CompanionRunner:
 
     # -- расписание --------------------------------------------------------------------
     def _interval_of(self, settings, cycle: str) -> float:
-        cycle_settings = getattr(settings, cycle, None)
+        # GAP-241: у отзыва больше нет своего интервала в настройках — он идёт с той же
+        # частотой, что и паттерны (см. CompanionSettings.revocations и докстринг класса).
+        source_cycle = "patterns" if cycle == "revocations" else cycle
+        cycle_settings = getattr(settings, source_cycle, None)
         try:
             value = float(getattr(cycle_settings, "interval_sec", 0) or 0)
         except (TypeError, ValueError):
@@ -334,9 +337,18 @@ class CompanionRunner:
         return max(MIN_INTERVAL_SEC, value)
 
     def _enabled(self, settings, cycle: str) -> bool:
-        """Включён ли цикл: главный рубильник И флаг самого цикла."""
+        """Включён ли цикл: главный рубильник И флаг самого цикла.
+
+        GAP-241: отзыв (``revocations``) — ИСКЛЮЧЕНИЕ. Собственный флаг цикла
+        (``settings.revocations.enabled``) больше не спрашивается: отзыв обязан
+        тикать вместе с главным рубильником канала БЕЗ отдельной настройки — риск
+        того, что человек выключит именно его и продолжит применять паттерны без
+        проверки списка отзыва, перевешивает любую пользу от отдельного тумблера.
+        """
         if not bool(getattr(settings, "enabled", False)):
             return False
+        if cycle == "revocations":
+            return True
         return bool(getattr(getattr(settings, cycle, None), "enabled", False))
 
     def _jittered(self, interval: float) -> float:
@@ -633,7 +645,19 @@ class CompanionRunner:
             if action == "sync_patterns":
                 return patterns.sync(session.client, self._state, session.ctx, settings)
             if action == "check_update":
-                return releases.check(session.client, self._state, session.ctx)
+                # GAP-241: «Проверить обновление» = проверка И подготовка найденного.
+                # Два раздельных нажатия («проверить», потом «подготовить») были чистой
+                # церемонией: ни одно из них не подменяет бинарь — скачанный файл лежит в
+                # стейджинге до явного «Применить» (SECURITY.md §4.1). Отдельное действие
+                # `stage_update` остаётся рабочим: им адресуются к КОНКРЕТНОЙ версии.
+                check = releases.check(session.client, self._state, session.ctx)
+                staged = None
+                if check.get("available"):
+                    staged = releases.stage(session.client, self._state, session.ctx,
+                                            check.get("target") or "latest")
+                result = dict(check)
+                result["staged"] = staged
+                return result
             if action == "stage_update":
                 return releases.stage(session.client, self._state, session.ctx,
                                       version or "latest")

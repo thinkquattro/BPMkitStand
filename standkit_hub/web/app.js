@@ -83,17 +83,134 @@
     return data;
   }
 
-  // --- вкладки ---
+  // --- сцены и разделы настроек ---
+  //
+  // Вкладок больше нет: экранов ровно два — «Стенды» (главный) и «Настройки»
+  // (шестерёнка в шапке). Раньше пять равноправных вкладок ставили «Локальный
+  // агент», нужный единицам, вровень со списком стендов, ради которого
+  // диспетчер и открывают. Разделы настроек — вертикальная рейка внутри
+  // второго экрана, а не свёрнутые группы: список разделов виден целиком.
 
-  function setupTabs() {
-    document.querySelectorAll(".tab-btn").forEach((btn) => {
+  const SCENES = ["stands", "settings"];
+
+  function currentScene() {
+    const el = document.querySelector(".scene.active");
+    if (!el) return "stands";
+    return el.id === "scene-settings" ? "settings" : "stands";
+  }
+
+  function showScene(name) {
+    const target = SCENES.indexOf(name) >= 0 ? name : "stands";
+    document.querySelectorAll(".scene").forEach((el) => {
+      el.classList.toggle("active", el.id === `scene-${target}`);
+    });
+    const btn = document.getElementById("btn-settings");
+    if (btn) btn.classList.toggle("active", target === "settings");
+  }
+
+  function selectSettingsPane(name) {
+    document.querySelectorAll("#settings-rail button").forEach((b) => {
+      b.classList.toggle("active", b.dataset.pane === name);
+    });
+    document.querySelectorAll(".settings-pane").forEach((pane) => {
+      pane.classList.toggle("active", pane.dataset.pane === name);
+    });
+  }
+
+  function openSettings(pane) {
+    showScene("settings");
+    if (pane) selectSettingsPane(pane);
+  }
+
+  function setupScenes() {
+    document.getElementById("settings-rail").addEventListener("click", (evt) => {
+      const btn = evt.target.closest("button[data-pane]");
+      if (btn) selectSettingsPane(btn.dataset.pane);
+    });
+    document.getElementById("btn-settings").addEventListener("click", () => {
+      showScene(currentScene() === "settings" ? "stands" : "settings");
+    });
+    document.getElementById("brand-btn").addEventListener("click", () => showScene("stands"));
+    // «О программе» больше не модалка: та же информация лежит разделом
+    // настроек, рядом с версией MCP и путём к CLI.
+    document.getElementById("about-btn").addEventListener("click", () => openSettings("about"));
+    // Любая кнопка «Открыть лицензию» — из баннера, из модалки, откуда угодно.
+    document.querySelectorAll("[data-open-license]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-        document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
-        btn.classList.add("active");
-        document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
+        closeUpdatesDialog();
+        closeLicenseCritModal();
+        openSettings("license");
       });
     });
+  }
+
+  // --- тост (обратная связь по действиям окна обновлений и лицензии) ---
+
+  let toastTimer = null;
+
+  function toast(message) {
+    const el = document.getElementById("toast");
+    if (!el) return;
+    el.textContent = message;
+    el.classList.add("toast-visible");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("toast-visible"), 4000);
+  }
+
+  // Спиннер прямо на нажатой кнопке: действия канала ходят в сеть и занимают
+  // секунды — без видимой занятости кнопку жмут повторно.
+  function setButtonBusy(btn, label) {
+    if (!btn) return;
+    if (btn.dataset.idleLabel === undefined) btn.dataset.idleLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "";
+    const spin = document.createElement("span");
+    spin.className = "btn-spinner";
+    btn.appendChild(spin);
+    btn.appendChild(document.createTextNode(label));
+  }
+
+  function clearButtonBusy(btn) {
+    if (!btn || btn.dataset.idleLabel === undefined) return;
+    btn.textContent = btn.dataset.idleLabel;
+    delete btn.dataset.idleLabel;
+    btn.disabled = false;
+  }
+
+  // --- даты ---
+  //
+  // Везде, где показывается срок лицензии, формат один: dd.mm.yyyy. Локаль
+  // браузера здесь не спрашивается намеренно — дата в баннере, в карточке и в
+  // строке состояния обязана выглядеть одинаково, иначе их не сопоставить.
+
+  function formatDate(value) {
+    if (!value) return "";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return String(value);
+    const dd = String(parsed.getDate()).padStart(2, "0");
+    const mm = String(parsed.getMonth() + 1).padStart(2, "0");
+    return `${dd}.${mm}.${parsed.getFullYear()}`;
+  }
+
+  /** «1 день / 2 дня / 5 дней» — иначе баннер говорит «через 3 дней». */
+  function pluralDays(count) {
+    const n = Math.abs(Math.trunc(count));
+    const tens = n % 100;
+    if (tens >= 11 && tens <= 14) return `${n} дней`;
+    const ones = n % 10;
+    if (ones === 1) return `${n} день`;
+    if (ones >= 2 && ones <= 4) return `${n} дня`;
+    return `${n} дней`;
+  }
+
+  function pluralPatterns(count) {
+    const n = Math.abs(Math.trunc(count));
+    const tens = n % 100;
+    if (tens >= 11 && tens <= 14) return `${n} паттернов`;
+    const ones = n % 10;
+    if (ones === 1) return `${n} паттерн`;
+    if (ones >= 2 && ones <= 4) return `${n} паттерна`;
+    return `${n} паттернов`;
   }
 
   // --- тема (light/dark/auto) ---
@@ -194,7 +311,11 @@
     if (!btn) return;
 
     const isCompact = currentView() === "compact";
-    btn.textContent = isCompact ? "▣" : "▭";
+    // Подпись кнопки — только title/aria-label: сама иконка инлайновый SVG в
+    // разметке, и подменять её текстовым глифом («▣»/«▭») значило бы вернуть
+    // зависимость от шрифта системы, из-за которой шапка выглядела разной на
+    // разных машинах.
+    btn.classList.toggle("active", isCompact);
     btn.title = isCompact ? "Обычный режим" : "Компактный режим";
     btn.setAttribute("aria-label", btn.title);
 
@@ -212,42 +333,31 @@
     });
   }
 
-  // --- модалка "О программе" ---
+  // --- раздел «О программе» ---
+  //
+  // Раньше это была модалка с кнопкой ⓘ. Теперь — раздел настроек: версия
+  // диспетчера, версия MCP, адрес и редакция стоят рядом с полем «CLI BPMkit»
+  // и карточкой лицензии, то есть ровно там, где их и ищут, когда что-то не
+  // сходится. Значения проставляются textContent (см. шапку index.html).
 
-  let aboutVersionLoaded = false;
+  let hubVersion = "";
 
-  function openAboutModal() {
-    const overlay = document.getElementById("about-modal-overlay");
-    overlay.hidden = false;
-    if (!aboutVersionLoaded) {
-      const versionEl = document.getElementById("about-modal-version");
-      apiGet("/api/version")
-        .then((data) => {
-          versionEl.textContent = data.version || "н/д";
-          aboutVersionLoaded = true;
-        })
-        .catch((e) => {
-          versionEl.textContent = `ошибка: ${describeApiError(e)}`;
-        });
-    }
-  }
-
-  function closeAboutModal() {
-    document.getElementById("about-modal-overlay").hidden = true;
-  }
-
-  function setupAboutModal() {
-    document.getElementById("about-btn").addEventListener("click", openAboutModal);
-    document.getElementById("about-modal-close-btn").addEventListener("click", closeAboutModal);
-    document.getElementById("about-modal-close-footer-btn").addEventListener("click", closeAboutModal);
-    // Клик по затемнённому фону закрывает модалку — но только если нажатие
-    // началось на фоне (см. bindOverlayDismiss: защита от выделения текста).
-    bindOverlayDismiss(document.getElementById("about-modal-overlay"), closeAboutModal);
-    document.addEventListener("keydown", (evt) => {
-      if (evt.key === "Escape" && !document.getElementById("about-modal-overlay").hidden) {
-        closeAboutModal();
+  async function loadVersionInfo() {
+    const el = document.getElementById("about-version");
+    const originEl = document.getElementById("about-origin");
+    if (originEl) originEl.textContent = window.location.origin;
+    try {
+      const data = await apiGet("/api/version");
+      hubVersion = data.version || "";
+      el.textContent = hubVersion ? `BPMkitStand ${hubVersion}` : "н/д";
+      const edition = document.getElementById("about-edition");
+      if (edition) {
+        edition.textContent =
+          data.edition === "companion" ? "с каналом обновлений" : "свободная";
       }
-    });
+    } catch (e) {
+      el.textContent = `ошибка: ${describeApiError(e)}`;
+    }
   }
 
   // --- модалка "Зарегистрировать стенд" ---
@@ -668,7 +778,74 @@
     if (!url) {
       return `<span class="value-cell ${cls}${reason.cls}"${reason.attr}>—</span>`;
     }
-    return `<a class="value-cell value-link ${cls}${reason.cls}" href="${escapeAttr(url)}"${reason.attr} target="_blank" rel="noopener">${escapeHtml(url)}</a>`;
+    // Показываем host:port, а не полный URL: схема и завершающий слэш в колонке
+    // одинаковы у всех строк и съедают ширину, из-за которой длинные имена
+    // хостов резались многоточием. Полный адрес и причина отказа — в title.
+    const title = [url, http && http.reason].filter(Boolean).join(" — ");
+    return `<a class="value-cell value-link ${cls}${reason.cls}" href="${escapeAttr(url)}" title="${escapeAttr(title)}" target="_blank" rel="noopener">${escapeHtml(shortHttpLabel(url))}</a>`;
+  }
+
+  /** "http://host:5001/" → "host:5001" (полный адрес остаётся в title). */
+  function shortHttpLabel(url) {
+    try {
+      const parsed = new URL(url);
+      return parsed.host || url;
+    } catch (e) {
+      return url;
+    }
+  }
+
+  // --- чип хостинга и иконка движка БД ---
+  //
+  // И то и другое — мелкая подпись рядом с уже показанным значением, а не новая
+  // колонка: в таблице их семь, восьмая не помещается ни в компактное окно, ни
+  // в ноутбучный экран. Поля host_kind/db_type приходят с сервера в /api/stands;
+  // когда их нет (старый агент, ответ без этих ключей), подпись просто не
+  // рисуется — молча и без «unknown».
+
+  const HOST_KIND_CHIPS = {
+    kestrel: [".NET", "Kestrel (.NET)"],
+    iis: ["IIS", "IIS"],
+    docker: ["Docker", "Docker"],
+    k8s: ["K8s", "Kubernetes"],
+  };
+
+  const DB_ICONS = {
+    postgres:
+      '<svg class="db-ico" viewBox="0 0 16 16" aria-hidden="true"><ellipse cx="8" cy="4" rx="5.5" ry="2.2"/><path d="M2.5 4v8c0 1.2 2.5 2.2 5.5 2.2s5.5-1 5.5-2.2V4"/><path d="M2.5 8c0 1.2 2.5 2.2 5.5 2.2s5.5-1 5.5-2.2"/></svg>',
+    mssql:
+      '<svg class="db-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M5.5 10.5c.5.7 1.3 1 2.3 1 1.3 0 2.2-.6 2.2-1.6 0-2.2-4.3-1-4.3-3.2 0-1 .9-1.7 2.1-1.7.9 0 1.7.4 2.1 1"/></svg>',
+  };
+
+  const DB_ENGINE_LABELS = { postgres: "PostgreSQL", mssql: "MS SQL Server" };
+
+  function hostChip(s) {
+    const kind = s && s.host_kind;
+    const chip = HOST_KIND_CHIPS[kind];
+    if (!chip) return "";
+    return ` <span class="host-chip" title="Хостинг: ${escapeAttr(chip[1])}">${escapeHtml(chip[0])}</span>`;
+  }
+
+  function standNameCell(s) {
+    return `<b class="stand-name">${escapeHtml(s.name)}</b>${hostChip(s)}`;
+  }
+
+  // Транспорт agent значит «стендом управляет агент на другой машине» — без
+  // имени этой машины строка не отвечает на единственный вопрос, ради которого
+  // на неё смотрят: где стенд физически живёт.
+  function transportCell(s) {
+    if (s.transport !== "agent") return escapeHtml(s.transport || "—");
+    const host = s.agent || (s.process && s.process.agent) || "";
+    return host ? `агент · ${escapeHtml(host)}` : "агент";
+  }
+
+  function dbCell(s) {
+    const db = s.db || {};
+    const engine = db.type || s.db_type || "";
+    const icon = DB_ICONS[engine] || "";
+    const label = DB_ENGINE_LABELS[engine] || "";
+    const title = label ? ` title="${escapeAttr(label)}"` : "";
+    return `<span class="value-cell db-cell ${valueClass(db.state)}"${title}>${icon}${escapeHtml(db.name || "—")}</span>`;
   }
 
   // Ячейка Redis: показывает НОМЕР базы Redis стенда (тот же, что фигурирует
@@ -824,6 +1001,7 @@
     // Здесь, а не в refreshStands: применение данных приходит и из SSE.
     updateAgentBlockVisibility(lastStandsData);
     updateSnapshotAge(data);
+    updateStatuslineStands(lastStandsData);
   }
 
   // Возвращает true, если данные реально обновились (нужно вызывающему,
@@ -912,17 +1090,16 @@
     tbody.innerHTML = "";
     stands.forEach((s) => {
       const http = s.http || {};
-      const db = s.db || {};
       const redis = s.redis || {};
       const tr = document.createElement("tr");
       tr.dataset.name = s.name;
       if (s.name === selectedStand) tr.classList.add("selected");
       tr.innerHTML = `
-        <td>${escapeHtml(s.name)}</td>
-        <td>${escapeHtml(s.transport)}</td>
+        <td>${standNameCell(s)}</td>
+        <td>${transportCell(s)}</td>
         <td>${processCell(s)}</td>
         <td>${httpCell(http)}</td>
-        <td>${valueSpan(db.name || "—", db.state)}</td>
+        <td>${dbCell(s)}</td>
         <td>${redisCell(redis)}</td>
         <td class="row-actions">${actionButtons(s)}</td>
       `;
@@ -1228,12 +1405,11 @@
     if (!sseHealthy) refreshStands();
     refreshAgentStatus();
     if (selectedStand) refreshState();
-    // Канал обновлений опрашивается, только когда его вкладка открыта: тики у
-    // него редкие (минуты и сутки), и дёргать статус в фоне ради страницы, на
-    // которую никто не смотрит, — расход впустую. Значок «нужен перезапуск»
-    // при этом не теряется: он зажигается первым запросом при загрузке и после
-    // каждого действия.
-    if (companionAvailable && companionTabIsActive()) {
+    // Канал обновлений опрашивается, только когда его окно открыто: тики у него
+    // редкие (часы и сутки), и дёргать статус в фоне ради закрытого диалога —
+    // расход впустую. Бейдж на кнопке шапки при этом не теряется: он зажигается
+    // первым запросом при загрузке и после каждого действия.
+    if (companionAvailable && updatesDialogIsOpen()) {
       refreshCompanionStatus({ quiet: true });
     }
   }
@@ -1391,17 +1567,21 @@
     });
   }
 
-  // --- канал обновлений издателя (вкладка «Обновления») ---
+  // --- канал обновлений издателя (окно «Обновления») ---
   //
   // Ядро дашборда ничего не знает о платной редакции: оно спрашивает
   // /api/companion/status и рисует то, что пришло. Свободная редакция отвечает
   // 503 с человеческим текстом — это не ошибка связи, а честный ответ «такой
-  // возможности здесь нет», и показывается он как объяснение, а не как сбой.
+  // возможности здесь нет».
+  //
+  // Экран канала свёрнут из вкладки с тремя карточками-«циклами» в одно окно с
+  // двумя строками: паттерны и MCP-сервер. Цикл отзыва лицензий из интерфейса
+  // убран целиком (GAP-241) — он всегда включён и тикает сам; показывать
+  // пользователю карточку, у которой нет ни одного его решения, незачем.
   //
   // Значения проставляются ТОЛЬКО через textContent по статичной разметке (см.
-  // index.html): в карточки едут строки, пришедшие от издателя — описания
-  // отказов, номера версий, пути на диске. Сборка их через innerHTML означала бы
-  // исполнение чужой разметки в окне управления процессами.
+  // index.html): в окно едут строки, пришедшие от издателя — описания отказов,
+  // номера версий, пути на диске.
 
   const COMPANION_ACTION_PATHS = {
     sync_patterns: "/api/companion/sync",
@@ -1412,161 +1592,195 @@
     refresh_revocations: "/api/companion/revocations",
   };
 
+  // Подпись занятой кнопки: «Обновляем…» честнее универсального «Подождите» —
+  // человек видит, ЧТО именно сейчас делается его нажатием.
+  const COMPANION_ACTION_BUSY = {
+    sync_patterns: "Обновляем…",
+    check_update: "Проверяем…",
+    apply_update: "Устанавливаем…",
+    rollback: "Откатываем…",
+  };
+
+  const COMPANION_ACTION_DONE = {
+    sync_patterns: "Паттерны обновлены",
+    check_update: "Проверка обновлений выполнена",
+    apply_update: "MCP обновлён",
+    rollback: "Откат выполнен",
+  };
+
   // Почему действие сейчас недоступно. Кнопка не прячется — она выключается и
-  // объясняется: спрятанная кнопка читается как «функции нет вовсе», и
-  // пользователь идёт искать её в настройках и в поддержке.
+  // объясняется: спрятанная кнопка читается как «функции нет вовсе».
   const COMPANION_ACTION_REASONS = {
-    apply_update: "Устанавливать нечего: сначала подготовьте обновление кнопкой «Подготовить»",
+    apply_update: "Устанавливать нечего: новая версия ещё не скачана",
     rollback: "Откатываться не на что: канал ещё не устанавливал обновлений на этой машине",
   };
   const COMPANION_DISABLED_REASON =
-    "Канал обновлений выключен в настройках (вкладка «Настройки» → «Канал обновлений»)";
-
-  // Человеческие подписи статусов цикла плюс класс цвета из общей палитры.
-  const COMPANION_STATUS_LABELS = {
-    ok: ["выполнен успешно", "value-ok"],
-    skipped: ["пропущен — делать нечего", "value-muted"],
-    error: ["завершился ошибкой", "value-down"],
-    never: ["ещё не выполнялся", "value-muted"],
-    disabled: ["выключен в настройках", "value-muted"],
-    halted: ["остановлен до вмешательства", "value-unknown"],
-  };
-
-  // Отдельная подпись действия для строки результата — чтобы сообщение об
-  // успехе звучало как ответ на нажатую кнопку, а не как отчёт системы.
-  const COMPANION_ACTION_DONE = {
-    sync_patterns: "Паттерны синхронизированы",
-    check_update: "Проверка обновления выполнена",
-    stage_update: "Обновление подготовлено",
-    apply_update: "Обновление установлено",
-    rollback: "Откат выполнен",
-    refresh_revocations: "Список отзывов обновлён",
-  };
+    "Канал обновлений выключен в настройках (Настройки → Обновления)";
 
   let companionAvailable = true;
   let companionBusy = false;
+  let lastCompanionStatus = null;
 
-  function companionEl(id) {
+  function byId(id) {
     return document.getElementById(id);
   }
 
-  function companionCard(cycle) {
-    return document.querySelector(`.companion-card[data-cycle="${cycle}"]`);
+  function updatesDialogIsOpen() {
+    const overlay = byId("updates-overlay");
+    return !!(overlay && !overlay.hidden);
   }
 
-  function setCompanionField(cycle, role, text, colorClass) {
-    const card = companionCard(cycle);
-    if (!card) return;
-    const el = card.querySelector(`[data-role="${role}"]`);
-    if (!el) return;
-    el.textContent = text;
-    el.classList.remove("value-ok", "value-down", "value-unknown", "value-muted");
-    if (colorClass) el.classList.add(colorClass);
+  function openUpdatesDialog() {
+    const overlay = byId("updates-overlay");
+    if (!overlay) return;
+    overlay.hidden = false;
+    refreshCompanionStatus({ quiet: true });
   }
 
-  function formatCompanionTime(value) {
-    // Метки состояния — UTC секундной точности с Z. Показываем локальное время:
-    // «когда это было» пользователь сверяет со своими часами, а не с UTC.
+  function closeUpdatesDialog() {
+    const overlay = byId("updates-overlay");
+    if (overlay) overlay.hidden = true;
+  }
+
+  /** «обновлено 2 ч назад» / «обновлено 08.09.2026 13:40» — по возрасту метки. */
+  function describeMoment(value) {
     if (!value) return "ещё не было";
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) return String(value);
+    const ageSec = (Date.now() - parsed.getTime()) / 1000;
+    if (ageSec < 90) return "только что";
+    if (ageSec < 86400) return `${formatAge(ageSec)} назад`;
     return parsed.toLocaleString("ru-RU");
   }
 
-  function formatCompanionEta(seconds) {
-    if (seconds === null || seconds === undefined) return "по расписанию не запускается";
-    const value = Number(seconds);
-    if (!Number.isFinite(value)) return "—";
-    if (value <= 1) return "вот-вот";
-    return `через ${formatAge(value)}`;
+  function releasesBlock(status) {
+    return ((status && status.state) || {}).releases || {};
   }
 
-  function renderCompanionCycle(cycle, status) {
-    const cycles = (status && status.cycles) || {};
-    const state = (status && status.state) || {};
-    const info = cycles[cycle] || {};
-    const block = state[cycle] || {};
+  function patternsBlock(status) {
+    return ((status && status.state) || {}).patterns || {};
+  }
 
-    const card = companionCard(cycle);
-    const stateEl = card ? card.querySelector('[data-role="cycle-enabled"]') : null;
-    if (stateEl) {
-      const enabled = info.enabled !== false;
-      stateEl.textContent = enabled ? "по расписанию" : "расписание выключено";
-      stateEl.classList.toggle("companion-cycle-off", !enabled);
+  /** Есть ли что показать бейджем на кнопке шапки: новая версия или перезапуск. */
+  function companionHasNews(status) {
+    if (!status) return false;
+    const rel = releasesBlock(status);
+    if (rel.restart_required) return true;
+    if (rel.staged_version) return true;
+    const latest = rel.known_latest;
+    const current = rel.current_version;
+    return !!(latest && current && String(latest) !== String(current));
+  }
+
+  function renderUpdatesBadge(status) {
+    const badge = byId("updates-badge");
+    if (!badge) return;
+    badge.hidden = !companionHasNews(status);
+  }
+
+  function setDetail(id, text) {
+    const node = byId(id);
+    if (!node) return;
+    node.textContent = text || "";
+    node.hidden = !text;
+  }
+
+  function renderPatternsRow(status) {
+    const block = patternsBlock(status);
+    const summary = (status && status.patterns) || {};
+    const version = summary.version || block.latest_version || "";
+    const count = Number(summary.count ?? block.applied_count ?? 0);
+    const parts = [];
+    if (version) parts.push(`Версия базы ${version}`);
+    if (count) parts.push(pluralPatterns(count));
+    parts.push(`обновлено ${describeMoment(block.last_run_at)}`);
+    byId("upd-patterns-meta").textContent = version || count
+      ? parts.join(" · ")
+      : `Паттерны ещё не синхронизировались (${describeMoment(block.last_run_at)})`;
+    const cycle = ((status && status.cycles) || {}).patterns || {};
+    setDetail("upd-patterns-detail",
+      cycle.halted ? (cycle.halt_reason || "повторы остановлены до вмешательства")
+                   : (block.status === "error" ? String(block.detail || "") : ""));
+  }
+
+  function renderMcpRow(status) {
+    const rel = releasesBlock(status);
+    const current = rel.current_version || "";
+    const latest = rel.known_latest || "";
+    const staged = rel.staged_version || "";
+    const hasNew = !!(latest && current && String(latest) !== String(current));
+
+    const avail = byId("upd-mcp-avail");
+    avail.hidden = !(hasNew || staged);
+    if (!avail.hidden) avail.textContent = `доступна ${staged || latest}`;
+
+    const parts = [];
+    parts.push(current ? `Установлено ${current}` : "Установленная версия неизвестна");
+    if (staged) parts.push(`скачано ${staged}`);
+    else if (hasNew) parts.push(`доступно ${latest}`);
+    else if (current) parts.push("это последняя версия");
+    if (rel.last_check_at) parts.push(`проверено ${describeMoment(rel.last_check_at)}`);
+    byId("upd-mcp-meta").textContent = parts.join(" · ");
+
+    byId("upd-mcp-desc").textContent = staged
+      ? "Новая версия скачана и проверена. После установки перезапустите Claude Desktop — иначе продолжит работать прежняя версия."
+      : "Новая версия проверяется и скачивается заранее; подмена файла происходит только по вашей команде.";
+
+    setDetail("upd-mcp-detail", rel.status === "error" ? String(rel.detail || "") : "");
+
+    const install = byId("upd-install-btn");
+    // Пока кнопка занята, её подпись держит setButtonBusy — перерисовка статуса
+    // не имеет права затереть спиннер (иначе он исчезает на середине действия).
+    if (!companionBusy && install.dataset.idleLabel === undefined) {
+      install.textContent = staged ? `Установить ${staged}` : "Установить";
     }
 
-    // Блокировка цикла (не-retriable отказ) важнее последнего статуса: она
-    // объясняет, почему повторов больше не будет, пока человек не вмешается.
-    let key = String(info.last_status || block.status || "never");
-    if (info.halted) key = "halted";
-    else if (info.enabled === false) key = "disabled";
-    const [label, colorClass] = COMPANION_STATUS_LABELS[key] || [key, "value-muted"];
-    setCompanionField(cycle, "last-status", label, colorClass);
-    setCompanionField(cycle, "last-time",
-      formatCompanionTime(block.last_run_at || block.last_check_at));
-    setCompanionField(cycle, "next-run",
-      info.enabled === false ? "—" : formatCompanionEta(info.next_run_in_sec));
+    // «Откатить» показывается только когда откат реально возможен: кнопка,
+    // которая всегда выключена, — это вопрос без ответа, а не подсказка.
+    byId("upd-rollback-btn").hidden = !rel.rollback_available;
 
-    const detailEl = card ? card.querySelector('[data-role="detail"]') : null;
-    if (detailEl) {
-      const detail = info.halted
-        ? `${info.halt_reason || "повтор бессмысленен"} — нажмите кнопку действия, чтобы попробовать снова`
-        : String(info.last_detail || block.detail || "");
-      detailEl.textContent = detail;
-      detailEl.hidden = !detail;
+    const note = byId("upd-restart-note");
+    note.hidden = !rel.restart_required;
+    if (rel.restart_required) {
+      byId("upd-restart-detail").textContent = rel.current_version
+        ? `, чтобы начала работать версия ${rel.current_version}: перезагрузка плагина MCP-сервер заново не поднимает.`
+        : ", чтобы начала работать новая версия: перезагрузка плагина MCP-сервер заново не поднимает.";
+    }
+
+    const mcpVersionEl = byId("about-mcp-version");
+    if (mcpVersionEl) mcpVersionEl.textContent = current || "как в поставке";
+    // Строка состояния внизу: версия MCP известна только каналу обновлений;
+    // пока её нет — сегмент скрыт, а не показывает прочерк.
+    const slMcp = byId("sl-mcp");
+    const slMcpVersion = byId("sl-mcp-version");
+    if (slMcp && slMcpVersion) {
+      slMcpVersion.textContent = current || "—";
+      slMcp.hidden = !current;
     }
   }
 
   function renderCompanionStatus(status) {
-    const patterns = (status.state && status.state.patterns) || {};
-    const releases = (status.state && status.state.releases) || {};
-    const revocations = (status.state && status.state.revocations) || {};
-    const settings = status.settings || {};
+    lastCompanionStatus = status;
+    companionAvailable = true;
+    byId("updates-note").hidden = true;
 
-    companionEl("companion-cards").hidden = false;
-    companionEl("companion-unavailable").hidden = true;
-
-    const enabled = status.enabled !== false && settings.enabled !== false;
-    const editionEl = companionEl("companion-edition");
-    editionEl.textContent = enabled
-      ? "Канал обновлений: включён"
-      : "Канал обновлений: выключен в настройках";
-    editionEl.classList.toggle("companion-edition-off", !enabled);
-
-    ["patterns", "releases", "revocations"].forEach((cycle) =>
-      renderCompanionCycle(cycle, status));
-
-    setCompanionField("patterns", "applied-count", String(patterns.applied_count ?? "—"));
-    setCompanionField("patterns", "patterns-root", patterns.root || "по умолчанию, из поставки MCP");
-    setCompanionField("releases", "current-version", releases.current_version || "как в поставке");
-    setCompanionField("releases", "known-latest", releases.known_latest || "неизвестна — проверок ещё не было");
-    setCompanionField(
-      "releases",
-      "staged-version",
-      releases.staged_version
-        ? `${releases.staged_version}${releases.staged_signed === false ? " (подпись не подтверждена)" : ""}`
-        : "нет",
-      releases.staged_version ? "value-ok" : null
-    );
-    setCompanionField("revocations", "revoked-count", String(revocations.revoked_count ?? "—"));
-
-    // Цикл релизов выключен — говорим об этом честно и объясняем, от чего
-    // зависит его включение (ключ подписи артефактов и HTTPS у издателя).
-    const releasesOff = companionEl("companion-releases-off");
-    if (releasesOff) {
-      const releasesEnabled = ((status.cycles || {}).releases || {}).enabled;
-      releasesOff.hidden = releasesEnabled === true;
+    const enabled = status.enabled !== false && (status.settings || {}).enabled !== false;
+    const note = byId("updates-note");
+    if (!enabled) {
+      note.hidden = false;
+      note.textContent = COMPANION_DISABLED_REASON + ".";
     }
 
+    renderPatternsRow(status);
+    renderMcpRow(status);
+    renderUpdatesBadge(status);
     updateCompanionActions(status);
-    updateCompanionRestartBanner(releases);
 
-    const contextEl = companionEl("companion-context");
-    const context = status.context || {};
-    const parts = [];
-    if (context.detail) parts.push(`Лицензионный контекст: ${context.detail}`);
-    if (status.last_error) parts.push(`Последний сбой канала: ${status.last_error}`);
-    contextEl.textContent = parts.join(" · ");
+    const rel = releasesBlock(status);
+    byId("updates-checked-at").textContent = rel.last_check_at
+      ? `проверено ${describeMoment(rel.last_check_at)}`
+      : "";
+    updateStatuslinePatterns(status);
   }
 
   function updateCompanionActions(status) {
@@ -1588,47 +1802,31 @@
     });
   }
 
-  function updateCompanionRestartBanner(releases) {
-    const banner = companionEl("companion-restart-banner");
-    const attention = companionEl("companion-tab-attention");
-    const required = !!(releases && releases.restart_required);
-    if (banner) banner.hidden = !required;
-    // Значок на кнопке вкладки: баннер лежит внутри панели, а знать о
-    // необходимости перезапуска нужно с любой вкладки.
-    if (attention) attention.hidden = !required;
-    const detail = companionEl("companion-restart-detail");
-    if (detail && required && releases && releases.current_version) {
-      detail.textContent =
-        `Установлена версия ${releases.current_version}. Она начнёт работать только после ` +
-        "полного перезапуска Claude Desktop: перезагрузка плагина MCP-сервер заново не поднимает.";
-    }
-  }
-
   function showCompanionUnavailable(message) {
     companionAvailable = false;
-    companionEl("companion-cards").hidden = true;
-    const editionEl = companionEl("companion-edition");
-    editionEl.textContent = "Свободная редакция";
-    editionEl.classList.add("companion-edition-off");
-    const note = companionEl("companion-unavailable");
-    note.hidden = false;
-    // Точку в конце ставим сами: серверный текст — это заголовок причины, он
-    // приходит без завершающей точки, и без неё две фразы слипаются в одну.
-    const reason = String(message || "").trim().replace(/[.\s]+$/, "");
-    note.textContent =
-      `${reason}. Канал доставки обновлений издателя (паттерны, обновления MCP, отзыв ` +
-      "лицензий) входит в платную редакцию BPMkit; управление стендами работает без него.";
-    companionEl("companion-tab-attention").hidden = true;
+    lastCompanionStatus = null;
+    const note = byId("updates-note");
+    if (note) {
+      // Точку в конце ставим сами: серверный текст — это заголовок причины, он
+      // приходит без завершающей точки, и без неё две фразы слипаются в одну.
+      const reason = String(message || "").trim().replace(/[.\s]+$/, "");
+      note.hidden = false;
+      note.textContent =
+        `${reason}. Канал доставки обновлений издателя (паттерны и обновления MCP) ` +
+        "входит в платную редакцию BPMkit; управление стендами работает без него.";
+    }
+    const badge = byId("updates-badge");
+    if (badge) badge.hidden = true;
+    updateStatuslinePatterns(null);
   }
 
   async function refreshCompanionStatus(options) {
     const quiet = !!(options && options.quiet);
-    const errorEl = companionEl("companion-error");
+    const errorEl = byId("updates-error");
     if (!errorEl) return;
     if (!quiet) errorEl.textContent = "";
     try {
       const data = await apiGet("/api/companion/status");
-      companionAvailable = true;
       renderCompanionStatus(data);
     } catch (e) {
       if (e && e.status === 503 && e.data && e.data.edition === "free") {
@@ -1641,31 +1839,34 @@
     }
   }
 
-  async function runCompanionAction(action) {
+  async function runCompanionAction(action, btn) {
     const path = COMPANION_ACTION_PATHS[action];
     if (!path) return;
-    const errorEl = companionEl("companion-error");
-    const statusEl = companionEl("companion-status-text");
+    const errorEl = byId("updates-error");
     errorEl.textContent = "";
-    statusEl.textContent = "Выполняется…";
+    byId("updates-check-status").textContent = "";
     companionBusy = true;
+    setButtonBusy(btn, COMPANION_ACTION_BUSY[action] || "Выполняется…");
     updateCompanionActions(null);
     try {
-      // Версию не запрашиваем: «Подготовить» и «Откатить» без неё берут
-      // последнюю доступную и последний бэкап соответственно — ровно то, чего
-      // ждёт человек, нажавший кнопку. Выбор конкретной версии — работа CLI
-      // (python -m standkit_companion stage-update --version …), а не окна с
-      // вводом номера, в котором легко ошибиться.
+      // Версию не запрашиваем: «Установить» и «Откатить» без неё берут
+      // подготовленную версию и последний бэкап соответственно — ровно то, чего
+      // ждёт человек, нажавший кнопку.
       const data = await apiSend("POST", path, {});
-      statusEl.textContent = COMPANION_ACTION_DONE[action] || "Готово";
+      toast(COMPANION_ACTION_DONE[action] || "Готово");
+      if (action === "check_update") {
+        byId("updates-check-status").textContent = "проверено только что";
+      }
       if (data && data.status) {
+        companionBusy = false;
+        clearButtonBusy(btn);
         renderCompanionStatus(data.status);
       }
     } catch (e) {
-      statusEl.textContent = "";
       errorEl.textContent = describeApiError(e);
     } finally {
       companionBusy = false;
+      clearButtonBusy(btn);
       // Свежий статус после ЛЮБОГО исхода: отказ мог изменить состояние
       // (например, снять подготовленное обновление), и кнопки обязаны это
       // отразить, а не остаться в картине «до».
@@ -1673,28 +1874,453 @@
     }
   }
 
-  function setupCompanionTab() {
+  function setupUpdatesDialog() {
     document.querySelectorAll("[data-companion-action]").forEach((btn) => {
-      btn.addEventListener("click", () => runCompanionAction(btn.dataset.companionAction));
+      btn.addEventListener("click", () => runCompanionAction(btn.dataset.companionAction, btn));
     });
-    const refreshBtn = companionEl("companion-refresh-btn");
-    if (refreshBtn) {
-      refreshBtn.addEventListener("click", () => {
-        companionEl("companion-status-text").textContent = "";
-        refreshCompanionStatus();
-      });
-    }
-    // Отдельный обработчик на кнопке вкладки, а не правка setupTabs: сама
-    // механика вкладок работает по data-tab и знать про канал не должна.
-    const tabBtn = companionEl("companion-tab-btn");
-    if (tabBtn) {
-      tabBtn.addEventListener("click", () => refreshCompanionStatus({ quiet: true }));
+    byId("btn-updates").addEventListener("click", openUpdatesDialog);
+    byId("updates-close-btn").addEventListener("click", closeUpdatesDialog);
+    byId("updates-close-footer-btn").addEventListener("click", closeUpdatesDialog);
+    bindOverlayDismiss(byId("updates-overlay"), closeUpdatesDialog);
+    document.addEventListener("keydown", (evt) => {
+      if (evt.key === "Escape" && updatesDialogIsOpen()) closeUpdatesDialog();
+    });
+  }
+
+  // --- лицензия BPMkit ---
+  //
+  // Хаб — тонкий прокси к CLI самого MCP (см. standkit_hub/license_api.py), а
+  // экран лицензии — тонкий клиент этого прокси: своей трактовки состояния у
+  // него нет, он показывает пришедший `status` и считает по `days_left`,
+  // насколько громко об этом говорить.
+
+  const LICENSE_POLL_MS = 600000; // 10 минут: срок меряется днями, чаще незачем
+  const LICENSE_CRIT_STATUSES = ["expired", "revoked"];
+  const LICENSE_UNKNOWN_STATUSES = ["none", "unavailable"];
+  const LICENSE_CHANNEL_STATUSES = ["valid", "expiring"];
+  const LICENSE_CRIT_SEEN_KEY = "standkit_license_crit_seen";
+
+  const LICENSE_STATE_LABELS = {
+    valid: ["действует", "lic-ok"],
+    expiring: ["истекает", "lic-warn"],
+    expired: ["истекла", "lic-crit"],
+    revoked: ["отозвана", "lic-crit"],
+    invalid: ["не принята", "lic-crit"],
+  };
+
+  const LICENSE_SOURCE_LABELS = {
+    keyring: "хранилище ключей ОС",
+    env: "переменная окружения",
+    file: "файл лицензии",
+    "env-file": "файл из переменной окружения",
+    "well-known-file": "файл лицензии рядом с MCP",
+    "state-cache": "кэш последней успешной проверки",
+  };
+
+  let lastLicense = null;
+
+  function licenseCritSeen(key) {
+    try {
+      return sessionStorage.getItem(LICENSE_CRIT_SEEN_KEY) === key;
+    } catch (e) {
+      // Приватный режим / отключённое хранилище: показать окно один раз за
+      // загрузку страницы всё равно лучше, чем не показать вовсе.
+      return false;
     }
   }
 
-  function companionTabIsActive() {
-    const panel = document.getElementById("tab-companion");
-    return !!(panel && panel.classList.contains("active"));
+  function rememberLicenseCrit(key) {
+    try {
+      sessionStorage.setItem(LICENSE_CRIT_SEEN_KEY, key);
+    } catch (e) {
+      /* см. licenseCritSeen */
+    }
+  }
+
+  function closeLicenseCritModal() {
+    const overlay = byId("license-crit-overlay");
+    if (overlay) overlay.hidden = true;
+  }
+
+  function maybeShowLicenseCritModal(snapshot) {
+    const status = snapshot.status;
+    if (LICENSE_CRIT_STATUSES.indexOf(status) < 0) return;
+    const key = `${status}:${snapshot.license_id_tail || ""}`;
+    if (licenseCritSeen(key)) return;
+    rememberLicenseCrit(key);
+    const licensee = snapshot.licensee || "BPMkit";
+    if (status === "revoked") {
+      byId("license-crit-title").textContent = "Лицензия отозвана";
+      byId("license-crit-body").textContent =
+        `Издатель отозвал лицензию ${licensee}` +
+        (snapshot.license_id_tail ? ` (ID …${snapshot.license_id_tail})` : "") +
+        ". Платные инструменты BPMkit отключены, диспетчер продолжает управлять " +
+        "стендами в свободной редакции.";
+    } else {
+      byId("license-crit-title").textContent = "Срок лицензии истёк";
+      byId("license-crit-body").textContent =
+        `Лицензия ${licensee} закончилась ${formatDate(snapshot.expires_at)}. ` +
+        "Платные инструменты BPMkit отключены, диспетчер продолжает управлять стендами " +
+        "в свободной редакции. Продлите лицензию и добавьте новый ключ.";
+    }
+    byId("license-crit-overlay").hidden = false;
+  }
+
+  function renderLicenseBanners(snapshot) {
+    const warn = byId("license-banner-warn");
+    const crit = byId("license-banner-crit");
+    warn.hidden = true;
+    crit.hidden = true;
+    const status = snapshot.status;
+    const days = Number(snapshot.days_left);
+    const date = formatDate(snapshot.expires_at);
+
+    if (status === "expiring" && Number.isFinite(days) && days >= 4 && days <= 7) {
+      byId("license-banner-warn-title").textContent = `Лицензия истекает через ${pluralDays(days)}`;
+      byId("license-banner-warn-text").textContent =
+        ` — ${date}. Продлите её, чтобы BPMkit не перешёл в свободную редакцию.`;
+      warn.hidden = false;
+      return;
+    }
+    if (status === "expired") {
+      byId("license-banner-crit-title").textContent = "Срок лицензии истёк";
+      byId("license-banner-crit-text").textContent =
+        ` ${date}. Платные инструменты BPMkit отключены — продлите лицензию.`;
+      crit.hidden = false;
+      return;
+    }
+    if (status === "revoked") {
+      byId("license-banner-crit-title").textContent = "Лицензия отозвана издателем";
+      byId("license-banner-crit-text").textContent = ". Платные инструменты BPMkit отключены.";
+      crit.hidden = false;
+      return;
+    }
+    if (status === "expiring" && Number.isFinite(days) && days <= 3) {
+      byId("license-banner-crit-title").textContent =
+        days <= 1 ? "Лицензия истекает завтра" : `Лицензия истекает через ${pluralDays(days)}`;
+      byId("license-banner-crit-text").textContent =
+        ` — ${date}. После этого платные инструменты BPMkit отключатся.`;
+      crit.hidden = false;
+    }
+  }
+
+  /**
+   * Строка состояния про лицензию. Собирается из узлов, а не строкой innerHTML:
+   * в неё попадает имя лицензиата и тариф — текст издателя.
+   */
+  function renderLicenseStatusline(snapshot) {
+    const target = byId("sl-license");
+    target.textContent = "";
+    target.className = "";
+    const status = snapshot.status;
+    const date = formatDate(snapshot.expires_at);
+    const tier = snapshot.tier_label || snapshot.tier || "";
+    const days = Number(snapshot.days_left);
+
+    function put(prefix, bold, cls) {
+      if (cls) target.className = cls;
+      target.appendChild(document.createTextNode(prefix));
+      const b = document.createElement("b");
+      b.textContent = bold;
+      target.appendChild(b);
+    }
+
+    if (status === "valid") {
+      put("лицензия ", tier ? `${tier} до ${date}` : `до ${date}`);
+    } else if (status === "expiring") {
+      const bold = days <= 1 ? "истекает завтра" : `истекает ${date}`;
+      put("лицензия ", tier ? `${tier}, ${bold}` : bold, days <= 3 ? "lic-crit" : "lic-warn");
+    } else if (status === "expired") {
+      put("лицензия ", "истекла", "lic-crit");
+    } else if (status === "revoked") {
+      put("лицензия ", "отозвана", "lic-crit");
+    } else if (status === "invalid") {
+      put("лицензия ", "не принята", "lic-crit");
+    } else if (status === "unavailable") {
+      put("лицензия ", "не проверена");
+    } else {
+      put("лицензия ", "не активирована");
+      target.appendChild(document.createTextNode(" · "));
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "linklike";
+      link.textContent = "добавить";
+      link.addEventListener("click", () => openSettings("license"));
+      target.appendChild(link);
+    }
+  }
+
+  function renderLicensePane(snapshot) {
+    const status = snapshot.status;
+    const unknown = LICENSE_UNKNOWN_STATUSES.indexOf(status) >= 0;
+    byId("license-active").hidden = unknown;
+    byId("license-free").hidden = !unknown;
+
+    const unavailable = byId("license-unavailable");
+    if (status === "unavailable") {
+      unavailable.hidden = false;
+      unavailable.textContent =
+        `Проверить лицензию не удалось: ${snapshot.detail || "CLI BPMkit недоступен"}. ` +
+        "Укажите путь к CLI в разделе «Обновления».";
+    } else {
+      unavailable.hidden = true;
+    }
+    if (unknown) return;
+
+    byId("lic-licensee").textContent = snapshot.licensee || "—";
+    byId("lic-tier").textContent = snapshot.tier_label || snapshot.tier || "—";
+
+    const [label, cls] = LICENSE_STATE_LABELS[status] || [status || "—", ""];
+    const stateEl = byId("lic-state");
+    const days = Number(snapshot.days_left);
+    stateEl.textContent =
+      status === "expiring" && Number.isFinite(days)
+        ? (days <= 1 ? "истекает завтра" : `истекает через ${pluralDays(days)}`)
+        : label;
+    stateEl.className = `lic-v ${cls}`;
+
+    byId("lic-until").textContent = snapshot.expires_at ? formatDate(snapshot.expires_at) : "бессрочно";
+    byId("lic-activated").textContent = snapshot.activated
+      ? [
+          snapshot.fingerprint_label
+            ? `этом компьютере (${snapshot.fingerprint_label})`
+            : "этом компьютере",
+          snapshot.activated_at ? formatDate(snapshot.activated_at) : "",
+        ].filter(Boolean).join(" · ")
+      : "не активирована у издателя";
+    byId("lic-source").textContent =
+      LICENSE_SOURCE_LABELS[snapshot.source] || snapshot.source || "—";
+  }
+
+  function applyLicense(snapshot) {
+    lastLicense = snapshot;
+    // «Есть лицензия» = действующая (в т.ч. истекающая). Истёкшая/отозванная —
+    // тоже «нет лицензии» для канала издателя: бэкенд её не примет.
+    const known = snapshot.edition === "companion"
+      && LICENSE_CHANNEL_STATUSES.indexOf(snapshot.status) >= 0;
+    // Кнопка «Обновления» и одноимённый раздел настроек существуют только там,
+    // где им есть что делать: без лицензии канал издателя не работает вовсе.
+    byId("btn-updates").hidden = !known;
+    byId("rail-updates").hidden = !known;
+    if (!known && document.querySelector('.settings-pane[data-pane="updates"].active')) {
+      selectSettingsPane("general");
+    }
+    renderLicensePane(snapshot);
+    renderLicenseBanners(snapshot);
+    renderLicenseStatusline(snapshot);
+    maybeShowLicenseCritModal(snapshot);
+  }
+
+  async function refreshLicense() {
+    try {
+      const data = await apiGet("/api/license");
+      applyLicense(data);
+    } catch (e) {
+      byId("license-error").textContent = describeApiError(e);
+    }
+  }
+
+  /** Ответ мутации лицензии имеет ту же форму, что GET, — применяем как снимок. */
+  function applyLicenseMutation(data) {
+    applyLicense(data);
+    refreshCompanionStatus({ quiet: true });
+  }
+
+  function licenseErrorText(e) {
+    const payload = e && e.data;
+    if (payload && (payload.error || payload.detail)) {
+      return [payload.error, payload.detail].filter(Boolean).join(": ");
+    }
+    return describeApiError(e);
+  }
+
+  async function activateLicenseToken() {
+    const btn = byId("license-activate-btn");
+    const statusEl = byId("license-free-status");
+    const errorEl = byId("license-error");
+    const token = byId("license-token").value.trim();
+    errorEl.textContent = "";
+    statusEl.textContent = "";
+    if (!token) {
+      errorEl.textContent = "Вставьте текст ключа или укажите файл лицензии.";
+      return;
+    }
+    setButtonBusy(btn, "Активируем…");
+    try {
+      const data = await apiSend("PUT", "/api/license", { token });
+      byId("license-token").value = "";
+      applyLicenseMutation(data);
+      toast("Лицензия активирована");
+    } catch (e) {
+      errorEl.textContent = licenseErrorText(e);
+    } finally {
+      clearButtonBusy(btn);
+    }
+  }
+
+  /** Ключ из файла: на хаб уходит ПУТЬ, содержимое через страницу не едет. */
+  async function activateLicenseFile(path) {
+    const errorEl = byId("license-error");
+    errorEl.textContent = "";
+    try {
+      const data = await apiSend("POST", "/api/license/file", { path });
+      applyLicenseMutation(data);
+      toast("Лицензия активирована");
+    } catch (e) {
+      errorEl.textContent = licenseErrorText(e);
+    }
+  }
+
+  async function deleteLicense() {
+    const confirmed = await styledConfirm(
+      "Удалить лицензию",
+      "Снять активацию с этого компьютера и удалить ключ? Ключ можно будет использовать на другой машине."
+    );
+    if (!confirmed) return;
+    const btn = byId("lic-delete-btn");
+    const errorEl = byId("license-error");
+    errorEl.textContent = "";
+    setButtonBusy(btn, "Удаляем…");
+    try {
+      const data = await apiSend("DELETE", "/api/license");
+      applyLicenseMutation(data);
+      // remote: released | unreachable | error — исход у издателя, локальное
+      // удаление выполняется в любом случае, и умалчивать о разнице нельзя.
+      toast(data && data.remote === "released"
+        ? "Лицензия удалена, активация снята у издателя"
+        : "Лицензия удалена локально; активация у издателя не снята");
+    } catch (e) {
+      errorEl.textContent = licenseErrorText(e);
+    } finally {
+      clearButtonBusy(btn);
+    }
+  }
+
+  function setupLicensePane() {
+    byId("license-activate-btn").addEventListener("click", activateLicenseToken);
+    byId("lic-delete-btn").addEventListener("click", deleteLicense);
+    byId("license-pick-btn").addEventListener("click", async () => {
+      const path = await pickPath({
+        kind: "file",
+        title: "Файл лицензии BPMkit",
+        filter: "Лицензия (*.lic)|*.lic|Все файлы (*.*)|*.*",
+      });
+      if (path) await activateLicenseFile(path);
+    });
+
+    // Перетаскивание файла: содержимое читается в браузере и уезжает тем же
+    // PUT, что и вставленный текст — путь у dropped-файла недоступен в принципе.
+    const drop = byId("license-drop");
+    ["dragenter", "dragover"].forEach((type) => {
+      drop.addEventListener(type, (evt) => {
+        evt.preventDefault();
+        drop.classList.add("license-drop-over");
+      });
+    });
+    ["dragleave", "drop"].forEach((type) => {
+      drop.addEventListener(type, () => drop.classList.remove("license-drop-over"));
+    });
+    drop.addEventListener("drop", (evt) => {
+      evt.preventDefault();
+      const file = evt.dataTransfer && evt.dataTransfer.files && evt.dataTransfer.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        byId("license-token").value = String(reader.result || "").trim();
+        activateLicenseToken();
+      };
+      reader.onerror = () => {
+        byId("license-error").textContent = "Не удалось прочитать файл лицензии.";
+      };
+      reader.readAsText(file);
+    });
+
+    byId("license-crit-close-btn").addEventListener("click", closeLicenseCritModal);
+    bindOverlayDismiss(byId("license-crit-overlay"), closeLicenseCritModal);
+  }
+
+  // --- нативный выбор файла/каталога (POST /api/pick) ---
+  //
+  // Браузерный <input type="file"> отдаёт содержимое файла, но не путь, а полям
+  // настроек нужен именно путь. Диалог поднимает сама ОС (см.
+  // standkit_hub/pick_dialog.py); отмена и «диалога на этой машине нет» —
+  // разные исходы, и второй обязан сказать «введите путь руками».
+
+  async function pickPath(options) {
+    try {
+      const data = await apiSend("POST", "/api/pick", {
+        kind: options.kind || "file",
+        title: options.title || "",
+        initial: options.initial || "",
+        filter: options.filter || "",
+      });
+      if (data && data.path) return data.path;
+      if (data && data.error) {
+        toast("Диалог выбора недоступен на этой машине — введите путь вручную.");
+      }
+      return null;
+    } catch (e) {
+      toast(`Диалог выбора не открыт: ${describeApiError(e)}`);
+      return null;
+    }
+  }
+
+  function setupPickButtons() {
+    document.querySelectorAll(".pick-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const form = document.getElementById("settings-form");
+        const input = form.elements.namedItem(btn.dataset.pickFor);
+        if (!input) return;
+        btn.disabled = true;
+        try {
+          const path = await pickPath({
+            kind: btn.dataset.pick || "file",
+            title: btn.dataset.pick === "dir" ? "Выберите папку" : "Выберите файл",
+            initial: input.value || "",
+          });
+          if (path) input.value = path;
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  // --- строка состояния ---
+
+  function updateStatuslinePatterns(status) {
+    const target = byId("sl-patterns");
+    if (!target) return;
+    const block = patternsBlock(status);
+    if (!status || !block.last_run_at) {
+      target.hidden = true;
+      target.textContent = "";
+      return;
+    }
+    target.hidden = false;
+    target.textContent = "";
+    target.appendChild(document.createTextNode("паттерны "));
+    const b = document.createElement("b");
+    b.textContent = `обновлены ${describeMoment(block.last_run_at)}`;
+    target.appendChild(b);
+  }
+
+  function updateStatuslineStands(stands) {
+    const target = byId("sl-stands");
+    if (!target) return;
+    const total = (stands || []).length;
+    const running = (stands || []).filter(
+      (s) => s && s.process && s.process.state === "ok"
+    ).length;
+    target.textContent = "";
+    target.appendChild(document.createTextNode("стендов: "));
+    const totalEl = document.createElement("b");
+    totalEl.textContent = String(total);
+    target.appendChild(totalEl);
+    target.appendChild(document.createTextNode(", работает "));
+    const runEl = document.createElement("b");
+    runEl.textContent = String(running);
+    target.appendChild(runEl);
   }
 
   // --- настройки ---
@@ -1918,18 +2544,20 @@
 
   // Поле формы → [путь в конфиге, множитель к секундам]. Множитель 1 означает
   // «не число времени» (строка/флаг).
+  //
+  // GAP-241: из карты убраны три поля, которых больше нет ни в форме, ни в
+  // ответе /api/settings (server._UI_HIDDEN_COMPANION_FIELDS): backend_url —
+  // адрес издателя, revocations.* — цикл отзыва (он всегда включён и тикает с
+  // частотой паттернов), require_pattern_signature — строгий режим, который
+  // сегодня просто выключил бы доставку. Интервал паттернов показывается в
+  // ЧАСАХ: дефолт 6 часов в минутах читается как 360 и выглядит опечаткой.
   const COMPANION_SETTINGS_MAP = [
     ["companion_enabled", ["enabled"], 0],
-    ["companion_backend_url", ["backend_url"], 0],
     ["companion_mcp_cli", ["mcp_cli"], 0],
-    ["companion_patterns_enabled", ["patterns", "enabled"], 0],
-    ["companion_patterns_interval_min", ["patterns", "interval_sec"], 60],
+    ["companion_patterns_interval_hours", ["patterns", "interval_sec"], 3600],
     ["companion_releases_enabled", ["releases", "enabled"], 0],
     ["companion_releases_interval_hours", ["releases", "interval_sec"], 3600],
-    ["companion_revocations_enabled", ["revocations", "enabled"], 0],
-    ["companion_revocations_interval_min", ["revocations", "interval_sec"], 60],
     ["companion_auto_stage_release", ["auto_stage_release"], 0],
-    ["companion_require_pattern_signature", ["require_pattern_signature"], 0],
   ];
 
   function companionSettingValue(companion, path) {
@@ -1964,9 +2592,11 @@
       }
       input.value = value === undefined || value === null ? "" : String(value);
     });
-    const note = document.getElementById("companion-settings-note");
-    if (note) {
-      note.textContent = data.enabled === false ? " — выключен" : " — включён";
+    const rail = document.getElementById("rail-updates");
+    if (rail) {
+      rail.title = data.enabled === false
+        ? "Канал обновлений выключен"
+        : "Канал обновлений включён";
     }
   }
 
@@ -2052,19 +2682,21 @@
     const form = document.getElementById("settings-form");
 
     // Нативная проверка number-полей (min/max) блокирует отправку формы МОЛЧА,
-    // если проблемное поле лежит в СВЁРНУТОЙ группе <details>: браузеру некуда
+    // если проблемное поле лежит в НЕАКТИВНОМ разделе рейки: браузеру некуда
     // показать подсказку у невидимого элемента, и кнопка «Сохранить» просто
-    // перестаёт отвечать — ни ошибки, ни сохранения. Поймано на секции «Канал
-    // обновлений» (интервалы с min), но касается любой свёрнутой группы.
-    // Событие invalid НЕ всплывает — слушаем на фазе захвата, раскрываем группу
+    // перестаёт отвечать — ни ошибки, ни сохранения. Поймано на разделе
+    // «Обновления» (интервалы с min), но касается любого скрытого раздела.
+    // Событие invalid НЕ всплывает — слушаем на фазе захвата, открываем раздел
     // и передаём фокус, чтобы человек увидел и подсказку, и само поле.
     form.addEventListener(
       "invalid",
       (evt) => {
         const field = evt.target;
         if (!field || !field.closest) return;
-        const group = field.closest("details");
-        if (group && !group.open) group.open = true;
+        const pane = field.closest(".settings-pane");
+        if (pane && pane.dataset.pane && !pane.classList.contains("active")) {
+          selectSettingsPane(pane.dataset.pane);
+        }
       },
       true
     );
@@ -2082,8 +2714,17 @@
             ? `Не сохранено — ${problems[0]}`
             : `Не сохранено — ошибок: ${problems.length}. ${problems.join("; ")}`;
         statusEl.classList.add("status-error");
+        toast("Настройки не сохранены — проверьте выделенные поля");
         const firstBad = form.querySelector('[aria-invalid="true"]');
-        if (firstBad) firstBad.focus();
+        if (firstBad) {
+          // Поле может лежать в ДРУГОМ разделе рейки: без переключения человек
+          // видит только «не сохранено» и ни одного подсвеченного поля —
+          // ровно та немая кнопка «Сохранить», из-за которой в форме появился
+          // перехват события invalid (см. ниже).
+          const pane = firstBad.closest(".settings-pane");
+          if (pane && pane.dataset.pane) selectSettingsPane(pane.dataset.pane);
+          firstBad.focus();
+        }
         return;
       }
 
@@ -2104,6 +2745,9 @@
         // сохранится само.
         const saved = await apiSend("POST", "/api/settings", payload);
         statusEl.textContent = "Настройки сохранены";
+        // Строка статуса живёт в разделе «Основные», а «Сохранить» есть в
+        // каждом: без тоста подтверждение уезжало бы на невидимый экран.
+        toast("Настройки сохранены");
         // Новый refresh_interval_sec применяем немедленно, без перезагрузки
         // страницы (старый таймер снимается внутри applyRefreshInterval).
         applyRefreshInterval(saved && saved.refresh_interval_sec);
@@ -2113,9 +2757,13 @@
         // Настройки канала могли измениться — обновляем вкладку «Обновления»
         // сразу, а не при следующем заходе на неё.
         if (companionAvailable) refreshCompanionStatus({ quiet: true });
+        // Путь к CLI BPMkit мог измениться — сводка лицензии, снятая по старому
+        // пути, устарела ровно в этот момент (сервер сбрасывает свой кэш там же).
+        refreshLicense();
         await refreshSecretStatuses();
       } catch (e) {
         statusEl.textContent = `Ошибка сохранения: ${describeApiError(e)}`;
+        toast(`Ошибка сохранения: ${describeApiError(e)}`);
       }
     });
 
@@ -2162,11 +2810,12 @@
   function init() {
     setupTheme();
     setupViewToggle();
-    setupTabs();
-    setupAboutModal();
+    setupScenes();
     setupRegisterModal();
     setupAgentTab();
-    setupCompanionTab();
+    setupUpdatesDialog();
+    setupLicensePane();
+    setupPickButtons();
     setupSettingsForm();
     setupStatePanel();
     setupActionStatus();
@@ -2177,10 +2826,15 @@
     // Push-обновления; при их отсутствии работает резервный таймер ниже.
     setupEventStream();
     refreshAgentStatus();
-    // Статус канала спрашивается сразу, ещё до открытия вкладки: только так
-    // значок «нужен перезапуск Claude Desktop» может зажечься на кнопке вкладки
-    // у человека, который сидит на «Стендах» и во вкладку не заглядывает.
+    loadVersionInfo();
+    // Статус канала спрашивается сразу, ещё до открытия окна обновлений: только
+    // так бейдж «есть новая версия / нужен перезапуск» может зажечься на кнопке
+    // в шапке у человека, который в окно не заглядывает.
     refreshCompanionStatus({ quiet: true });
+    // Лицензия — тоже сразу: баннер «истекает через 3 дня» обязан появиться до
+    // того, как человек что-то нажмёт, а не после захода в настройки.
+    refreshLicense();
+    setInterval(refreshLicense, LICENSE_POLL_MS);
     loadSettings().catch((e) => {
       document.getElementById("settings-status").textContent = `Ошибка загрузки настроек: ${describeApiError(e)}`;
     });

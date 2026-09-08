@@ -1,6 +1,6 @@
 {
-  "name": "BPMkit Дашборд — диспетчер стендов",
-  "short_name": "BPMkit Стенды",
+  "name": "Диспетчер стендов BPMkit",
+  "short_name": "Диспетчер BPMkit",
   "description": "Локальный диспетчер стендов BPMSoft: старт, стоп, рестарт, health-пробы, логи.",
   "lang": "ru",
   "dir": "ltr",

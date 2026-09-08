@@ -703,8 +703,10 @@ def test_broken_config_does_not_stop_the_channel(tmp_path, monkeypatch):
 
     assert report["results"]["patterns"]["status"] == "ok", (
         "дефолты конфига включают паттерны — тик обязан состояться")
-    assert report["results"]["releases"]["status"] == "disabled", (
-        "релизы по умолчанию выключены (ADR-0022, блокеры Б1/Б2)")
+    assert report["results"]["releases"]["status"] == "ok", (
+        "GAP-241: релизы включены по умолчанию — дефолты битого конфига тоже их включают")
+    assert report["results"]["revocations"]["status"] == "ok", (
+        "отзыв тикает всегда, даже когда настроек прочитать не удалось")
 
 
 # --------------------------------------------------------------------------------------
@@ -878,8 +880,9 @@ def test_cli_run_once_makes_single_pass(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
 
     assert rc == 0
-    assert log == ["revocations", "patterns"], (
-        "релизы выключены по умолчанию — их в проходе быть не должно")
+    # GAP-241: релизы включены по умолчанию, поэтому в проходе участвуют все три
+    # цикла. Порядок — RUN_ORDER: отзыв первым (см. докстринг runner.RUN_ORDER).
+    assert log == ["revocations", "patterns", "releases"]
     assert "отзыв лицензий" in out
 
 
@@ -919,3 +922,77 @@ def test_environment_switch_ignores_empty_and_falsy_values(tmp_path, monkeypatch
         monkeypatch.setenv(runner.DISABLE_ENV, value)
         assert runner.environment_disabled() is True, (
             f"значение {value!r} должно запрещать старт")
+
+
+# --------------------------------------------------------------------------------------
+# «Проверить обновление» = проверка И подготовка (GAP-241)
+# --------------------------------------------------------------------------------------
+def test_check_update_stages_available_release(tmp_path, monkeypatch):
+    """Одна кнопка вместо двух: найденный релиз сразу уезжает в стейджинг.
+
+    Подмену бинаря это не приближает ни на шаг — `apply_staged` отсюда не зовётся
+    (SECURITY.md §4.1): скачанный файл лежит в стейджинге до явного «Применить».
+    """
+    log: list = []
+    stubs = patch_cycles(monkeypatch, log, releases_check=Recorder(
+        "releases", log, result={"available": True, "target": "0.310.0"}))
+    r = make_runner(tmp_path, settings_all_on())
+
+    result = r.run_action("check_update")
+
+    assert log == ["releases", "stage"], "подготовка обязана идти сразу за проверкой"
+    assert stubs["releases_stage"].calls == 1
+    assert result["available"] is True
+    assert result["staged"] is not None
+
+
+def test_check_update_does_not_stage_when_nothing_new(tmp_path, monkeypatch):
+    log: list = []
+    stubs = patch_cycles(monkeypatch, log)  # дефолт заглушки: available=False
+    r = make_runner(tmp_path, settings_all_on())
+
+    result = r.run_action("check_update")
+
+    assert log == ["releases"]
+    assert stubs["releases_stage"].calls == 0
+    assert result["staged"] is None
+
+
+def test_stage_update_still_addresses_a_concrete_version(tmp_path, monkeypatch):
+    """Отдельное действие подготовки осталось: им выбирают КОНКРЕТНУЮ версию."""
+    log: list = []
+    stubs = patch_cycles(monkeypatch, log)
+    r = make_runner(tmp_path, settings_all_on())
+
+    r.run_action("stage_update", version="0.307.0")
+
+    assert stubs["releases_stage"].calls == 1
+    assert log == ["stage"]
+
+
+def test_revocations_cycle_ignores_its_own_enabled_flag(tmp_path, monkeypatch):
+    """GAP-241: отзыв тикает вместе с главным рубильником, без своего тумблера.
+
+    Отдельный выключатель означал бы «применяю паттерны, но список отзыва не
+    смотрю» — ровно тот сценарий, ради которого список и существует.
+    """
+    log: list = []
+    patch_cycles(monkeypatch, log)
+    settings = settings_all_on(revocations=CompanionCycle(enabled=False, interval_sec=1800))
+    r = make_runner(tmp_path, settings)
+
+    report = r.run_due()
+
+    assert report["results"]["revocations"]["status"] != "disabled"
+    assert "revocations" in log
+
+
+def test_revocations_interval_follows_patterns(tmp_path):
+    """Своего интервала у отзыва больше нет — он идёт с частотой паттернов."""
+    settings = settings_all_on(patterns=CompanionCycle(enabled=True, interval_sec=21600),
+                               revocations=CompanionCycle(enabled=True, interval_sec=900))
+    r = make_runner(tmp_path, settings)
+
+    cycles = r.status()["cycles"]
+
+    assert cycles["revocations"]["interval_sec"] == cycles["patterns"]["interval_sec"] == 21600

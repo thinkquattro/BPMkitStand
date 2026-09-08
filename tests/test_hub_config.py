@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from standkit.registry import default_registry_path
-from standkit_hub.config import HubConfig, RemoteAgent
+from standkit_hub.config import CompanionSettings, HubConfig, RemoteAgent
 
 
 def test_load_missing_file_returns_defaults(tmp_path):
@@ -151,3 +151,77 @@ def test_to_dict_from_dict_roundtrip():
     rebuilt = HubConfig.from_dict(cfg.to_dict())
 
     assert rebuilt == cfg
+
+
+# --- секция канала обновлений (GAP-241) --------------------------------------
+
+
+def test_companion_defaults_match_gap241_policy(tmp_path):
+    """Дефолты канала: паттерны раз в 6 часов, релизы включены и раз в сутки.
+
+    Раньше паттерны опрашивались каждые полчаса (бессмысленно часто для markdown,
+    который издатель правит раз в недели), а релизы приходилось включать руками —
+    ключ подписи артефактов и HTTPS бэкенда тогда ещё не были в строю.
+    """
+    cfg = HubConfig.load(tmp_path / "нет-файла.json")
+
+    assert cfg.companion.enabled is True
+    assert cfg.companion.patterns.enabled is True
+    assert cfg.companion.patterns.interval_sec == 21600
+    assert cfg.companion.releases.enabled is True
+    assert cfg.companion.releases.interval_sec == 86400
+
+
+def test_old_config_without_companion_section_still_loads(tmp_path):
+    """Конфиг, написанный до появления секции канала, читается как есть."""
+    path = tmp_path / "standkit-hub.json"
+    path.write_text(json.dumps({"refresh_interval_sec": 15, "agent_port": 8765}),
+                    encoding="utf-8")
+
+    cfg = HubConfig.load(path)
+
+    assert cfg.refresh_interval_sec == 15
+    assert cfg.companion == CompanionSettings()
+
+
+def test_old_companion_section_is_read_field_by_field(tmp_path):
+    """Старый файл со ВСЕМИ прежними полями обязан читаться без потерь.
+
+    Поля, которых больше нет в интерфейсе (`backend_url`, `revocations`,
+    `require_pattern_signature`), остаются в конфиге и продолжают действовать —
+    это override издателя, а не мусор: молча их обнулить значило бы сменить адрес
+    бэкенда и режим подписи у тех, кто их задал.
+    """
+    path = tmp_path / "standkit-hub.json"
+    path.write_text(json.dumps({"companion": {
+        "enabled": True,
+        "backend_url": "https://updates.example",
+        "mcp_cli": "C:/BPMkit/bpmkit.exe",
+        "patterns": {"enabled": True, "interval_sec": 1800},
+        "releases": {"enabled": False, "interval_sec": 86400},
+        "revocations": {"enabled": False, "interval_sec": 900},
+        "auto_stage_release": True,
+        "require_pattern_signature": True,
+    }}), encoding="utf-8")
+
+    cfg = HubConfig.load(path)
+
+    assert cfg.companion.backend_url == "https://updates.example"
+    assert cfg.companion.mcp_cli == "C:/BPMkit/bpmkit.exe"
+    # Прежний интервал паттернов сохранён: новый дефолт не перебивает явный выбор.
+    assert cfg.companion.patterns.interval_sec == 1800
+    # Как и явно выключенные релизы — «включено по умолчанию» относится к НОВЫМ
+    # установкам, а не к чужому сохранённому решению.
+    assert cfg.companion.releases.enabled is False
+    assert cfg.companion.revocations.interval_sec == 900
+    assert cfg.companion.require_pattern_signature is True
+
+
+def test_companion_section_roundtrips_through_save(tmp_path):
+    path = tmp_path / "standkit-hub.json"
+    cfg = HubConfig()
+    cfg.companion = CompanionSettings(enabled=True, backend_url="https://updates.example",
+                                      mcp_cli="python -m bpmkit")
+    cfg.save(path)
+
+    assert HubConfig.load(path).companion == cfg.companion

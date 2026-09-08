@@ -114,13 +114,20 @@ class CompanionCycle:
 
 
 # Дефолты и нижние границы циклов канала. Паттерны включены (markdown, не исполняемый
-# код — sha256 достаточно); релизы ВЫКЛЮЧЕНЫ до выпуска ключа подписи артефактов и
-# переезда бэкенда на HTTPS (ADR-0022, блокеры Б1/Б2) и включаются владельцем явно.
-_COMPANION_PATTERNS_INTERVAL = 1800        # 30 минут
+# код — sha256 достаточно). Релизы включены по умолчанию (GAP-241): ключ подписи
+# артефактов и HTTPS бэкенда уже в строю (см. ADR-0022) — прежний ручной рубильник
+# «включить явно» снят, автоматика доходит ровно до check/stage (см. runner._run_releases,
+# SECURITY.md §4.1: apply — только явное действие человека).
+_COMPANION_PATTERNS_INTERVAL = 21600       # 6 часов (GAP-241, было 30 минут)
 _COMPANION_PATTERNS_MIN_INTERVAL = 300     # 5 минут
 _COMPANION_RELEASES_INTERVAL = 86400       # раз в сутки
 _COMPANION_RELEASES_MIN_INTERVAL = 3600    # час
-_COMPANION_REVOCATIONS_INTERVAL = 1800     # вместе с паттернами
+# Отзыв (revocations) больше не самостоятельная настройка (GAP-241): цикл ВСЕГДА
+# включён вместе с главным рубильником канала, а его интервал равен интервалу
+# паттернов — см. CompanionRunner._enabled/_interval_of. Константы ниже остаются
+# только для обратной совместимости чтения СТАРОГО конфига (см. CompanionCycle.from_dict
+# у поля revocations) — новых мест, где они читались бы как независимая настройка, нет.
+_COMPANION_REVOCATIONS_INTERVAL = 1800     # вместе с паттернами (легаси-дефолт)
 _COMPANION_REVOCATIONS_MIN_INTERVAL = 300
 
 
@@ -156,8 +163,13 @@ class CompanionSettings:
     mcp_cli: str = ""
     patterns: CompanionCycle = field(default_factory=lambda: CompanionCycle(
         enabled=True, interval_sec=_COMPANION_PATTERNS_INTERVAL))
+    # GAP-241: включены по умолчанию (было False) — см. комментарий у констант выше.
     releases: CompanionCycle = field(default_factory=lambda: CompanionCycle(
-        enabled=False, interval_sec=_COMPANION_RELEASES_INTERVAL))
+        enabled=True, interval_sec=_COMPANION_RELEASES_INTERVAL))
+    # GAP-241: поле сохранено для обратной совместимости чтения старого конфига
+    # (`from_dict`), но раннер больше не смотрит на `revocations.enabled` — цикл
+    # принудительно включён вместе с главным рубильником `enabled`. Не показывается
+    # в /api/settings (см. server.py::_UI_HIDDEN_COMPANION_FIELDS).
     revocations: CompanionCycle = field(default_factory=lambda: CompanionCycle(
         enabled=True, interval_sec=_COMPANION_REVOCATIONS_INTERVAL))
     # Скачанный релиз кладётся в стейджинг автоматически (но НЕ применяется: подмена
@@ -181,7 +193,7 @@ class CompanionSettings:
                 default_interval=_COMPANION_PATTERNS_INTERVAL,
                 min_interval=_COMPANION_PATTERNS_MIN_INTERVAL),
             releases=CompanionCycle.from_dict(
-                data.get("releases"), default_enabled=False,
+                data.get("releases"), default_enabled=True,
                 default_interval=_COMPANION_RELEASES_INTERVAL,
                 min_interval=_COMPANION_RELEASES_MIN_INTERVAL),
             revocations=CompanionCycle.from_dict(
