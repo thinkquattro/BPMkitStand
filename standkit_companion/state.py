@@ -92,6 +92,28 @@ def _default_state() -> dict:
     }
 
 
+def _latest_pattern_version(applied: list) -> Optional[str]:
+    """Самая свежая версия среди применённых паттернов (`None`, если её не с чем сравнивать).
+
+    Сравнение — той же функцией, что и у самого цикла паттернов (`patterns.compare_versions`,
+    та же семантика "major.minor.patch", что и у версий MCP). Импорт отложен внутрь функции:
+    `state.py` не тянет `patterns.py` на уровне модуля намеренно (симметрично тому, как
+    `runner.py` откладывает импорт `standkit_hub.config` — держим границы модулей узкими).
+    """
+    from . import patterns as _patterns
+
+    best: Optional[str] = None
+    for rec in applied or []:
+        if not isinstance(rec, dict):
+            continue
+        value = str(rec.get("version") or "").strip()
+        if not value:
+            continue
+        if best is None or _patterns.compare_versions(value, best) > 0:
+            best = value
+    return best
+
+
 class CompanionState:
     """Обёртка над файлом состояния. Не потокобезопасна сама по себе — сериализуется
     планировщиком (`runner.py`), у которого ровно один рабочий поток."""
@@ -183,9 +205,14 @@ class CompanionState:
         rev = self.revocations
         staged = rel.get("staged") or {}
         current = rel.get("current") or {}
+        applied = pat.get("applied") or []
         return {
             "patterns": {
-                "applied_count": len(pat.get("applied") or []),
+                "applied_count": len(applied),
+                # GAP-241: самая свежая версия среди применённых паттернов — сводка для
+                # верхнего уровня статуса канала (см. server.py::_patterns_summary).
+                # `None`, если сравнивать не с чем (пусто/поле версии не заполнено).
+                "latest_version": _latest_pattern_version(applied),
                 "last_run_at": pat.get("last_run_at"),
                 "status": pat.get("last_status"),
                 "detail": pat.get("last_detail"),

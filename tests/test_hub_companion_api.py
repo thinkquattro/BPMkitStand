@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import sys
 import threading
@@ -584,10 +585,13 @@ def test_settings_response_never_contains_envelope(tmp_path):
 
     assert "companion" in body
     assert "envelope" not in raw
+    # GAP-241: адрес бэкенда, цикл отзыва и строгий режим подписи паттернов —
+    # НЕ пользовательские настройки. Они остаются в файле конфига (override
+    # издателя), но в UI их нет, а значит нет и в ответе API.
     assert set(body["companion"]) == {
-        "enabled", "backend_url", "mcp_cli", "patterns", "releases", "revocations",
-        "auto_stage_release", "require_pattern_signature",
+        "enabled", "mcp_cli", "patterns", "releases", "auto_stage_release",
     }
+    assert set(body["defaults"]["companion"]) == set(body["companion"])
 
 
 # ======================================================================================
@@ -601,27 +605,21 @@ def test_settings_post_saves_nested_companion_section(tmp_path, monkeypatch):
 
     payload = {"companion": {
         "enabled": True,
-        "backend_url": "https://updates.example",
         "mcp_cli": "python -m bpmkit",
         "patterns": {"enabled": True, "interval_sec": 3600},
         "releases": {"enabled": True, "interval_sec": 86400},
-        "revocations": {"enabled": False, "interval_sec": 900},
         "auto_stage_release": True,
-        "require_pattern_signature": True,
     }}
     status, body, _ = _post(base_url, "/api/settings", token, body=payload)
 
     assert status == 200
-    assert body["companion"]["backend_url"] == "https://updates.example"
     assert body["companion"]["mcp_cli"] == "python -m bpmkit"
     assert body["companion"]["auto_stage_release"] is True
-    assert body["companion"]["require_pattern_signature"] is True
     assert body["companion"]["releases"]["enabled"] is True
-    assert body["companion"]["revocations"] == {"enabled": False, "interval_sec": 900}
 
     # Сохранено НА ДИСК, а не только отражено в ответе.
     saved = HubConfig.load(config_path)
-    assert saved.companion.backend_url == "https://updates.example"
+    assert saved.companion.mcp_cli == "python -m bpmkit"
     assert saved.companion.patterns.interval_sec == 3600
 
     # Планировщику сказано не досыпать интервал: человек только что включил
@@ -632,7 +630,6 @@ def test_settings_post_saves_nested_companion_section(tmp_path, monkeypatch):
 @pytest.mark.parametrize("cycle,too_small,minimum", [
     ("patterns", 5, 300),
     ("releases", 60, 3600),
-    ("revocations", 1, 300),
 ])
 def test_settings_post_clamps_interval_below_minimum(tmp_path, monkeypatch,
                                                      cycle, too_small, minimum):
@@ -674,7 +671,6 @@ def test_settings_post_partial_companion_section_keeps_the_rest(tmp_path, monkey
 
     assert status == 200
     assert body["companion"]["enabled"] is False
-    assert body["companion"]["backend_url"] == "https://updates.example"
     assert body["companion"]["mcp_cli"] == "C:/BPMkit/bpmkit.exe"
     assert body["companion"]["patterns"]["interval_sec"] == 3600
     saved = HubConfig.load(config_path)
@@ -693,8 +689,77 @@ def test_settings_post_without_companion_key_does_not_touch_section(tmp_path, mo
 
     assert status == 200
     assert body["refresh_interval_sec"] == 42
-    assert body["companion"]["backend_url"] == "https://updates.example"
     assert HubConfig.load(config_path).companion.backend_url == "https://updates.example"
+
+
+# ======================================================================================
+# GAP-241: поля вне UI и сводка паттернов в статусе
+# ======================================================================================
+
+
+@pytest.mark.parametrize("field,value", [
+    ("backend_url", "https://evil.example"),
+    ("require_pattern_signature", True),
+])
+def test_settings_post_ignores_fields_hidden_from_ui(tmp_path, monkeypatch, field, value):
+    """Скрытые поля канала не переписываются запросом, даже если он их прислал.
+
+    Их значение в файле — решение издателя/администратора (адрес бэкенда, строгий
+    режим подписи), а не форма. Молча принять их значило бы завести способ выключить
+    канал целиком через обычный POST настроек.
+    """
+    _install_stub_runner(monkeypatch, _StubRunner())
+    base_url, token, config_path, _httpd = _start_hub(tmp_path, companion=CompanionSettings(
+        enabled=True, backend_url="https://updates.example",
+        require_pattern_signature=False))
+
+    status, body, _ = _post(base_url, "/api/settings", token,
+                            body={"companion": {field: value}})
+
+    assert status == 200
+    assert field not in body["companion"]
+    saved = HubConfig.load(config_path)
+    assert getattr(saved.companion, field) != value, "скрытое поле переписано запросом"
+
+
+def test_settings_post_cannot_disable_revocations_cycle(tmp_path, monkeypatch):
+    """Цикл отзыва не выключается ничем, кроме главного рубильника канала."""
+    _install_stub_runner(monkeypatch, _StubRunner())
+    base_url, token, config_path, _httpd = _start_hub(tmp_path)
+
+    status, body, _ = _post(base_url, "/api/settings", token,
+                            body={"companion": {"revocations": {"enabled": False}}})
+
+    assert status == 200
+    assert "revocations" not in body["companion"]
+    assert HubConfig.load(config_path).companion.revocations.enabled is True
+
+
+def test_companion_status_carries_patterns_summary(tmp_path, monkeypatch):
+    """Версия и число применённых паттернов — одной строкой в статусе."""
+    status_stub = _stub_status()
+    status_stub["state"]["patterns"] = {"applied_count": 184, "latest_version": "2026.09.07",
+                                        "status": "ok"}
+    _install_stub_runner(monkeypatch, _StubRunner(status=status_stub))
+    base_url, token, *_ = _start_hub(tmp_path)
+
+    status, body, _ = _request(base_url, "/api/companion/status", token=token)
+
+    assert status == 200
+    assert body["patterns"] == {"version": "2026.09.07", "count": 184}
+
+
+def test_companion_status_omits_patterns_summary_when_nothing_applied(tmp_path, monkeypatch):
+    """Пустая карточка «версия —, паттернов —» хуже её отсутствия: ключа нет вовсе."""
+    status_stub = _stub_status()
+    status_stub["state"]["patterns"] = {"applied_count": 0, "latest_version": None,
+                                        "status": "never"}
+    _install_stub_runner(monkeypatch, _StubRunner(status=status_stub))
+    base_url, token, *_ = _start_hub(tmp_path)
+
+    _status, body, _ = _request(base_url, "/api/companion/status", token=token)
+
+    assert "patterns" not in body
 
 
 # ======================================================================================
@@ -755,11 +820,17 @@ def test_companion_tab_exists_in_index_html():
     assert 'id="tab-companion"' in html, "панель вкладки «Обновления» потеряна"
     # Секция настроек канала — свёрнутая группа в общей форме настроек.
     assert 'id="settings-companion"' in html
-    for field in ("companion_enabled", "companion_backend_url", "companion_mcp_cli",
-                  "companion_patterns_interval_min", "companion_releases_interval_hours",
-                  "companion_revocations_interval_min", "companion_auto_stage_release",
-                  "companion_require_pattern_signature"):
+    for field in ("companion_enabled", "companion_mcp_cli"):
         assert f'name="{field}"' in html, f"поле {field} пропало из формы настроек"
+    # Интервалы остались, но единица измерения — вопрос представления, и имя поля
+    # у формы своё (часы вместо минут, GAP-241): проверяем предмет, а не подпись.
+    for prefix in ("companion_patterns_interval", "companion_releases_interval"):
+        assert re.search(rf'name="{prefix}[a-z_]*"', html), f"поле {prefix}* пропало из формы"
+    # А этих полей в форме быть НЕ должно: сервер их не отдаёт и не принимает
+    # (см. server._UI_HIDDEN_COMPANION_FIELDS).
+    for gone in ("companion_backend_url", "companion_revocations_interval_min",
+                 "companion_require_pattern_signature"):
+        assert f'name="{gone}"' not in html, f"поле {gone} убрано из UI (GAP-241)"
 
 
 def test_companion_buttons_match_api_routes():

@@ -70,7 +70,9 @@ from standkit.lifecycle import AdoptionRequired, AdoptionUnavailable, LifecycleE
 from standkit.models import HostKind, Stand, Transport
 from standkit.registry import Registry, RegistryError, default_registry_path
 from standkit.secrets import SecretError, delete_secret, has_secret, set_secret
+from standkit_hub import license_api
 from standkit_hub import logs_browser
+from standkit_hub import pick_dialog
 from standkit_hub import redis_min
 from standkit_hub import security as _security
 from standkit_hub.agent_control import AgentControlError, AgentController
@@ -651,6 +653,56 @@ COMPANION_UNAVAILABLE_MESSAGE = (
 
 #: Текст для выключенного главного рубильника (``companion.enabled = false``).
 COMPANION_DISABLED_MESSAGE = "Канал обновлений выключен в настройках"
+
+
+#: Поля секции ``companion``, которых НЕТ в диалоге настроек (GAP-241). Они
+#: продолжают жить в файле конфига и читаться каналом — это override издателя
+#: (стенд бэкенда, строгий режим подписи паттернов, отдельный интервал отзыва в
+#: старых конфигах), а не пользовательская настройка:
+#:
+#: * ``backend_url`` — адрес издателя; менять его через UI незачем, а ошибка в
+#:   нём выключает канал целиком;
+#: * ``revocations`` — цикл отзыва больше не настраивается вовсе: он всегда
+#:   включён и тикает с частотой паттернов (см. ``CompanionRunner._enabled``);
+#: * ``require_pattern_signature`` — строгий режим, который сегодня просто
+#:   выключил бы канал (подписи markdown у издателя ещё нет).
+#:
+#: Скрытие двустороннее: ``GET /api/settings`` их не отдаёт, ``POST`` — не
+#: принимает (присланные молча игнорируются, а не затирают файл).
+_UI_HIDDEN_COMPANION_FIELDS = ("backend_url", "revocations", "require_pattern_signature")
+
+
+def strip_ui_hidden_companion(section: object) -> dict:
+    """Секция ``companion`` без полей, которых нет в UI (см. ``_UI_HIDDEN_COMPANION_FIELDS``)."""
+    if not isinstance(section, dict):
+        return {}
+    return {key: value for key, value in section.items()
+            if key not in _UI_HIDDEN_COMPANION_FIELDS}
+
+
+def companion_patterns_summary(status: object) -> Optional[dict]:
+    """``{"version": ..., "count": ...}`` для верхнего уровня статуса канала.
+
+    Данные берутся из СОСТОЯНИЯ канала (``state.patterns``), а не запрашиваются
+    заново: статус обязан отвечать мгновенно. Ключ не добавляется вовсе, если
+    сказать нечего (канал ещё ни разу не применял паттерны) — пустая карточка
+    «версия —, паттернов —» хуже её отсутствия: UI покажет её только когда есть что
+    показывать.
+    """
+    if not isinstance(status, dict):
+        return None
+    state = status.get("state")
+    patterns = state.get("patterns") if isinstance(state, dict) else None
+    if not isinstance(patterns, dict):
+        return None
+    version = patterns.get("latest_version") or None
+    try:
+        count = int(patterns.get("applied_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if not version and not count:
+        return None
+    return {"version": version, "count": count}
 
 
 def companion_available() -> bool:
@@ -1635,11 +1687,18 @@ def make_handler(
         def _api_settings_get(self) -> None:
             config = _load_config(config_path)
             payload = config.to_dict()
+            # Скрытые от UI поля канала не уезжают на фронт вовсе — ни в текущих
+            # значениях, ни в дефолтах (см. _UI_HIDDEN_COMPANION_FIELDS): форма не
+            # показывает того, чем не управляет, а «поле есть, а элемента нет»
+            # читается как потерянная настройка.
+            payload["companion"] = strip_ui_hidden_companion(payload.get("companion"))
             # Отдельным ключом — фактические значения по умолчанию (HubConfig без
             # аргументов). Форма показывает их в placeholder'ах: пустое поле
             # само по себе не говорит пользователю, что подставится, если он
             # так его и оставит.
             payload["defaults"] = HubConfig().to_dict()
+            payload["defaults"]["companion"] = strip_ui_hidden_companion(
+                payload["defaults"].get("companion"))
             self._send_json(200, payload)
 
         def _api_settings_post(self) -> None:
@@ -1657,8 +1716,12 @@ def make_handler(
                 # целиком, потеряв всё, чего форма не прислала (см.
                 # merge_companion_section). Валидация и кламп интервалов — на
                 # CompanionSettings.from_dict внутри HubConfig.from_dict.
+                # Скрытые поля из тела ВЫБРАСЫВАЮТСЯ до мержа: их значение в файле —
+                # решение издателя/администратора, и форма (или чужой запрос) не имеет
+                # права его переписать, даже прислав ключ случайно.
                 data["companion"] = merge_companion_section(
-                    current.companion.to_dict(), body.get("companion"))
+                    current.companion.to_dict(),
+                    strip_ui_hidden_companion(body.get("companion")))
             new_config = HubConfig.from_dict(data)
             new_config.save(config_path)
             # Сброс кэша сразу после собственной записи — не полагаемся на
@@ -1669,6 +1732,9 @@ def make_handler(
             poller = self._poller()
             if poller is not None:
                 poller.poke()
+            # Путь к CLI BPMkit мог измениться — сводка лицензии, снятая по старому
+            # пути, стала неверной ровно в этот момент.
+            license_api.invalidate_cache()
             # Тот же смысл для канала: человек только что включил цикл и ждёт
             # первого прогона сейчас, а не через сутки (интервал релизов).
             # poke() заодно снимает блокировку не-retriable отказа — правка
@@ -1679,7 +1745,9 @@ def make_handler(
                     companion.poke()
                 except Exception:  # noqa: BLE001 - канал не роняет сохранение настроек
                     pass
-            self._send_json(200, new_config.to_dict())
+            payload = new_config.to_dict()
+            payload["companion"] = strip_ui_hidden_companion(payload.get("companion"))
+            self._send_json(200, payload)
 
         # --- API: секреты ---
 
@@ -1755,6 +1823,126 @@ def make_handler(
             result = uninstall_desktop_shortcut()
             self._send_json(200 if result.ok else 400, {"ok": result.ok, "path": result.path, "message": result.message})
 
+        # --- API: лицензия BPMkit ---
+        #
+        # Хаб здесь — тонкий прокси к CLI самого MCP (см. standkit_hub/license_api.py):
+        # своей лицензионной логики у него нет и быть не может. Все три мутации
+        # (запись ключа текстом, запись из файла, снятие активации) проходят обычный
+        # _authorize_mutation — послаблений «это же локально» тут нет.
+
+        def _license_settings(self):
+            """Секция ``companion`` свежего конфига — источник пути к CLI BPMkit."""
+            return _load_config(config_path).companion
+
+        def _license_snapshot(self) -> dict:
+            return license_api.license_info(self._license_settings())
+
+        def _send_license_error(self, exc: "license_api.LicenseCliError") -> None:
+            self._send_json(exc.status, exc.to_dict())
+
+        def _api_license_get(self) -> None:
+            """Сводка лицензии. Конверт не запрашивается и наружу не уходит."""
+            self._send_json(200, self._license_snapshot())
+
+        def _api_license_put(self) -> None:
+            """Новый ключ текстом. В ответе — СВЕЖИЙ снимок, а не эхо запроса.
+
+            Тело запроса наружу не возвращается ни при каком исходе: в нём ключ.
+            """
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            token = body.get("token")
+            if not isinstance(token, str) or not token.strip():
+                self._send_json(400, {"ok": False,
+                                      "error": "поле 'token' обязательно и должно быть непустой строкой",
+                                      "detail": ""})
+                return
+            try:
+                license_api.license_store_token(self._license_settings(), token)
+            except license_api.LicenseCliError as exc:
+                self._send_license_error(exc)
+                return
+            self._send_license_ok()
+
+        def _api_license_file(self) -> None:
+            """Ключ из файла, выбранного нативным диалогом: через браузер он не едет."""
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            path_value = body.get("path")
+            if not isinstance(path_value, str) or not path_value.strip():
+                self._send_json(400, {"ok": False,
+                                      "error": "поле 'path' обязательно и должно быть непустой строкой",
+                                      "detail": ""})
+                return
+            try:
+                license_api.license_store_file(self._license_settings(), path_value)
+            except license_api.LicenseCliError as exc:
+                self._send_license_error(exc)
+                return
+            self._send_license_ok()
+
+        def _api_license_delete(self) -> None:
+            """Снятие активации у издателя + локальное удаление ключа.
+
+            Поля исхода (``remote``/``removed``/``left``) отдаются как есть: их
+            трактует UI, хаб в них не заглядывает.
+            """
+            try:
+                result = license_api.license_deactivate(self._license_settings())
+            except license_api.LicenseCliError as exc:
+                self._send_license_error(exc)
+                return
+            self._send_license_ok(extra=result)
+
+        def _send_license_ok(self, *, extra: Optional[dict] = None) -> None:
+            """Успех мутации = свежий снимок лицензии плюс поля исхода операции.
+
+            Форма ответа НАМЕРЕННО совпадает с ``GET /api/license``: фронту не нужен
+            второй запрос и второй разбор, а состояние экрана после действия не может
+            разъехаться с тем, что покажет следующее чтение.
+            """
+            payload = dict(self._license_snapshot())
+            for key, value in (extra or {}).items():
+                if key != "edition":
+                    payload[key] = value
+            payload["ok"] = True
+            self._send_json(200, payload)
+
+        # --- API: нативный выбор файла/каталога ---
+
+        def _api_pick(self) -> None:
+            """Диалог ОС «выберите файл/каталог» → путь (или ``null`` при отмене).
+
+            Мутацией это не является, но метод — POST (у запроса есть тело), а
+            значит и контур CSRF тот же: диалог поднимает окно на машине оператора,
+            и дёргать его со стороннего сайта нельзя.
+            """
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            kind = body.get("kind") or "file"
+            if kind not in pick_dialog.PICK_KINDS:
+                self._send_json(400, {"error": "поле 'kind' должно быть 'file' или 'dir'"})
+                return
+            for field in ("title", "initial", "filter"):
+                if field in body and body[field] is not None and not isinstance(body[field], str):
+                    self._send_json(400, {"error": f"поле {field!r} должно быть строкой"})
+                    return
+            try:
+                result = pick_dialog.pick(
+                    kind,
+                    title=str(body.get("title") or ""),
+                    initial=str(body.get("initial") or ""),
+                    file_filter=str(body.get("filter") or ""),
+                )
+            except Exception as exc:  # noqa: BLE001 - диалог ОС не роняет хаб
+                self._send_json(500, {"path": None,
+                                      "error": f"диалог выбора не открыт: {type(exc).__name__}: {exc}"})
+                return
+            self._send_json(200, result)
+
         # --- API: канал обновлений издателя ---
         #
         # Шесть действий и один статус. Все действия — мутации (ходят в сеть,
@@ -1817,6 +2005,12 @@ def make_handler(
             status = self._companion_status_dict()
             status["edition"] = EDITION_COMPANION
             status["enabled"] = self._companion_enabled()
+            # Верхнеуровневая сводка паттернов (GAP-241): версия и число применённых.
+            # Вкладке «Обновления» она нужна одной строкой, а не раскопками по
+            # состоянию; ключа нет, когда данных нет (см. companion_patterns_summary).
+            patterns = companion_patterns_summary(status)
+            if patterns is not None:
+                status["patterns"] = patterns
             self._send_json(200, status)
 
         def _api_companion_action(self, action: str) -> None:
@@ -1937,6 +2131,13 @@ def make_handler(
                 self._api_agent_status()
                 return
 
+            if path == "/api/license":
+                # Сводка лицензии — обычное чтение (в ней нет ни ключа, ни конверта).
+                if not self._authorize_read():
+                    return
+                self._api_license_get()
+                return
+
             if path == "/api/companion/status":
                 # Чтение статуса канала — обычный GET /api/*: токен из cookie
                 # ИЛИ заголовка. Отвечает и при выключенном канале (см.
@@ -2028,6 +2229,18 @@ def make_handler(
                 self._api_stand_register()
                 return
 
+            if path == "/api/license/file":
+                if not self._authorize_mutation():
+                    return
+                self._api_license_file()
+                return
+
+            if path == "/api/pick":
+                if not self._authorize_mutation():
+                    return
+                self._api_pick()
+                return
+
             if path == "/api/shortcut/install":
                 if not self._authorize_mutation():
                     return
@@ -2099,6 +2312,12 @@ def make_handler(
             parsed = urlparse(self.path)
             path = parsed.path
 
+            if path == "/api/license":
+                if not self._authorize_mutation():
+                    return
+                self._api_license_delete()
+                return
+
             m = _SECRET_RE.match(path)
             if m:
                 if not self._authorize_mutation():
@@ -2109,9 +2328,21 @@ def make_handler(
             self._send_json(404, {"error": "not found"})
 
         def do_PUT(self) -> None:  # noqa: N802 - сигнатура BaseHTTPRequestHandler
+            """Единственный PUT хаба — запись лицензионного ключа.
+
+            PUT, а не POST, осознанно: ключ на машине один, и запрос заменяет его
+            целиком (идемпотентная замена ресурса), а не добавляет ещё один.
+            """
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/license":
+                if not self._authorize_mutation():
+                    return
+                self._api_license_put()
+                return
             self._send_json(405, {"error": "method not allowed"})
 
-        do_PATCH = do_PUT
+        def do_PATCH(self) -> None:  # noqa: N802 - сигнатура BaseHTTPRequestHandler
+            self._send_json(405, {"error": "method not allowed"})
 
     return Handler
 
