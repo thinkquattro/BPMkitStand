@@ -39,7 +39,11 @@ from standkit.registry import Registry
 from standkit_hub import license_api
 from standkit_hub.config import CompanionSettings, HubConfig
 from standkit_hub.security import generate_session_token
+from standkit_hub import server as server_module
 from standkit_hub.server import create_hub_server
+
+#: Каталог статики диспетчера — для гардов разметки экрана лицензии (GAP-241).
+WEB_DIR = Path(server_module.__file__).parent / "web"
 
 # Текст, изображающий лицензионный ключ. Ни в одном argv он появиться не имеет права.
 FAKE_KEY = "BPMKIT-KEY-c0ffee-НЕ-ДОЛЖЕН-ПОПАСТЬ-В-ARGV"
@@ -523,3 +527,68 @@ def test_put_unknown_path_is_405(hub):
     status, _body, _ = _request(base_url, "/api/settings", token=token, method="PUT",
                                 body={}, origin=base_url)
     assert status == 405
+
+
+# ======================================================================================
+# Фронтенд: статические гарды экрана лицензии и новой шапки (GAP-241)
+# ======================================================================================
+#
+# Браузера в наборе нет, поэтому проверяется то, потеря чего ломает экран молча:
+# сами узлы карточки лицензии, форма ввода ключа, баннеры и строка состояния. Тест
+# смотрит РАЗМЕТКУ и адреса в app.js — то, что нельзя проверить со стороны сервера.
+
+
+def _web(name: str) -> str:
+    return (WEB_DIR / name).read_text(encoding="utf-8")
+
+
+def test_license_pane_markup_exists():
+    """Раздел «Лицензия»: карточка активной лицензии И форма ввода ключа.
+
+    Обе половины обязательны: карточка без формы не даёт добавить ключ, форма без
+    карточки не даёт понять, что уже активировано.
+    """
+    html = _web("index.html")
+    assert 'data-pane="license"' in html, "раздел «Лицензия» потерян"
+    for node in ("license-active", "license-free", "lic-licensee", "lic-tier",
+                 "lic-state", "lic-until", "lic-activated", "lic-source",
+                 "lic-delete-btn", "license-token", "license-drop",
+                 "license-pick-btn", "license-activate-btn"):
+        assert f'id="{node}"' in html, f"узел экрана лицензии потерян: {node}"
+
+
+def test_license_ui_talks_to_license_routes():
+    """Экран лицензии ходит РОВНО в маршруты хаба, а не в свой выдуманный API."""
+    js = _web("app.js")
+    for path in ('"/api/license"', '"/api/license/file"', '"/api/pick"'):
+        assert path in js, f"фронт не знает маршрут {path}"
+    # Удаление лицензии — DELETE, а не POST с флагом: метод несёт смысл.
+    assert 'apiSend("DELETE", "/api/license")' in js
+    # Ключ уезжает телом PUT (не query-параметром — он попал бы в лог доступа).
+    assert 'apiSend("PUT", "/api/license", { token })' in js
+
+
+def test_license_banners_and_statusline_exist():
+    """Предупреждения о сроке — два уровня громкости плюс строка состояния."""
+    html = _web("index.html")
+    for node in ("license-banner-warn", "license-banner-crit", "license-crit-overlay",
+                 "statusline", "sl-license", "sl-mcp-version", "sl-stands"):
+        assert f'id="{node}"' in html, f"узел предупреждений/строки состояния потерян: {node}"
+    js = _web("app.js")
+    # Модальное окно про истёкшую/отозванную лицензию показывается ОДИН раз за
+    # сессию вкладки: повтор на каждом опросе — травля, а не информирование.
+    assert "sessionStorage" in js and "LICENSE_CRIT_SEEN_KEY" in js
+
+
+def test_topbar_has_no_text_glyph_icons():
+    """Иконки шапки — инлайновый SVG, а не глиф из шрифта системы.
+
+    Глифы «?»/«ⓘ»/«▭»/«🌓» рисовались разными шрифтами на разных машинах и
+    выпадали из палитры (эмодзи приезжали в своём цвете). Регресс сюда легко
+    вернуть копипастой, а увидеть — только на чужой машине.
+    """
+    html = _web("index.html")
+    header = html.split("<header", 1)[1].split("</header>", 1)[0]
+    for glyph in ("ⓘ", "▭", "▣", "🌓", ">?<"):
+        assert glyph not in header, f"в шапке остался текстовый глиф {glyph!r}"
+    assert header.count("<svg") >= 5, "иконки шапки перестали быть SVG"

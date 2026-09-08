@@ -6,13 +6,18 @@
   пользователя тёмной темы нет «вспышки» светлой. Значение "auto"
   обрабатывает сам CSS через @media (prefers-color-scheme) — JS для этого
   не нужен. Источник правды — конфиг хаба, localStorage только кэш.
+
+  РАЗМЕТКА СТАТИЧНА. Значения (номера версий, тексты отказов от издателя,
+  имена лицензиатов, пути на диске) проставляются из app.js ТОЛЬКО через
+  textContent: собирать их строками innerHTML — прямой путь к исполнению
+  чужой разметки в окне, которое управляет процессами на машине.
 -->
 <html lang="ru" data-theme="__STANDKIT_THEME__" data-view="__STANDKIT_VIEW__">
 <head>
   <meta charset="UTF-8" />
   <meta name="standkit-token" content="__STANDKIT_TOKEN__" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BPMkit Дашборд</title>
+  <title>Диспетчер стендов BPMkit</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <!--
     Манифест даёт Chrome/Edge кнопку «Установить приложение»: дашборд получает
@@ -27,32 +32,50 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+  <!--
+    Шапка без вкладок: экранов ровно два — «Стенды» (главный) и «Настройки»
+    (шестерёнка). Всё остальное в шапке — иконки-действия. Иконки инлайновые
+    SVG со stroke: currentColor, а не текстовые глифы («?», «ⓘ», «▭», «🌓»):
+    глиф зависит от шрифта системы, ломает вертикальный ритм и в тёмной теме
+    выглядит чужеродно.
+  -->
   <header class="topbar">
-    <img class="brand-logo" src="/static/favicon.svg" alt="BPMkit" />
-    <h1>BPMkit Дашборд</h1>
-    <nav class="tabs">
-      <button class="tab-btn active" data-tab="stands">Стенды</button>
-      <button class="tab-btn" data-tab="agent">Локальный агент</button>
-      <!-- Вкладка канала обновлений издателя. Есть ВСЕГДА, в том числе в
-           свободной редакции: там она честно объясняет, что канал не установлен.
-           Спрятанная вкладка читается как «такой возможности нет вовсе» — и
-           пользователь свободной редакции никогда не узнаёт, чего лишён.
-           Значок внимания (data-attention) зажигается, когда после подмены
-           бинаря MCP требуется перезапуск Claude Desktop — иначе об этом можно
-           узнать, только заглянув во вкладку. -->
-      <button class="tab-btn" data-tab="companion" id="companion-tab-btn">Обновления<span
-        class="tab-attention" id="companion-tab-attention" hidden>●</span></button>
-      <button class="tab-btn" data-tab="settings">Настройки</button>
-    </nav>
+    <button id="brand-btn" class="brand" type="button" title="Стенды">
+      <img class="brand-logo" src="/static/favicon.svg" alt="BPMkit" />
+      <h1>Диспетчер стендов BPMkit</h1>
+    </button>
+
+    <!-- Кнопка «Обновления» есть только в платной редакции И только когда
+         лицензия вообще известна: в свободной редакции обновлять нечего, а
+         кнопка, которая всегда отвечает «недоступно», хуже её отсутствия. -->
+    <button id="btn-updates" class="updates-btn" type="button" title="Обновления BPMkit" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+      <span>Обновления</span>
+      <span class="upd-badge" id="updates-badge" hidden>1</span>
+    </button>
+    <button id="btn-settings" class="topbar-btn" type="button" title="Настройки" aria-label="Настройки">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+    <span class="topbar-sep" aria-hidden="true"></span>
+    <button id="view-toggle-btn" class="topbar-btn" type="button" title="Компактный режим" aria-label="Компактный режим">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 12h18"/></svg>
+    </button>
+    <button id="theme-toggle-btn" class="topbar-btn" type="button" title="Переключить тему" aria-label="Переключить тему">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9c0-.5 0-1-.1-1.4A5.5 5.5 0 0 1 13.4 3.1 9 9 0 0 0 12 3z"/></svg>
+    </button>
     <!-- Кукбук — обычная статика (/static/cookbook.html), один самодостаточный
          файл со всем CSS/JS/картинками внутри: открывается и офлайн, и когда
          диспетчер остановлен (файл можно открыть с диска). Поэтому это <a>, а
          не кнопка с обработчиком в app.js. -->
-    <a id="help-btn" class="about-btn help-btn" href="/static/cookbook.html" target="_blank"
-       rel="noopener" title="Справка — кукбук BPMkitStand" aria-label="Справка">?</a>
-    <button id="about-btn" class="about-btn" type="button" title="О программе">ⓘ</button>
-    <button id="view-toggle-btn" class="view-toggle-btn" type="button" title="Компактный режим">▭</button>
-    <button id="theme-toggle-btn" class="theme-toggle-btn" type="button" title="Переключить тему">🌓</button>
+    <a id="help-btn" class="topbar-btn" href="/static/cookbook.html" target="_blank"
+       rel="noopener" title="Справка — кукбук BPMkitStand" aria-label="Справка">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5V14"/><circle cx="12" cy="17" r=".7" fill="currentColor" stroke="none"/></svg>
+    </a>
+    <!-- «О программе» — не модалка, а раздел настроек: то же содержимое, но
+         его можно открыть рядом с версией MCP и путём к CLI, не теряя экран. -->
+    <button id="about-btn" class="topbar-btn" type="button" title="О программе" aria-label="О программе">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="8" r=".7" fill="currentColor" stroke="none"/></svg>
+    </button>
     <span id="conn-status" class="conn-status" title="Связь с хабом не проверялась">
       <span id="conn-status-dot" class="conn-status-dot conn-status-dot-pending"></span>
       <span id="conn-status-label">подключение…</span>
@@ -68,45 +91,19 @@
     <span id="offline-banner-text"></span>
   </div>
 
-  <div id="about-modal-overlay" class="modal-overlay" hidden>
-    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="about-modal-title">
-      <div class="modal-header">
-        <h2 id="about-modal-title">О программе</h2>
-        <button id="about-modal-close-btn" class="modal-close-btn" type="button" title="Закрыть">✕</button>
-      </div>
-      <div class="modal-body">
-        <div class="about-modal-logo">
-          <img class="about-modal-logo-img about-modal-logo-light" src="/static/bpmkit-logo.svg" alt="BPMkit" />
-          <img class="about-modal-logo-img about-modal-logo-dark" src="/static/bpmkit-logo-dark.svg" alt="BPMkit" />
-        </div>
-        <div class="modal-note">
-          <p>Бесплатная версия — для управления стендами.</p>
-          <p>Автообновление MCP и контроль лицензии доступны в <a class="modal-note-link" href="https://bpmkit.pro" target="_blank" rel="noopener">Companion</a>-версии.</p>
-        </div>
-        <p>BPMkitStand — свободный диспетчер стендов BPMSoft (часть экосистемы BPMkit).</p>
-        <p>Версия: <span id="about-modal-version">…</span></p>
-        <p><a class="modal-note-link" href="/static/cookbook.html" target="_blank" rel="noopener">Справка — кукбук: установка, работа с дашбордом, FAQ, удалённые агенты</a></p>
-        <div class="about-modal-icons">
-          <div class="about-modal-icons-row">
-            <a class="about-modal-icon-link" href="https://bpmkit.pro" target="_blank" rel="noopener" title="Сайт bpmkit.pro" aria-label="Сайт bpmkit.pro">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3c2.6 2.6 4 5.7 4 9s-1.4 6.4-4 9c-2.6-2.6-4-5.7-4-9s1.4-6.4 4-9z"/></svg>
-            </a>
-            <a class="about-modal-icon-link" href="https://github.com/thinkquattro/BPMkitStand" target="_blank" rel="noopener" title="Репозиторий" aria-label="Репозиторий на GitHub">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2C6.48 2 2 6.58 2 12.2c0 4.5 2.87 8.32 6.84 9.67.5.1.68-.22.68-.5 0-.24-.01-1.04-.01-1.88-2.78.61-3.37-1.2-3.37-1.2-.45-1.18-1.11-1.5-1.11-1.5-.9-.63.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.9 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.36-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.31.1-2.72 0 0 .84-.27 2.75 1.05a9.3 9.3 0 0 1 5 0c1.9-1.32 2.74-1.05 2.74-1.05.56 1.41.21 2.46.1 2.72.65.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .28.18.61.69.5A10.02 10.02 0 0 0 22 12.2C22 6.58 17.52 2 12 2z"/></svg>
-            </a>
-          </div>
-          <div class="about-modal-icons-row about-modal-author">
-            <span class="about-modal-author-name">Владимир Терновский</span>
-            <a class="about-modal-icon-link" href="https://t.me/quattrolife" target="_blank" rel="noopener" title="Telegram разработчика" aria-label="Telegram разработчика">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M21.9 4.3 2.7 11.9c-1.2.5-1.2 1.2-.2 1.5l4.9 1.5 1.9 5.9c.2.6.4.8.8.8.4 0 .6-.2.9-.5l2.2-2.1 4.6 3.4c.8.5 1.4.2 1.6-.8l3-14.2c.3-1.2-.4-1.7-1.5-1.1zM8.3 13.9l9.5-6c.5-.3.9-.1.6.3l-8 7.3-.3 3.2z" fill-rule="evenodd"/></svg>
-            </a>
-          </div>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button id="about-modal-close-footer-btn" type="button" class="secondary">Закрыть</button>
-      </div>
-    </div>
+  <!--
+    Лицензионные баннеры. Жёлтый — предупреждение (4–7 дней до конца срока),
+    красный — уже больно (осталось ≤3 дней, истекла, отозвана). Разные цвета
+    именно потому, что «через неделю» и «завтра всё выключится» требуют разной
+    реакции, а один нейтральный баннер обе ситуации обесценивает.
+  -->
+  <div id="license-banner-warn" class="license-banner license-banner-warn" role="status" hidden>
+    <span><strong id="license-banner-warn-title">Лицензия истекает через 7 дней</strong><span id="license-banner-warn-text"></span></span>
+    <button type="button" class="license-banner-open" data-open-license>Открыть лицензию</button>
+  </div>
+  <div id="license-banner-crit" class="license-banner license-banner-crit" role="alert" hidden>
+    <span><strong id="license-banner-crit-title">Срок лицензии истёк</strong><span id="license-banner-crit-text"></span></span>
+    <button type="button" class="license-banner-open" data-open-license>Открыть лицензию</button>
   </div>
 
   <!-- Модалка "Зарегистрировать стенд" — форма записи УЖЕ существующего
@@ -325,7 +322,8 @@
   </div>
 
   <main>
-    <section id="tab-stands" class="tab-panel active">
+    <!-- ═══ Сцена: стенды ═══ -->
+    <section id="scene-stands" class="scene active">
       <div class="panel-toolbar">
         <button id="refresh-stands-btn">Обновить</button>
         <button id="register-stand-btn" class="secondary" type="button">Зарегистрировать стенд</button>
@@ -415,362 +413,376 @@
       </div>
     </section>
 
-    <section id="tab-agent" class="tab-panel">
-      <div class="agent-explainer">
-        <p>
-          Локальный <code>standkit_agent</code> — headless-служба, которую ставят
-          <strong>на хост со стендами</strong>, чтобы удалённый диспетчер BPMkitStand
-          (этот дашборд на машине оператора) мог федеративно управлять стендами
-          <strong>этой машины</strong> по HTTP — см. значение <code>transport: agent</code>
-          у записи стенда в реестре.
-        </p>
-        <p>
-          Агент нужен ТОЛЬКО для удалённого управления. Если вы управляете стендами
-          локально, с этой же машины, где они запущены (<code>transport: local</code>),
-          агент не требуется — ядро standkit работает со стендами напрямую.
-        </p>
-        <p>
-          Кнопки ниже запускают/останавливают такой агент на ТЕКУЩЕЙ машине с
-          параметрами из вкладки «Настройки» (host/port/токены/TLS) — чтобы другие
-          хабы могли подключиться к стендам этой машины.
-        </p>
-      </div>
-      <p>Статус: <span id="agent-status">…</span></p>
-      <div class="panel-toolbar">
-        <button id="agent-start-btn">Запустить агент</button>
-        <button id="agent-stop-btn">Остановить агент</button>
-      </div>
-      <span id="agent-error" class="error-text"></span>
-    </section>
+    <!-- ═══ Сцена: настройки ═══
+         Разделы — вертикальная рейка слева, а не свёрнутые <details> друг под
+         другом: список разделов виден целиком, и человек сразу знает, где
+         лежит лицензия, а где параметры демона агента. Форма одна на все
+         разделы (имена полей = ключи конфига, см. app.js::SETTINGS_FIELDS),
+         поэтому «Сохранить» в любом разделе сохраняет всю форму целиком. -->
+    <section id="scene-settings" class="scene">
+      <form id="settings-form" class="settings-form settings-layout">
+        <nav class="settings-rail" id="settings-rail" aria-label="Разделы настроек">
+          <div class="settings-rail-title">Настройки</div>
+          <button type="button" data-pane="general" class="active">Основные</button>
+          <button type="button" data-pane="license">Лицензия</button>
+          <button type="button" data-pane="updates" id="rail-updates" hidden>Обновления</button>
+          <button type="button" data-pane="remote">Удалённые стенды</button>
+          <button type="button" data-pane="agent">Локальный агент</button>
+          <button type="button" data-pane="about">О программе</button>
+        </nav>
 
-    <!--
-      Вкладка «Обновления» — канал доставки обновлений издателя
-      (пакет standkit_companion, см. standkit_hub/server.py::/api/companion/*).
-
-      Разметка СТАТИЧНАЯ, значения проставляет app.js через textContent: в
-      карточки едут тексты от издателя (описания отказов, номера версий, пути),
-      и собирать их строками innerHTML — прямой путь к внедрению разметки из
-      чужого ответа. Единственное, что меняет JS, — текст, класс цвета и
-      атрибуты disabled/title у кнопок.
-
-      Кнопки недоступных действий НЕ прячутся, а выключаются с подсказкой
-      почему: спрятанная кнопка читается как «функции нет» и заставляет искать
-      её в настройках, документации и поддержке.
-    -->
-    <section id="tab-companion" class="tab-panel">
-      <!-- Перезапуск после подмены бинаря. Требование постановки: пользователь
-           ОБЯЗАН увидеть внятное сообщение, а не тихое «обновлено» — перезапуск
-           плагина MCP-сервер заново не поднимает, нужен рестарт всего
-           приложения. Баннер держится, пока состояние канала помнит флаг. -->
-      <div id="companion-restart-banner" class="companion-banner companion-banner-warn"
-           role="alert" hidden>
-        <strong>Перезапустите Claude Desktop.</strong>
-        <span id="companion-restart-detail">Обновление MCP применено, но новая версия
-          начнёт работать только после полного перезапуска приложения: перезагрузка
-          плагина MCP-сервер заново не поднимает.</span>
-      </div>
-
-      <div class="companion-head">
-        <p id="companion-edition" class="companion-edition">Проверяем редакцию…</p>
-        <div class="panel-toolbar companion-head-actions">
-          <button type="button" id="companion-refresh-btn" class="secondary">Обновить состояние</button>
-          <span id="companion-status-text" class="status-text"></span>
-        </div>
-      </div>
-
-      <p id="companion-unavailable" class="companion-note" hidden></p>
-      <p id="companion-error" class="error-text"></p>
-
-      <div id="companion-cards" class="companion-cards" hidden>
-        <!-- ── Паттерны ─────────────────────────────────────────────────── -->
-        <article class="companion-card" data-cycle="patterns">
-          <header class="companion-card-head">
-            <h3>Паттерны разработки</h3>
-            <span class="companion-cycle-state" data-role="cycle-enabled"></span>
-          </header>
-          <p class="companion-card-why">
-            Markdown, а не исполняемый код: достаточно проверки контрольной суммы,
-            поэтому цикл включён по умолчанию и ходит часто.
-          </p>
-          <dl class="companion-facts">
-            <div><dt>Последний прогон</dt><dd data-role="last-status">—</dd></div>
-            <div><dt>Когда</dt><dd data-role="last-time">—</dd></div>
-            <div><dt>Следующий</dt><dd data-role="next-run">—</dd></div>
-            <div><dt>Применено паттернов</dt><dd data-role="applied-count">—</dd></div>
-            <div><dt>Корень базы паттернов</dt><dd data-role="patterns-root">—</dd></div>
-          </dl>
-          <p class="companion-detail" data-role="detail"></p>
-          <div class="panel-toolbar companion-card-actions">
-            <button type="button" data-companion-action="sync_patterns">Синхронизировать</button>
+        <div class="settings-panes">
+          <!-- ── Основные ─────────────────────────────────────────────── -->
+          <div class="settings-pane active" data-pane="general">
+            <h2>Основные</h2>
+            <label>Реестр стендов
+              <span class="path-row">
+                <input type="text" name="registry_path" />
+                <button type="button" class="pick-btn" data-pick="file" data-pick-for="registry_path"
+                        title="Выбрать файл">…</button>
+              </span>
+              <small class="field-hint">Файл <code>projects.json</code>, общий с BPMkit.</small>
+            </label>
+            <label>Каталог pid-файлов
+              <span class="path-row">
+                <input type="text" name="run_dir" />
+                <button type="button" class="pick-btn" data-pick="dir" data-pick-for="run_dir"
+                        title="Выбрать папку">…</button>
+              </span>
+            </label>
+            <label>Каталог логов
+              <span class="path-row">
+                <input type="text" name="log_dir" />
+                <button type="button" class="pick-btn" data-pick="dir" data-pick-for="log_dir"
+                        title="Выбрать папку">…</button>
+              </span>
+              <small class="field-hint">Сюда пишется вывод стендов, запущенных диспетчером.</small>
+            </label>
+            <label>Опрашивать стенды каждые, сек
+              <input type="number" name="refresh_interval_sec" min="1" max="3600" />
+            </label>
+            <div class="panel-toolbar pane-actions">
+              <button type="submit">Сохранить</button>
+              <button type="button" id="install-shortcut-btn" class="secondary">Создать ярлык на рабочем столе</button>
+              <span id="settings-status" class="status-text"></span>
+            </div>
           </div>
-        </article>
 
-        <!-- ── Обновление MCP ───────────────────────────────────────────── -->
-        <article class="companion-card" data-cycle="releases">
-          <header class="companion-card-head">
-            <h3>Обновление MCP</h3>
-            <span class="companion-cycle-state" data-role="cycle-enabled"></span>
-          </header>
-          <p class="companion-card-why">
-            Исполняемый файл: политика строго fail-closed — без подтверждённой подписи
-            обновление не применяется, и это не отключается настройкой. Подмену бинаря
-            запускает только человек, автоматика доходит максимум до подготовки.
-          </p>
-          <dl class="companion-facts">
-            <div><dt>Последняя проверка</dt><dd data-role="last-status">—</dd></div>
-            <div><dt>Когда</dt><dd data-role="last-time">—</dd></div>
-            <div><dt>Следующая</dt><dd data-role="next-run">—</dd></div>
-            <div><dt>Установленная версия</dt><dd data-role="current-version">—</dd></div>
-            <div><dt>Известная у издателя</dt><dd data-role="known-latest">—</dd></div>
-            <div><dt>Подготовлено к установке</dt><dd data-role="staged-version">—</dd></div>
-          </dl>
-          <p class="companion-detail" data-role="detail"></p>
-          <!-- Честная строка про выключенный по умолчанию цикл релизов: он
-               остаётся выключенным, пока издатель не выпустит ключ подписи
-               артефактов и не переедет на HTTPS. -->
-          <p id="companion-releases-off" class="companion-note" hidden>
-            Цикл обновления MCP <b>выключен по умолчанию</b>. Он включится не раньше, чем
-            издатель выпустит ключ подписи артефактов и переведёт канал на HTTPS: до тех пор
-            подпись бинаря подтвердить нечем. Без валидной подписи обновление не применяется
-            в принципе — это не отключается флагом, и включение цикла в настройках такой
-            проверки не отменяет.
-          </p>
-          <div class="panel-toolbar companion-card-actions">
-            <button type="button" data-companion-action="check_update">Проверить обновление</button>
-            <button type="button" data-companion-action="stage_update">Подготовить</button>
-            <button type="button" data-companion-action="apply_update">Установить</button>
-            <button type="button" data-companion-action="rollback" class="secondary">Откатить</button>
+          <!-- ── Лицензия ─────────────────────────────────────────────── -->
+          <div class="settings-pane" data-pane="license">
+            <h2>Лицензия</h2>
+            <p id="license-error" class="error-text"></p>
+
+            <div id="license-active" hidden>
+              <div class="lic-card">
+                <div><div class="lic-k">Лицензиат</div><div class="lic-v" id="lic-licensee">—</div></div>
+                <div><div class="lic-k">Тариф</div><div class="lic-v" id="lic-tier">—</div></div>
+                <div><div class="lic-k">Состояние</div><div class="lic-v" id="lic-state">—</div></div>
+                <div><div class="lic-k">Действует до</div><div class="lic-v" id="lic-until">—</div></div>
+                <div><div class="lic-k">Активирована на</div><div class="lic-v" id="lic-activated">—</div></div>
+                <div><div class="lic-k">Хранится</div><div class="lic-v" id="lic-source">—</div></div>
+              </div>
+              <div class="panel-toolbar pane-actions">
+                <button type="button" id="lic-delete-btn" class="danger tip"
+                        data-tip="Снять активацию с этого компьютера и удалить ключ. Ключ можно будет использовать на другой машине."
+                        title="Снять активацию с этого компьютера и удалить ключ. Ключ можно будет использовать на другой машине.">Удалить лицензию</button>
+                <span id="license-status" class="status-text"></span>
+              </div>
+            </div>
+
+            <div id="license-free" hidden>
+              <div class="free-offer">
+                <b>Лицензия не активирована — работает свободная редакция.</b>
+                <div class="free-offer-lead">С лицензией BPMkit получает:</div>
+                <ul>
+                  <li>паттерны разработки — базу проверенных решений для BPMSoft;</li>
+                  <li>автоматические обновления MCP;</li>
+                  <li>генерацию документов и платные инструменты кастомизации.</li>
+                </ul>
+              </div>
+              <h3>Добавить лицензию</h3>
+              <p class="pane-lead">Вставьте ключ или укажите файл <code>.lic</code> — диспетчер проверит и активирует его сам.</p>
+              <!-- Ключ уезжает на хаб в теле PUT (а не аргументом процесса) —
+                   см. standkit_hub/license_api.py. Файл, выбранный кнопкой
+                   «выбрать файл…», через страницу не едет вовсе: хаб получает
+                   один путь и читает файл сам. -->
+              <textarea id="license-token" rows="3" spellcheck="false" placeholder="BPMKIT-LIC…"></textarea>
+              <div id="license-drop" class="license-drop">Перетащите файл лицензии сюда &nbsp;·&nbsp;
+                <button type="button" id="license-pick-btn" class="linklike">выбрать файл…</button>
+              </div>
+              <div class="panel-toolbar pane-actions">
+                <button type="button" id="license-activate-btn">Активировать</button>
+                <span id="license-free-status" class="status-text"></span>
+              </div>
+            </div>
+
+            <p id="license-unavailable" class="pane-note" hidden></p>
           </div>
-        </article>
 
-        <!-- ── Отзыв лицензий ───────────────────────────────────────────── -->
-        <article class="companion-card" data-cycle="revocations">
-          <header class="companion-card-head">
-            <h3>Отзыв лицензий</h3>
-            <span class="companion-cycle-state" data-role="cycle-enabled"></span>
-          </header>
-          <p class="companion-card-why">
-            Публичный список, подпись проверяется всегда и без исключений: подделка этого
-            файла означала бы снятие отзыва. Запрашивается даже тогда, когда основной канал
-            уже ответил «лицензия отозвана», — иначе об отзыве нельзя было бы узнать.
-          </p>
-          <dl class="companion-facts">
-            <div><dt>Последняя проверка</dt><dd data-role="last-status">—</dd></div>
-            <div><dt>Когда</dt><dd data-role="last-time">—</dd></div>
-            <div><dt>Следующая</dt><dd data-role="next-run">—</dd></div>
-            <div><dt>Отозвано ключей в списке</dt><dd data-role="revoked-count">—</dd></div>
-          </dl>
-          <p class="companion-detail" data-role="detail"></p>
-          <div class="panel-toolbar companion-card-actions">
-            <button type="button" data-companion-action="refresh_revocations">Обновить список</button>
+          <!-- ── Обновления (настройки канала) ────────────────────────── -->
+          <div class="settings-pane" data-pane="updates" id="settings-companion">
+            <h2>Обновления</h2>
+            <p class="pane-lead">Паттерны обновляются автоматически, новая версия MCP ставится только по вашей команде.</p>
+            <label class="checkbox-label">
+              <input type="checkbox" name="companion_enabled" />
+              Канал обновлений включён
+            </label>
+            <label>Проверять паттерны каждые, ч
+              <input type="number" name="companion_patterns_interval_hours" min="1" max="168" />
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" name="companion_releases_enabled" />
+              Проверять новые версии MCP по расписанию
+            </label>
+            <label>Проверять версии MCP каждые, ч
+              <input type="number" name="companion_releases_interval_hours" min="1" max="168" />
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" name="companion_auto_stage_release" />
+              Скачивать новую версию MCP заранее, установку подтверждаю сам
+            </label>
+            <label>CLI BPMkit
+              <span class="path-row">
+                <input type="text" name="companion_mcp_cli" />
+                <button type="button" class="pick-btn" data-pick="file" data-pick-for="companion_mcp_cli"
+                        title="Выбрать файл">…</button>
+              </span>
+              <small class="field-hint">Найден автоматически; менять нужно только при нестандартной установке.</small>
+            </label>
+            <div class="panel-toolbar pane-actions">
+              <button type="submit">Сохранить</button>
+            </div>
           </div>
-        </article>
-      </div>
 
-      <p id="companion-context" class="hint-text"></p>
-    </section>
+          <!-- ── Удалённые стенды ─────────────────────────────────────── -->
+          <div class="settings-pane" data-pane="remote" id="settings-remote">
+            <h2>Удалённые стенды<span class="settings-group-note" id="remote-agents-count"></span></h2>
+            <p class="pane-lead">Стенды на других машинах, где установлен агент BPMkit. Для локальных стендов ничего настраивать не нужно.</p>
+            <div id="agents-list"></div>
+            <button type="button" id="add-agent-btn" class="secondary">+ Добавить агента</button>
+            <div class="panel-toolbar pane-actions">
+              <button type="submit">Сохранить</button>
+            </div>
+          </div>
 
-    <section id="tab-settings" class="tab-panel">
-      <form id="settings-form" class="settings-form">
-        <fieldset>
-          <legend>Основные</legend>
-          <label>Путь к реестру стендов
-            <input type="text" name="registry_path" />
-            <small class="field-hint">Файл <code>projects.json</code>, общий с BPMkit.</small>
-          </label>
-          <label>Каталог pid-файлов
-            <input type="text" name="run_dir" />
-            <small class="field-hint">Куда диспетчер пишет pid запущенных им стендов.</small>
-          </label>
-          <label>Каталог логов
-            <input type="text" name="log_dir" />
-            <small class="field-hint">Куда перенаправляется вывод стенда при запуске.</small>
-          </label>
-          <label>Интервал автообновления, сек
-            <input type="number" name="refresh_interval_sec" min="1" max="3600" />
-            <small class="field-hint">Как часто дашборд перепроверяет состояние стендов.</small>
-          </label>
-        </fieldset>
+          <!-- ── Локальный агент ──────────────────────────────────────── -->
+          <div class="settings-pane" data-pane="agent">
+            <h2>Локальный агент</h2>
+            <p class="pane-lead">Нужен, только если стендами <em>этой</em> машины будут управлять с другого компьютера.</p>
+            <div class="agent-state-row">
+              <span>Состояние: <span id="agent-status">…</span></span>
+              <button type="button" id="agent-start-btn">Запустить</button>
+              <button type="button" id="agent-stop-btn" class="secondary">Остановить</button>
+              <span id="agent-error" class="error-text"></span>
+            </div>
 
-        <details class="settings-group" id="settings-remote">
-          <summary>Удалённые стенды<span class="settings-group-note" id="remote-agents-count"></span></summary>
-          <p class="settings-group-help">
-            Нужно, только если часть стендов живёт на других хостах под управлением
-            <code>standkit-agent</code>. Для локальных стендов оставьте пустым.
-          </p>
-          <div id="agents-list"></div>
-          <button type="button" id="add-agent-btn">+ Добавить агента</button>
-        </details>
+            <!-- Блок расширенных параметров демона показывается, только когда
+                 он может понадобиться (есть стенд с transport=agent, настроен
+                 удалённый агент или поля уже заполнены) —
+                 app.js::updateAgentBlockVisibility. -->
+            <fieldset id="settings-agent-advanced" class="sub-fieldset" hidden>
+              <legend>Параметры агента</legend>
+              <div class="form-row">
+                <label>Адрес
+                  <input type="text" name="agent_host" />
+                </label>
+                <label>Порт
+                  <input type="number" name="agent_port" min="1" max="65535" />
+                </label>
+              </div>
+              <small class="field-hint">Loopback — безопасный дефолт; внешний адрес требует TLS.</small>
+              <label>Токен управления
+                <span class="secret-row">
+                  <input type="text" name="token_ref" />
+                  <button type="button" class="set-secret-btn secondary" data-ref-field="token_ref">Задать…</button>
+                  <span class="secret-status" data-ref-status="token_ref"></span>
+                </span>
+                <small class="field-hint">Ссылка на секрет, а не сам токен: старт, стоп, рестарт.</small>
+              </label>
+              <label>Токен «только чтение»
+                <span class="secret-row">
+                  <input type="text" name="readonly_token_ref" />
+                  <button type="button" class="set-secret-btn secondary" data-ref-field="readonly_token_ref">Задать…</button>
+                  <span class="secret-status" data-ref-status="readonly_token_ref"></span>
+                </span>
+                <small class="field-hint">Ссылка на секрет для скоупа «только чтение»: статус и логи.</small>
+              </label>
+              <label>TLS-сертификат
+                <span class="path-row">
+                  <input type="text" name="tls_cert" placeholder="cert.pem" />
+                  <button type="button" class="pick-btn" data-pick="file" data-pick-for="tls_cert" title="Выбрать файл">…</button>
+                </span>
+              </label>
+              <label>TLS-ключ
+                <span class="path-row">
+                  <input type="text" name="tls_key" placeholder="key.pem" />
+                  <button type="button" class="pick-btn" data-pick="file" data-pick-for="tls_key" title="Выбрать файл">…</button>
+                </span>
+              </label>
+              <label>CA клиентов (mTLS)
+                <span class="path-row">
+                  <input type="text" name="tls_client_ca" placeholder="необязательно" />
+                  <button type="button" class="pick-btn" data-pick="file" data-pick-for="tls_client_ca" title="Выбрать файл">…</button>
+                </span>
+                <small class="field-hint">Подключиться сможет только клиент с сертификатом от этого CA.</small>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" name="insecure" />
+                insecure — разрешить bind на non-loopback без TLS
+              </label>
+              <p class="field-hint field-hint-warn">
+                Осознанный обход защиты: без этого флага агент не стартует на внешнем адресе
+                без TLS. Только для разработки, никогда на прод.
+              </p>
+              <label>Аудит-лог
+                <span class="path-row">
+                  <input type="text" name="audit_log" />
+                  <button type="button" class="pick-btn" data-pick="file" data-pick-for="audit_log" title="Выбрать файл">…</button>
+                </span>
+                <small class="field-hint">Журнал мутирующих вызовов агента. Токены в него не пишутся.</small>
+              </label>
+              <div class="form-row">
+                <label>Блокировка после, попыток
+                  <input type="number" name="lockout_max_failures" min="1" max="1000" />
+                </label>
+                <label>За окно, сек
+                  <input type="number" name="lockout_window_sec" min="1" max="86400" />
+                </label>
+              </div>
+            </fieldset>
 
-        <details class="settings-group" id="settings-agent-advanced" hidden>
-          <summary>Агент (расширенное)</summary>
-          <p class="settings-group-help">
-            Параметры запуска <strong>локального</strong> <code>standkit-agent</code> — демона,
-            через который к этому хосту обращается диспетчер с другой машины. Блок нужен
-            администратору хоста удалённого стенда; при работе только с локальными стендами
-            трогать его не нужно.
-          </p>
-          <label>Host
-            <input type="text" name="agent_host" />
-            <small class="field-hint">Адрес, на котором биндится демон агента. Loopback — безопасный дефолт.</small>
-          </label>
-          <label>Port
-            <input type="number" name="agent_port" min="1" max="65535" />
-          </label>
-          <label>Control-токен
-            <span class="secret-row">
-              <input type="text" name="token_ref" />
-              <button type="button" class="set-secret-btn" data-ref-field="token_ref">Задать секрет…</button>
-              <span class="secret-status" data-ref-status="token_ref"></span>
-            </span>
-            <small class="field-hint">
-              Ссылка на секрет (не сам токен) для скоупа управления: старт, стоп, рестарт.
-            </small>
-          </label>
-          <label>Readonly-токен
-            <span class="secret-row">
-              <input type="text" name="readonly_token_ref" />
-              <button type="button" class="set-secret-btn" data-ref-field="readonly_token_ref">Задать секрет…</button>
-              <span class="secret-status" data-ref-status="readonly_token_ref"></span>
-            </span>
-            <small class="field-hint">Ссылка на секрет для скоупа «только чтение»: статус и логи.</small>
-          </label>
-          <label>TLS-сертификат
-            <input type="text" name="tls_cert" />
-            <small class="field-hint">PEM-сертификат: включает HTTPS у агента.</small>
-          </label>
-          <label>TLS-ключ
-            <input type="text" name="tls_key" />
-          </label>
-          <label>TLS client CA
-            <input type="text" name="tls_client_ca" />
-            <small class="field-hint">
-              Включает mTLS: подключиться сможет только клиент с сертификатом от этого CA.
-            </small>
-          </label>
-          <label class="checkbox-label">
-            <input type="checkbox" name="insecure" />
-            insecure — разрешить bind на non-loopback без TLS
-          </label>
-          <p class="field-hint field-hint-warn">
-            Осознанный обход защиты: без этого флага агент не стартует на внешнем адресе
-            без TLS. Только для разработки, никогда на прод.
-          </p>
-          <label>Аудит-лог
-            <input type="text" name="audit_log" />
-            <small class="field-hint">Журнал мутирующих вызовов агента. Токены в него не пишутся.</small>
-          </label>
-          <label>Порог блокировки
-            <input type="number" name="lockout_max_failures" min="1" max="1000" />
-            <small class="field-hint">Сколько неудачных попыток с одного адреса включают блокировку.</small>
-          </label>
-          <label>Окно блокировки, сек
-            <input type="number" name="lockout_window_sec" min="1" max="86400" />
-          </label>
-        </details>
+            <div class="panel-toolbar pane-actions">
+              <button type="submit">Сохранить</button>
+            </div>
+          </div>
 
-        <!--
-          Канал обновлений издателя. Секция в конфиге ВЛОЖЕННАЯ (companion.*), а
-          остальная форма работает с плоскими именами полей — поэтому её сборку
-          и разбор делает отдельная пара функций в app.js
-          (fillCompanionSettings / collectCompanionSettings), а не подбор имён.
-          Имена полей здесь намеренно с префиксом companion_: они НЕ совпадают с
-          ключами конфига, чтобы никто не соблазнился отправить их плоско.
-
-          Интервалы показаны в минутах и часах (человеку удобно), а в API уходят
-          в секундах (конфиг обязан быть однозначным). Нижние границы дублируют
-          границы сервера — он всё равно поджимает значение сам (CompanionCycle).
-        -->
-        <details class="settings-group" id="settings-companion">
-          <summary>Канал обновлений<span class="settings-group-note" id="companion-settings-note"></span></summary>
-          <p class="settings-group-help">
-            Доставка от издателя: паттерны разработки, обновления MCP и список отозванных
-            лицензий. Состояние и кнопки — на вкладке <b>«Обновления»</b>. В свободной
-            редакции секция ни на что не влияет.
-          </p>
-          <label class="checkbox-label">
-            <input type="checkbox" name="companion_enabled" />
-            Канал обновлений включён
-          </label>
-          <p class="field-hint">
-            Главный рубильник. Выключен — фоновые проверки не выполняются и кнопки действий
-            недоступны; статус при этом продолжает показываться.
-          </p>
-          <label>Адрес бэкенда издателя
-            <input type="text" name="companion_backend_url" />
-            <small class="field-hint">
-              Пусто — используется адрес по умолчанию из клиентского MCP. Своей второй
-              константы адреса канал не заводит. Адрес обязан быть <code>https://…</code>:
-              по каналу едет исполняемый файл MCP, и по открытому <code>http://</code>
-              канал не работает (исключение — локальный бэкенд на 127.0.0.1/localhost).
-            </small>
-          </label>
-          <label>Путь к CLI BPMkit
-            <input type="text" name="companion_mcp_cli" />
-            <small class="field-hint">
-              У него канал спрашивает лицензионный контекст (<code>bpmkit.exe</code> либо
-              <code>python -m bpmkit</code>). Пусто — автодетект рядом с поставкой.
-              Диагностика «лицензионный контекст недоступен» чинится именно здесь.
-            </small>
-          </label>
-
-          <label class="checkbox-label">
-            <input type="checkbox" name="companion_patterns_enabled" />
-            Паттерны: проверять по расписанию
-          </label>
-          <label>Паттерны — интервал, мин
-            <input type="number" name="companion_patterns_interval_min" min="5" max="1440" />
-            <small class="field-hint">Не чаще пяти минут: слишком частый опрос выглядит у издателя как перебор ключа.</small>
-          </label>
-
-          <label class="checkbox-label">
-            <input type="checkbox" name="companion_releases_enabled" />
-            Обновление MCP: проверять по расписанию
-          </label>
-          <label>Обновление MCP — интервал, ч
-            <input type="number" name="companion_releases_interval_hours" min="1" max="168" />
-            <small class="field-hint">Не чаще раза в час. По умолчанию — раз в сутки.</small>
-          </label>
-          <p class="field-hint field-hint-warn">
-            Цикл выключен по умолчанию и остаётся таким, пока издатель не выпустит ключ
-            подписи артефактов и не переведёт канал на HTTPS. Включение НЕ отменяет проверку
-            подписи бинаря: без валидной подписи обновление не применяется в принципе.
-          </p>
-
-          <label class="checkbox-label">
-            <input type="checkbox" name="companion_revocations_enabled" />
-            Отзыв лицензий: проверять по расписанию
-          </label>
-          <label>Отзыв лицензий — интервал, мин
-            <input type="number" name="companion_revocations_interval_min" min="5" max="1440" />
-          </label>
-
-          <label class="checkbox-label">
-            <input type="checkbox" name="companion_auto_stage_release" />
-            Скачивать обновление заранее (без установки)
-          </label>
-          <p class="field-hint">
-            Файл кладётся в каталог подготовки и проверяется, но ничего в поставке не
-            меняется: установку запускает только кнопка «Установить».
-          </p>
-          <label class="checkbox-label">
-            <input type="checkbox" name="companion_require_pattern_signature" />
-            Требовать подпись у каждого паттерна
-          </label>
-          <p class="field-hint">
-            Ужесточение на будущее: механизма подписи markdown у издателя пока нет, и
-            включение сегодня остановит доставку паттернов целиком.
-          </p>
-        </details>
-
-        <div class="panel-toolbar">
-          <button type="submit">Сохранить настройки</button>
-          <button type="button" id="install-shortcut-btn">Создать ярлык на рабочем столе</button>
-          <span id="settings-status" class="status-text"></span>
+          <!-- ── О программе ──────────────────────────────────────────── -->
+          <div class="settings-pane" data-pane="about">
+            <h2>О программе</h2>
+            <div class="about-logo">
+              <img class="about-logo-img about-logo-light" src="/static/bpmkit-logo.svg" alt="BPMkit" />
+              <img class="about-logo-img about-logo-dark" src="/static/bpmkit-logo-dark.svg" alt="BPMkit" />
+            </div>
+            <div class="lic-card">
+              <div><div class="lic-k">Диспетчер стендов</div><div class="lic-v" id="about-version">…</div></div>
+              <div><div class="lic-k">MCP-сервер BPMkit</div><div class="lic-v" id="about-mcp-version">—</div></div>
+              <div><div class="lic-k">Адрес диспетчера</div><div class="lic-v" id="about-origin">—</div></div>
+              <div><div class="lic-k">Редакция</div><div class="lic-v" id="about-edition">—</div></div>
+            </div>
+            <p class="pane-lead">BPMkitStand — свободный диспетчер стендов BPMSoft (часть экосистемы BPMkit).</p>
+            <p class="pane-lead">
+              Справка — <a href="/static/cookbook.html" target="_blank" rel="noopener">кукбук BPMkit</a>:
+              установка, работа с диспетчером, FAQ, удалённые агенты.
+            </p>
+            <div class="about-icons">
+              <a class="about-icon-link" href="https://bpmkit.pro" target="_blank" rel="noopener" title="Сайт bpmkit.pro" aria-label="Сайт bpmkit.pro">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3c2.6 2.6 4 5.7 4 9s-1.4 6.4-4 9c-2.6-2.6-4-5.7-4-9s1.4-6.4 4-9z"/></svg>
+              </a>
+              <a class="about-icon-link" href="https://github.com/thinkquattro/BPMkitStand" target="_blank" rel="noopener" title="Репозиторий" aria-label="Репозиторий на GitHub">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2C6.48 2 2 6.58 2 12.2c0 4.5 2.87 8.32 6.84 9.67.5.1.68-.22.68-.5 0-.24-.01-1.04-.01-1.88-2.78.61-3.37-1.2-3.37-1.2-.45-1.18-1.11-1.5-1.11-1.5-.9-.63.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.9 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.36-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.31.1-2.72 0 0 .84-.27 2.75 1.05a9.3 9.3 0 0 1 5 0c1.9-1.32 2.74-1.05 2.74-1.05.56 1.41.21 2.46.1 2.72.65.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .28.18.61.69.5A10.02 10.02 0 0 0 22 12.2C22 6.58 17.52 2 12 2z"/></svg>
+              </a>
+              <span class="about-author-name">Владимир Терновский</span>
+              <a class="about-icon-link" href="https://t.me/quattrolife" target="_blank" rel="noopener" title="Telegram разработчика" aria-label="Telegram разработчика">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M21.9 4.3 2.7 11.9c-1.2.5-1.2 1.2-.2 1.5l4.9 1.5 1.9 5.9c.2.6.4.8.8.8.4 0 .6-.2.9-.5l2.2-2.1 4.6 3.4c.8.5 1.4.2 1.6-.8l3-14.2c.3-1.2-.4-1.7-1.5-1.1zM8.3 13.9l9.5-6c.5-.3.9-.1.6.3l-8 7.3-.3 3.2z" fill-rule="evenodd"/></svg>
+              </a>
+            </div>
+          </div>
         </div>
       </form>
     </section>
   </main>
+
+  <!-- Строка состояния: то, что нужно знать краем глаза и всегда — версия MCP,
+       срок лицензии, свежесть паттернов и сколько стендов работает. -->
+  <footer class="statusline" id="statusline">
+    <span id="sl-mcp">MCP <b id="sl-mcp-version">—</b></span>
+    <span id="sl-license"></span>
+    <span id="sl-patterns" hidden></span>
+    <span class="statusline-spacer"></span>
+    <span id="sl-stands"></span>
+  </footer>
+
+  <!-- ═══ Окно «Обновления BPMkit» ═══
+       Диалог, а не отдельный экран: обновления — редкое действие, ради
+       которого не стоит уводить человека со списка стендов. -->
+  <div id="updates-overlay" class="modal-overlay" hidden>
+    <div class="modal-box modal-box-updates" role="dialog" aria-modal="true" aria-labelledby="updates-title">
+      <div class="modal-header">
+        <h2 id="updates-title">Обновления BPMkit</h2>
+        <span id="updates-checked-at" class="status-text"></span>
+        <button id="updates-close-btn" class="modal-close-btn" type="button" title="Закрыть" aria-label="Закрыть">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p id="updates-error" class="error-text"></p>
+        <p id="updates-note" class="pane-note" hidden></p>
+
+        <div class="upd-row">
+          <div class="upd-ico">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-2z"/><path d="M8 7h8M8 11h8M8 15h5"/></svg>
+          </div>
+          <div class="upd-main">
+            <div class="upd-title">Паттерны разработки</div>
+            <div class="upd-desc">База проверенных решений для BPMSoft, которой BPMkit пользуется при кастомизации. Обновляется автоматически.</div>
+            <div class="upd-meta" id="upd-patterns-meta">—</div>
+            <div class="upd-detail" id="upd-patterns-detail" hidden></div>
+          </div>
+          <div class="upd-action">
+            <button type="button" class="secondary" data-companion-action="sync_patterns">Обновить сейчас</button>
+          </div>
+        </div>
+
+        <div class="upd-row">
+          <div class="upd-ico">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>
+          </div>
+          <div class="upd-main">
+            <div class="upd-title">MCP-сервер BPMkit <span class="upd-avail" id="upd-mcp-avail" hidden></span></div>
+            <div class="upd-desc" id="upd-mcp-desc">Новая версия проверяется и скачивается заранее; подмена файла происходит только по вашей команде.</div>
+            <div class="upd-meta" id="upd-mcp-meta">—</div>
+            <div class="upd-detail" id="upd-mcp-detail" hidden></div>
+            <div class="upd-restart" id="upd-restart-note" hidden>
+              <strong>Перезапустите Claude Desktop</strong><span id="upd-restart-detail">, чтобы начала работать новая версия: перезагрузка плагина MCP-сервер заново не поднимает.</span>
+            </div>
+          </div>
+          <div class="upd-action">
+            <button type="button" id="upd-install-btn" data-companion-action="apply_update">Установить</button>
+            <button type="button" id="upd-rollback-btn" class="secondary" data-companion-action="rollback" hidden>Откатить</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer updates-footer">
+        <button type="button" id="updates-close-footer-btn" class="secondary">Закрыть</button>
+        <span class="statusline-spacer"></span>
+        <span id="updates-check-status" class="status-text"></span>
+        <button type="button" class="secondary" data-companion-action="check_update">Проверить обновления</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Модальное окно: лицензия истекла / отозвана ═══
+       Показывается ОДИН раз за сессию вкладки (sessionStorage): платные
+       инструменты уже отключены, и человек обязан узнать об этом сразу, но
+       повторять то же окно на каждом опросе — травля, а не информирование. -->
+  <div id="license-crit-overlay" class="modal-overlay" hidden>
+    <div class="modal-box modal-box-confirm modal-box-crit" role="alertdialog" aria-modal="true" aria-labelledby="license-crit-title">
+      <div class="modal-header">
+        <h2 id="license-crit-title">Лицензия отозвана</h2>
+      </div>
+      <div class="modal-body">
+        <p id="license-crit-body"></p>
+        <p class="modal-note-plain">Если вы считаете это ошибкой, свяжитесь с издателем: support@gbc-team.com.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="license-crit-close-btn" class="secondary">Понятно</button>
+        <button type="button" id="license-crit-open-btn" data-open-license>Открыть лицензию</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Тост обратной связи по действиям окна обновлений и лицензии. -->
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="/static/app.js"></script>
 </body>

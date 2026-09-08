@@ -105,71 +105,124 @@ body {
   border-bottom: 1px solid var(--bpmkit-border);
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-right: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 .brand-logo {
   width: 28px;
   height: 28px;
 }
 
 .topbar h1 {
-  font-size: 18px;
+  font-size: 16px;
+  font-weight: 600;
   margin: 0;
-  margin-right: auto;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 
-.tabs {
-  display: flex;
-  gap: 4px;
-}
+/* Иконки шапки — инлайновые SVG со stroke: currentColor, поэтому цвет и
+   толщина линий одинаковы у всех кнопок и одинаково читаются в обеих темах.
+   Текстовые глифы («?», «ⓘ», «▭», «🌓»), стоявшие здесь раньше, зависели от
+   шрифта системы: на одной машине это была иконка, на другой — эмодзи в цвете
+   Segoe UI Emoji, мимо палитры. */
 
-.tab-btn {
-  border: none;
+.topbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
   background: transparent;
-  padding: 8px 14px;
+  color: var(--bpmkit-text);
   cursor: pointer;
-  border-radius: 6px;
-  color: var(--bpmkit-muted);
-  font-size: 14px;
+  text-decoration: none;
 }
 
-.tab-btn.active {
+.topbar-btn:hover {
+  background: var(--bpmkit-row-hover);
+  border-color: var(--bpmkit-border);
+}
+
+.topbar-btn.active {
+  border-color: var(--bpmkit-primary);
+  color: var(--bpmkit-primary);
+}
+
+.topbar-btn svg,
+.updates-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.updates-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 12px 0 10px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--bpmkit-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.updates-btn:hover {
+  background: var(--bpmkit-row-hover);
+}
+
+.updates-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.updates-btn[hidden] {
+  display: none;
+}
+
+/* Бейдж «есть что поставить»: единственный способ узнать о новой версии, не
+   открывая окно обновлений. */
+.upd-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
   background: var(--bpmkit-primary);
   color: var(--bpmkit-primary-contrast);
+  font-size: 11px;
+  font-weight: 600;
 }
 
-.theme-toggle-btn {
-  background: transparent;
-  color: var(--bpmkit-text);
-  border: 1px solid var(--bpmkit-border);
-  border-radius: 6px;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
+.upd-badge[hidden] {
+  display: none;
 }
 
-.theme-toggle-btn:hover {
-  filter: brightness(1.1);
-  background: var(--bpmkit-bg);
-}
-
-.view-toggle-btn {
-  background: transparent;
-  color: var(--bpmkit-text);
-  border: 1px solid var(--bpmkit-border);
-  border-radius: 6px;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.view-toggle-btn:hover {
-  filter: brightness(1.1);
-  background: var(--bpmkit-bg);
+.topbar-sep {
+  width: 1px;
+  height: 22px;
+  background: var(--bpmkit-border);
 }
 
 /* --- Компактный режим (?view=compact) ------------------------------------
@@ -187,21 +240,24 @@ body {
 }
 
 [data-view="compact"] .topbar h1,
-[data-view="compact"] .topbar .tabs,
 [data-view="compact"] #about-btn,
 [data-view="compact"] #help-btn,
+[data-view="compact"] #btn-settings,
+[data-view="compact"] .topbar-sep,
 [data-view="compact"] .panel-toolbar #register-stand-btn,
 [data-view="compact"] .hint-text,
 [data-view="compact"] .state-panel,
-[data-view="compact"] #tab-agent,
-[data-view="compact"] #tab-settings,
-/* Вкладка «Обновления» и её кнопка — по тем же причинам, что агент и
-   настройки: окно-виджет показывает только стенды и их старт/стоп. Кнопка
-   перечислена отдельно от `.topbar .tabs` выше не ради дублирования, а чтобы
-   правило пережило вынос вкладок из шапки. */
-[data-view="compact"] #tab-companion,
-[data-view="compact"] .tab-btn[data-tab="companion"],
+[data-view="compact"] .statusline,
+[data-view="compact"] .license-banner,
+/* Сцена настроек и кнопка «Обновления» — по той же причине, что панель
+   состояния: окно-виджет показывает только стенды и их старт/стоп. Правило
+   пережило вынос вкладок из шапки: оно смотрит на сцены и кнопки, а не на
+   разметку вкладок, которой больше нет. */
+[data-view="compact"] #scene-settings,
+[data-view="compact"] #btn-updates,
 [data-view="compact"] .stands-table thead,
+/* Чип хостинга — подпись «на всякий случай», в узком окне это шум. */
+[data-view="compact"] .host-chip,
 /* Колонка «Транспорт» (2-я) — в окне-виджете это шум: у подавляющего
    большинства пользователей все стенды локальные. */
 [data-view="compact"] .stands-table td:nth-child(2),
@@ -252,35 +308,6 @@ body {
 
 [data-view="compact"] #view-toggle-btn {
   margin-left: auto;
-}
-
-/* --- кнопка "О программе" (topbar) — БЕЗ фона, оранжевая иконка (бренд) --- */
-
-.about-btn {
-  background: transparent;
-  color: var(--bpmkit-primary);
-  border: none;
-  border-radius: 6px;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  font-size: 17px;
-  font-weight: 700;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.about-btn:hover {
-  background: var(--bpmkit-bg);
-}
-
-/* Кнопка «Справка» — это ссылка (<a>), поэтому ей отдельно нужны
-   выравнивание по центру и снятие подчёркивания; остальное — от .about-btn. */
-.help-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  text-decoration: none;
 }
 
 /* --- индикатор связи с хабом (точка + подпись, НЕ похож на меню) --- */
@@ -467,38 +494,38 @@ body {
  * переключение зависит ТОЛЬКО от [data-theme] на <html> (см. app.js::applyTheme),
  * ни одного JS-условия здесь не требуется. */
 
-.about-modal-logo {
+.about-logo {
   display: flex;
   justify-content: center;
   margin: 4px 0 16px;
 }
 
-.about-modal-logo-img {
+.about-logo-img {
   width: min(200px, 100%);
   height: auto;
   display: none;
 }
 
-.about-modal-logo-light {
+.about-logo-light {
   display: block;
 }
 
-[data-theme="dark"] .about-modal-logo-light {
+[data-theme="dark"] .about-logo-light {
   display: none;
 }
 
-[data-theme="dark"] .about-modal-logo-dark {
+[data-theme="dark"] .about-logo-dark {
   display: block;
 }
 
 /* Тема "auto" — то же самое при системной тёмной теме (см. блок переменных
    [data-theme="auto"] в начале файла). */
 @media (prefers-color-scheme: dark) {
-  [data-theme="auto"] .about-modal-logo-light {
+  [data-theme="auto"] .about-logo-light {
     display: none;
   }
 
-  [data-theme="auto"] .about-modal-logo-dark {
+  [data-theme="auto"] .about-logo-dark {
     display: block;
   }
 }
@@ -533,7 +560,7 @@ body {
 
 /* --- иконочный футер модалки "О программе" (сайт/репозиторий/telegram) --- */
 
-.about-modal-icons {
+.about-icons {
   margin-top: 16px;
   padding-top: 12px;
   border-top: 1px solid var(--bpmkit-border);
@@ -544,18 +571,18 @@ body {
   gap: 10px;
 }
 
-.about-modal-icons-row {
+.about-icons-row {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.about-modal-author-name {
+.about-author-name {
   font-size: 12px;
   color: var(--bpmkit-muted);
 }
 
-.about-modal-icon-link {
+.about-icon-link {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -566,8 +593,8 @@ body {
   transition: color 0.15s ease, background 0.15s ease;
 }
 
-.about-modal-icon-link:hover,
-.about-modal-icon-link:focus-visible {
+.about-icon-link:hover,
+.about-icon-link:focus-visible {
   color: var(--bpmkit-primary);
   background: var(--bpmkit-code-bg);
 }
@@ -586,11 +613,11 @@ main {
   margin: 0 auto;
 }
 
-.tab-panel {
+.scene {
   display: none;
 }
 
-.tab-panel.active {
+.scene.active {
   display: block;
 }
 
@@ -1150,31 +1177,6 @@ span.value-has-reason {
   word-break: break-word;
 }
 
-/* --- пояснение вкладки "Локальный агент" --- */
-
-.agent-explainer {
-  background: var(--bpmkit-panel-bg);
-  border: 1px solid var(--bpmkit-border);
-  border-radius: 8px;
-  padding: 14px 18px;
-  margin-bottom: 16px;
-}
-
-.agent-explainer p {
-  font-size: 13px;
-  margin: 0 0 10px;
-}
-
-.agent-explainer p:last-child {
-  margin-bottom: 0;
-}
-
-.agent-explainer code {
-  background: var(--bpmkit-code-bg);
-  padding: 1px 5px;
-  border-radius: 4px;
-}
-
 .settings-form fieldset {
   background: var(--bpmkit-panel-bg);
   border: 1px solid var(--bpmkit-border);
@@ -1207,36 +1209,6 @@ span.value-has-reason {
   font-size: 13px;
   background: var(--bpmkit-panel-bg);
   color: var(--bpmkit-text);
-}
-
-/* --- Свёрнутые группы настроек (details/summary) ---------------------------
-   Форма склеивала три аудитории на одном экране: параметры хаба (нужны всем),
-   федерацию (только при удалённых стендах) и флаги демона-агента (только
-   администратору удалённого хоста). Редкое прячем, но не удаляем. */
-
-.settings-form .settings-group {
-  background: var(--bpmkit-panel-bg);
-  border: 1px solid var(--bpmkit-border);
-  border-radius: 8px;
-  padding: 0 18px;
-  margin-bottom: 16px;
-}
-
-.settings-form .settings-group > summary {
-  cursor: pointer;
-  padding: 12px 0;
-  font-weight: 600;
-  color: var(--bpmkit-text);
-  list-style-position: inside;
-}
-
-.settings-form .settings-group[open] > summary {
-  border-bottom: 1px solid var(--bpmkit-border);
-  margin-bottom: 12px;
-}
-
-.settings-form .settings-group > *:last-child {
-  margin-bottom: 14px;
 }
 
 .settings-group-note {
@@ -1324,189 +1296,589 @@ span.value-has-reason {
   background: var(--bpmkit-down);
 }
 
-/* --- Вкладка «Обновления» (канал доставки обновлений издателя) -------------
+/* --- Лицензионные баннеры под шапкой ---------------------------------------
  *
- * Ни одного захардкоженного цвета: всё через те же переменные палитры, что и
- * остальной дашборд, — значит и светлая, и тёмная тема получаются сами (см.
- * :root и [data-theme="dark"] в начале файла). Карточки повторяют геометрию
- * панелей стендов: та же рамка, тот же радиус, тот же фон, чтобы вкладка не
- * выглядела приклеенной из другого приложения.
+ * Два уровня громкости, а не один: «истекает через неделю» и «уже отключено»
+ * требуют разной реакции, и общий нейтральный баннер обесценил бы оба. Цвета —
+ * из палитры (--bpmkit-unknown / --bpmkit-down), поэтому обе темы получаются
+ * сами. color-mix даёт мягкую подложку из того же токена, что и рамка: второй
+ * пары переменных «фон предупреждения» заводить не нужно.
  */
 
-.companion-head {
+.license-banner {
   display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 20px;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.license-banner[hidden] {
+  display: none;
+}
+
+.license-banner-warn {
+  background: color-mix(in srgb, var(--bpmkit-unknown) 16%, transparent);
+  color: var(--bpmkit-text);
+  border-bottom: 1px solid var(--bpmkit-unknown);
+}
+
+.license-banner-warn strong {
+  color: var(--bpmkit-unknown);
+}
+
+.license-banner-crit {
+  background: color-mix(in srgb, var(--bpmkit-down) 14%, transparent);
+  color: var(--bpmkit-text);
+  border-bottom: 1px solid var(--bpmkit-down);
+}
+
+.license-banner-crit strong {
+  color: var(--bpmkit-down);
+}
+
+.license-banner-open {
+  margin-left: auto;
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* --- Строка состояния -------------------------------------------------------
+ * То, что нужно знать краем глаза и всегда: версия MCP, срок лицензии,
+ * свежесть паттернов, сколько стендов работает. Раньше эти четыре факта
+ * лежали по трём вкладкам, и ни один не был виден с главного экрана. */
+
+.statusline {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.companion-edition {
-  margin: 0 0 6px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--bpmkit-ok);
-}
-
-/* Выключенный канал/свободная редакция — приглушённый, а не красный: человек
-   выключил это сам либо просто не покупал, и тревожный цвет здесь был бы
-   ложной тревогой. */
-.companion-edition-off {
+  gap: 18px;
+  padding: 8px 20px;
+  border-top: 1px solid var(--bpmkit-border);
+  background: var(--bpmkit-panel-bg);
+  font-size: 12.5px;
   color: var(--bpmkit-muted);
+}
+
+.statusline b {
+  color: var(--bpmkit-text);
   font-weight: 500;
 }
 
-.companion-head-actions {
-  margin-bottom: 6px;
+.statusline .lic-warn b {
+  color: var(--bpmkit-unknown);
 }
 
-/* Заметный баннер: после подмены бинаря MCP нужен ПОЛНЫЙ перезапуск Claude
-   Desktop, и узнать об этом пользователь обязан не из мелкой строки статуса.
-   Геометрия и логика — как у .offline-banner, но внутри панели. */
-.companion-banner {
-  padding: 12px 16px;
-  margin: 0 0 14px;
-  border-radius: 8px;
-  border: 1px solid var(--bpmkit-unknown);
-  border-left-width: 4px;
-  background: color-mix(in srgb, var(--bpmkit-unknown) 12%, transparent);
+.statusline .lic-crit b {
+  color: var(--bpmkit-down);
+}
+
+.statusline [hidden] {
+  display: none;
+}
+
+.statusline-spacer {
+  flex: 1;
+}
+
+/* Ссылка-кнопка («добавить», «выбрать файл…»): это действие, а не переход, —
+   поэтому <button>, а не <a href="#">, но выглядеть должна ссылкой. */
+.linklike {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--bpmkit-primary);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* --- Сцена настроек: рейка разделов + панель ------------------------------ */
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  background: var(--bpmkit-panel-bg);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 10px;
+  overflow: hidden;
+  min-height: 480px;
+}
+
+.settings-rail {
+  border-right: 1px solid var(--bpmkit-border);
+  padding: 10px 0;
+}
+
+.settings-rail-title {
+  padding: 6px 18px 10px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--bpmkit-muted);
+}
+
+.settings-rail button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 9px 18px;
+  border: none;
+  border-left: 3px solid transparent;
+  border-radius: 0;
+  background: none;
   color: var(--bpmkit-text);
   font-size: 13px;
+  cursor: pointer;
+}
+
+.settings-rail button:hover {
+  background: var(--bpmkit-row-hover);
+}
+
+.settings-rail button.active {
+  border-left-color: var(--bpmkit-primary);
+  background: var(--bpmkit-row-selected);
+  font-weight: 600;
+}
+
+.settings-rail button[hidden] {
+  display: none;
+}
+
+.settings-panes {
+  padding: 20px 26px 22px;
+  min-width: 0;
+}
+
+.settings-pane {
+  display: none;
+  max-width: 760px;
+}
+
+.settings-pane.active {
+  display: block;
+}
+
+.settings-pane h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.settings-pane h3 {
+  margin: 16px 0 8px;
+  font-size: 14px;
+}
+
+.pane-lead {
+  margin: 0 0 14px;
+  font-size: 13px;
   line-height: 1.5;
+  color: var(--bpmkit-muted);
 }
 
-.companion-banner[hidden] {
-  display: none;
-}
-
-.companion-banner-warn strong {
-  color: var(--bpmkit-unknown);
-}
-
-/* Значок внимания на кнопке вкладки — единственный способ узнать о
-   необходимости перезапуска, не заходя во вкладку. */
-.tab-attention {
-  margin-left: 6px;
-  font-size: 10px;
-  line-height: 1;
-  vertical-align: middle;
-  color: var(--bpmkit-unknown);
-}
-
-.tab-btn.active .tab-attention {
-  color: var(--bpmkit-primary-contrast);
-}
-
-.tab-attention[hidden] {
-  display: none;
-}
-
-.companion-note {
-  margin: 8px 0 0;
+.pane-note {
+  margin: 10px 0 0;
   padding: 10px 12px;
-  border-radius: 8px;
   border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
   background: var(--bpmkit-code-bg);
   color: var(--bpmkit-muted);
   font-size: 12px;
   line-height: 1.5;
 }
 
-.companion-note[hidden] {
+.pane-note[hidden] {
   display: none;
 }
 
-.companion-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 14px;
-  margin-top: 12px;
+.pane-actions {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--bpmkit-border);
 }
 
-.companion-cards[hidden] {
-  display: none;
+.sub-fieldset {
+  margin: 12px 0 4px;
 }
 
-.companion-card {
-  border: 1px solid var(--bpmkit-border);
-  border-radius: 8px;
-  background: var(--bpmkit-panel-bg);
-  padding: 14px 16px;
+.agent-state-row {
   display: flex;
-  flex-direction: column;
-}
-
-.companion-card-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
-.companion-card-head h3 {
-  margin: 0;
-  font-size: 15px;
-}
-
-/* Подпись «по расписанию / расписание выключено»: справочная, не тревожная. */
-.companion-cycle-state {
-  font-size: 12px;
-  color: var(--bpmkit-ok);
-  white-space: nowrap;
-}
-
-.companion-cycle-state.companion-cycle-off {
-  color: var(--bpmkit-muted);
-}
-
-/* Строка «почему у этого цикла такая политика» — она объясняет, почему
-   паттерны едут часто, а бинарь не применяется без подписи. */
-.companion-card-why {
-  margin: 0 0 10px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--bpmkit-muted);
-}
-
-.companion-facts {
-  margin: 0;
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 12px;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
   font-size: 13px;
 }
 
-.companion-facts > div {
-  display: contents;
+/* Поле пути + кнопка «…» (нативный диалог ОС, POST /api/pick). Путь набирают
+   руками ровно один раз — потом его копируют из проводника, и кнопка избавляет
+   от этого круга. */
+.path-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  margin-top: 4px;
 }
 
-.companion-facts dt {
-  color: var(--bpmkit-muted);
+.path-row input {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0 !important;
+}
+
+.pick-btn {
+  padding: 0 12px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--bpmkit-text);
+  cursor: pointer;
+}
+
+.pick-btn:hover {
+  background: var(--bpmkit-row-hover);
+}
+
+/* --- Раздел «Лицензия» ----------------------------------------------------- */
+
+.lic-card {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 24px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  background: var(--bpmkit-bg);
+}
+
+.lic-k {
   font-size: 12px;
+  color: var(--bpmkit-muted);
 }
 
-.companion-facts dd {
-  margin: 0;
+.lic-v {
+  font-weight: 500;
   overflow-wrap: anywhere;
 }
 
-.companion-detail {
-  margin: 10px 0 0;
+.lic-v.lic-ok {
+  color: var(--bpmkit-ok);
+}
+
+.lic-v.lic-warn {
+  color: var(--bpmkit-unknown);
+}
+
+.lic-v.lic-crit {
+  color: var(--bpmkit-down);
+}
+
+.free-offer {
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  border-left: 3px solid var(--bpmkit-primary);
+  border-radius: 0 8px 8px 0;
+  background: var(--bpmkit-bg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.free-offer-lead {
+  margin-top: 4px;
+  color: var(--bpmkit-muted);
+}
+
+.free-offer ul {
+  margin: 6px 0 0 18px;
+  padding: 0;
+}
+
+#license-token {
+  display: block;
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  background: var(--bpmkit-bg);
+  color: var(--bpmkit-text);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12.5px;
+}
+
+.license-drop {
+  margin: 8px 0 14px;
+  padding: 18px;
+  border: 1.5px dashed var(--bpmkit-border);
+  border-radius: 8px;
+  text-align: center;
+  color: var(--bpmkit-muted);
+  font-size: 13px;
+}
+
+.license-drop:hover,
+.license-drop-over {
+  border-color: var(--bpmkit-primary);
+}
+
+/* Подсказка у необратимого действия: «Удалить лицензию» звучит как «удалить
+   файл», хотя на деле снимает активацию и освобождает ключ для другой машины —
+   это и написано в подсказке, а не только в кукбуке. */
+.tip {
+  position: relative;
+}
+
+.tip[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  width: 300px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bpmkit-text);
+  color: var(--bpmkit-bg);
   font-size: 12px;
+  font-weight: 400;
+  white-space: normal;
+}
+
+/* --- Окно «Обновления» ----------------------------------------------------- */
+
+.modal-box-updates {
+  width: 640px;
+  max-width: calc(100vw - 32px);
+}
+
+.modal-box-crit .modal-header h2 {
+  color: var(--bpmkit-down);
+}
+
+.upd-row {
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 12px;
+  align-items: start;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--bpmkit-border);
+}
+
+.upd-row:last-child {
+  border-bottom: 0;
+}
+
+.upd-ico {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: var(--bpmkit-bg);
+}
+
+.upd-ico svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: var(--bpmkit-primary);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Средняя колонка сетки: без min-width длинные строки (пути, тексты отказов
+   издателя) распирают grid-колонку и ломают ширину окна. */
+.upd-main {
+  min-width: 0;
+}
+
+.upd-title {
+  font-weight: 600;
+}
+
+.upd-desc {
+  margin-top: 2px;
+  font-size: 13px;
   line-height: 1.45;
   color: var(--bpmkit-muted);
 }
 
-.companion-detail[hidden] {
+.upd-meta {
+  margin-top: 6px;
+  font-size: 12.5px;
+}
+
+.upd-detail {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--bpmkit-down);
+  overflow-wrap: anywhere;
+}
+
+.upd-detail[hidden] {
   display: none;
 }
 
-/* Кнопки действий прижаты к низу карточки: карточки в ряду разной высоты, и
-   без этого кнопки «плавали» бы по вертикали от карточки к карточке. */
-.companion-card-actions {
-  margin-top: auto;
-  padding-top: 12px;
-  margin-bottom: 0;
-  flex-wrap: wrap;
+.upd-avail {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--bpmkit-row-selected);
+  color: var(--bpmkit-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.upd-avail[hidden] {
+  display: none;
+}
+
+.upd-action {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.upd-action button[hidden] {
+  display: none;
+}
+
+/* Перезапуск после подмены бинаря: узнать об этом пользователь обязан не из
+   мелкой строки статуса — прежняя версия продолжает работать до рестарта. */
+.upd-restart {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--bpmkit-unknown);
+  border-left-width: 4px;
+  background: color-mix(in srgb, var(--bpmkit-unknown) 12%, transparent);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.upd-restart[hidden] {
+  display: none;
+}
+
+.upd-restart strong {
+  color: var(--bpmkit-unknown);
+}
+
+.updates-footer {
+  align-items: center;
+  gap: 8px;
+}
+
+/* --- Тост и спиннер на кнопке ---------------------------------------------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 52px;
+  z-index: 40;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: var(--bpmkit-text);
+  color: var(--bpmkit-bg);
+  font-size: 13px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.toast.toast-visible {
+  opacity: 1;
+}
+
+.btn-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -2px;
+  animation: btn-spin 0.8s linear infinite;
+}
+
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-spinner {
+    animation: none;
+  }
+}
+
+/* --- Чип хостинга и иконка движка БД в таблице стендов --------------------- */
+
+.stand-name {
+  font-weight: 600;
+}
+
+.host-chip {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 4px;
+  color: var(--bpmkit-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
+.db-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.db-ico {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.8;
+}
+
+@media (max-width: 760px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--bpmkit-border);
+  }
+
+  .lic-card {
+    grid-template-columns: 1fr;
+  }
 }

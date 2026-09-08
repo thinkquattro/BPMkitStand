@@ -810,16 +810,24 @@ def test_failed_runner_start_does_not_break_the_hub(tmp_path, monkeypatch):
 # ======================================================================================
 #
 # Браузера в наборе нет, поэтому проверяются те свойства разметки, потеря которых
-# ломает вкладку молча: сама вкладка, соответствие кнопок маршрутам API,
-# скрытие в компактном окне и отсутствие внешних ресурсов.
+# ломает интерфейс канала молча: точка входа (кнопка в шапке и окно), соответствие
+# кнопок маршрутам API, скрытие в компактном окне и отсутствие внешних ресурсов.
+#
+# GAP-241: вкладок больше нет. Канал живёт в модальном окне «Обновления», которое
+# открывается кнопкой в шапке; настройки канала — раздел «Обновления» в рейке
+# настроек. Поэтому якоря теста — id окна и кнопки, а не data-tab.
 
 
 def test_companion_tab_exists_in_index_html():
     html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
-    assert 'data-tab="companion"' in html, "кнопка вкладки «Обновления» потеряна"
-    assert 'id="tab-companion"' in html, "панель вкладки «Обновления» потеряна"
-    # Секция настроек канала — свёрнутая группа в общей форме настроек.
+    assert 'id="btn-updates"' in html, "кнопка «Обновления» в шапке потеряна"
+    assert 'id="updates-overlay"' in html, "окно «Обновления» потеряно"
+    # Бейдж «есть что поставить» — единственный признак новой версии, видимый,
+    # пока окно закрыто.
+    assert 'id="updates-badge"' in html
+    # Раздел настроек канала — пункт рейки плюс сама панель.
     assert 'id="settings-companion"' in html
+    assert 'id="rail-updates"' in html
     for field in ("companion_enabled", "companion_mcp_cli"):
         assert f'name="{field}"' in html, f"поле {field} пропало из формы настроек"
     # Интервалы остались, но единица измерения — вопрос представления, и имя поля
@@ -833,25 +841,47 @@ def test_companion_tab_exists_in_index_html():
         assert f'name="{gone}"' not in html, f"поле {gone} убрано из UI (GAP-241)"
 
 
-def test_companion_buttons_match_api_routes():
-    """Каждая кнопка вкладки — существующее действие, и наоборот.
+#: Действия, которые окно «Обновления» показывает КНОПКАМИ (GAP-241). Остальные
+#: маршруты канала (`stage_update`, `refresh_revocations`) остались рабочими, но
+#: своей кнопки не имеют: подготовка теперь часть «Проверить обновления», а
+#: список отзыва обновляется сам и решения человека не требует.
+UI_ACTIONS = ("sync_patterns", "check_update", "apply_update", "rollback")
 
-    Разъезд этих двух списков не виден ни одному тесту сервера: фронт просто
-    получал бы 404 на нажатие, а сервер — маршрут, который никто не зовёт.
+
+def test_companion_buttons_match_api_routes():
+    """Каждая кнопка окна — существующее действие, и каждый маршрут известен фронту.
+
+    Разъезд этих списков не виден ни одному тесту сервера: фронт просто получал бы
+    404 на нажатие, а сервер — маршрут, который никто не зовёт.
     """
     html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
     js = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    # 1. Фронт знает ВСЕ маршруты канала — включая те, у которых нет кнопки.
     for path, action in ACTION_ROUTES.items():
-        assert f'data-companion-action="{action}"' in html, f"нет кнопки для {action}"
         assert f'"{path}"' in js, f"путь {path} не известен фронту"
-        assert f"{action}: \"{path}\"" in js, f"кнопка {action} не связана с {path}"
+        assert f"{action}: \"{path}\"" in js, f"действие {action} не связано с {path}"
+
+    # 2. У каждого действия из UI есть кнопка.
+    for action in UI_ACTIONS:
+        assert f'data-companion-action="{action}"' in html, f"нет кнопки для {action}"
+
+    # 3. И ни одна кнопка не зовёт действия, которого сервер не знает.
+    in_html = set(re.findall(r'data-companion-action="([a-z_]+)"', html))
+    assert in_html <= set(ACTION_ROUTES.values()), (
+        f"кнопки зовут неизвестные серверу действия: {sorted(in_html - set(ACTION_ROUTES.values()))}"
+    )
 
 
 def test_companion_tab_is_hidden_in_compact_view():
-    """Окно-виджет показывает только стенды: вкладка канала не должна вылезать."""
+    """Окно-виджет показывает только стенды: канал не должен вылезать.
+
+    После GAP-241 прятать нужно другое: кнопку «Обновления» в шапке и сцену
+    настроек (окно канала и так закрыто, пока его не открыли).
+    """
     css = (WEB_DIR / "style.css").read_text(encoding="utf-8")
-    assert '[data-view="compact"] #tab-companion' in css
-    assert '[data-view="compact"] .tab-btn[data-tab="companion"]' in css
+    assert '[data-view="compact"] #btn-updates' in css
+    assert '[data-view="compact"] #scene-settings' in css
 
 
 def test_companion_ui_has_no_external_resources():
