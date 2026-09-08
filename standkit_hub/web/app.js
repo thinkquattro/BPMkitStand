@@ -1679,7 +1679,7 @@
   }
 
   function setDetail(id, text) {
-    const node = el(id);
+    const node = byId(id);
     if (!node) return;
     node.textContent = text || "";
     node.hidden = !text;
@@ -1749,6 +1749,14 @@
 
     const mcpVersionEl = byId("about-mcp-version");
     if (mcpVersionEl) mcpVersionEl.textContent = current || "как в поставке";
+    // Строка состояния внизу: версия MCP известна только каналу обновлений;
+    // пока её нет — сегмент скрыт, а не показывает прочерк.
+    const slMcp = byId("sl-mcp");
+    const slMcpVersion = byId("sl-mcp-version");
+    if (slMcp && slMcpVersion) {
+      slMcpVersion.textContent = current || "—";
+      slMcp.hidden = !current;
+    }
   }
 
   function renderCompanionStatus(status) {
@@ -1889,6 +1897,7 @@
   const LICENSE_POLL_MS = 600000; // 10 минут: срок меряется днями, чаще незачем
   const LICENSE_CRIT_STATUSES = ["expired", "revoked"];
   const LICENSE_UNKNOWN_STATUSES = ["none", "unavailable"];
+  const LICENSE_CHANNEL_STATUSES = ["valid", "expiring"];
   const LICENSE_CRIT_SEEN_KEY = "standkit_license_crit_seen";
 
   const LICENSE_STATE_LABELS = {
@@ -2085,8 +2094,10 @@
 
   function applyLicense(snapshot) {
     lastLicense = snapshot;
+    // «Есть лицензия» = действующая (в т.ч. истекающая). Истёкшая/отозванная —
+    // тоже «нет лицензии» для канала издателя: бэкенд её не примет.
     const known = snapshot.edition === "companion"
-      && LICENSE_UNKNOWN_STATUSES.indexOf(snapshot.status) < 0;
+      && LICENSE_CHANNEL_STATUSES.indexOf(snapshot.status) >= 0;
     // Кнопка «Обновления» и одноимённый раздел настроек существуют только там,
     // где им есть что делать: без лицензии канал издателя не работает вовсе.
     byId("btn-updates").hidden = !known;
