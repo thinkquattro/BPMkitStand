@@ -5,7 +5,7 @@
 ссылками на код — [BACKLOG.md](BACKLOG.md). Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md).
 Решения — [adr/](adr/). История изменений — [CHANGELOG.md](CHANGELOG.md).
 
-Текущая версия на PyPI: **0.9.0** ([все выпуски](https://pypi.org/project/standkit/)).
+Текущая версия на PyPI: **0.10.0** ([все выпуски](https://pypi.org/project/standkit/)).
 Python ≥ 3.10, ядро и агент — stdlib-only. Карта документации — [README.md](README.md).
 
 ## ✅ Сделано
@@ -17,7 +17,7 @@ Python ≥ 3.10, ядро и агент — stdlib-only. Карта докуме
 - **Hosting backends** (ADR-0001/0002) — kestrel / IIS (`appcmd`) / Docker
   (`docker`,`compose`) / Kubernetes (`kubectl`). Диспетчеризация по `host_kind`,
   прозрачна для хаба/агента/клиента.
-- **Дашборд `standkit_hub`** — веб-UI (stdlib `http.server` + vanilla JS): список
+- **Диспетчер стендов `standkit_hub`** — веб-UI (stdlib `http.server` + vanilla JS): список
   стендов + состояние, старт/стоп/рестарт (честный старт до HTTP-ok), очистка
   Redis, тёмная тема, модалка «Зарегистрировать стенд» (пишет в общий
   `projects.json`), панель «Текущее состояние» (tail лога текущей сессии),

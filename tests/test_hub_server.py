@@ -624,6 +624,14 @@ def test_api_stands_enriched_payload_shape(tmp_path):
 
     assert stand["db"]["name"] == "mydb"
     assert "state" in stand["db"]
+    # Тип СУБД (GAP-241): состояние базы без её типа оператору ничего не говорит.
+    assert stand["db"]["type"] == "postgres"
+
+    # Тип хоста — отдельным полем: от него зависит и подпись в списке, и то, какие
+    # действия по стенду вообще имеют смысл.
+    assert stand["host_kind"] == "kestrel"
+    # Локальный стенд агентом не управляется — поле есть и оно пустое (не строка).
+    assert stand["agent"] is None
 
     assert stand["redis"]["number"] == 3
     assert "state" in stand["redis"]
@@ -631,6 +639,48 @@ def test_api_stands_enriched_payload_shape(tmp_path):
     assert "state" in stand["process"]
     assert stand["process"]["transport"] == "local"
     assert stand["process"]["logs_path"] == str(logs_dir)
+
+
+def test_api_stands_reports_agent_url_for_remote_stands(tmp_path):
+    """Стенд на транспорте `agent`: список обязан показать, НА КАКУЮ машину уходит
+    управление. Без этого две одинаковые по имени записи (локальная и удалённая)
+    в списке неразличимы.
+
+    Пробы отключены (`?probe=0`): предмет теста — состав payload, а не сеть.
+    """
+    from standkit.models import HostKind, Stand, Transport
+
+    registry_path = tmp_path / "projects.json"
+    Registry(
+        path=registry_path,
+        default="remote",
+        stands={"remote": Stand(name="remote", stand_dir=str(tmp_path / "remote"),
+                                transport=Transport.AGENT,
+                                agent_url="https://stand-host:8765",
+                                host_kind=HostKind.IIS,
+                                db_type="mssql")},
+    ).save()
+    config_path = _write_config(tmp_path, registry_path=registry_path)
+    session_token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path,
+                              session_token=session_token)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    _wait_for_port(port)
+
+    try:
+        status, body, _ = _request(f"http://127.0.0.1:{port}", "/api/stands?probe=0",
+                                   token=session_token)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    assert status == 200
+    stand = body["stands"][0]
+    assert stand["transport"] == "agent"
+    assert stand["agent"] == "https://stand-host:8765"
+    assert stand["host_kind"] == "iis"
+    assert stand["db"]["type"] == "mssql"
 
 
 def test_api_stands_redis_number_null_when_not_in_registry(tmp_path):

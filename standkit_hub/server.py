@@ -513,6 +513,14 @@ def _stand_entry(name: str, stand: Stand, status) -> dict:
     return {
         "name": name,
         "transport": stand.transport.value,
+        # Тип хоста (kestrel/iis/docker/k8s) — отдельным полем верхнего уровня:
+        # от него зависит и подпись в списке, и то, какие действия вообще имеют
+        # смысл (у docker/k8s объект управления глобальный, см. _is_external).
+        "host_kind": stand.host_kind.value,
+        # Адрес агента для стендов на транспорте `agent`: список обязан показывать,
+        # НА КАКУЮ машину уходит управление. У локальных стендов поля нет (``None``),
+        # а не пустая строка — «не применимо» и «не заполнено» это разные вещи.
+        "agent": (stand.agent_url or None) if stand.transport == Transport.AGENT else None,
         "status": status_dict,
         # ``reason`` у http/redis — тот же приём, что у process.reason: без него
         # наружу уходил голый "down"/"—", и оператор не мог отличить закрытый
@@ -523,7 +531,10 @@ def _stand_entry(name: str, stand: Stand, status) -> dict:
             "state": http_state,
             "reason": (status.details.get("http_reason") if status else None),
         },
-        "db": {"name": stand.db_name or None, "state": db_state},
+        # ``type`` — СУБД записи (postgres/mssql/...): состояние базы без её типа
+        # оператору ничего не говорит, а тип уже есть в реестре.
+        "db": {"name": stand.db_name or None, "type": stand.db_type or None,
+               "state": db_state},
         "redis": {
             "number": _redis_number(stand),
             "state": redis_state,

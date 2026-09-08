@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             thread = threading.Thread(target=httpd.serve_forever, daemon=True)
             thread.start()
             try:
-                webview.create_window("BPMkit Дашборд", url)
+                webview.create_window("Диспетчер стендов BPMkit", url)
                 webview.start()
             finally:
                 httpd.shutdown()

@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-08
+
 ### Добавлено
 
 - **Новый интерфейс диспетчера (GAP-241).** Вкладок больше нет: экранов ровно два —
@@ -790,6 +792,7 @@
 - Первый публичный релиз ядра `standkit` + агента `standkit_agent` + веб-дашборда
   `standkit_hub` на PyPI; фронт-README, `docs/REMOTE_STANDS.md`, скриншоты.
 
+[0.10.0]: https://pypi.org/project/standkit/0.10.0/
 [0.9.0]: https://pypi.org/project/standkit/0.9.0/
 [0.8.0]: https://pypi.org/project/standkit/0.8.0/
 [0.7.0]: https://pypi.org/project/standkit/0.7.0/
