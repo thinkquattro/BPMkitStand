@@ -17,7 +17,9 @@
 Два отказа, которые ОБЯЗАНЫ различаться, потому что чинятся по-разному:
 
 * **нет CLI рядом** (`ContextUnavailable`) — MCP не установлен или путь к нему не задан.
-  Чинит человек в настройках хаба (`companion.mcp_cli`);
+  Чинит человек в настройках хаба (`companion.mcp_cli`) либо переменной окружения
+  `BPMKIT_CLI` (полный порядок резолва — в докстринге `find_cli` ниже и в общем
+  хелпере `standkit.cli_resolve`, включая фолбэк на запуск из исходников — GAP-273);
 * **нет лицензии** (`ChannelError(kind="no_license")`) — MCP на месте и честно ответил, что
   ключа на этой машине нет. Чинится покупкой/установкой ключа, к путям отношения не имеет.
 
@@ -31,13 +33,19 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+from standkit.cli_resolve import (
+    CLI_ENV_VAR,
+    candidate_roots as _shared_candidate_roots,
+    describe_search_targets,
+    resolve_command_string,
+    search_roots,
+)
 from standkit.platform import run_console
 
 from .errors import KIND_TITLES, ChannelError, ContextUnavailable
@@ -54,18 +62,10 @@ __all__ = [
 # и менять его «по месту» в трёх строках нельзя.
 CONTEXT_ARGV_TAIL = ("setup", "companion-context", "--json")
 
-# Имена исполняемого файла CLI. `.exe` первым — поставка клиента всегда Windows-овая;
-# второе имя нужно, чтобы канал был отлаживаем на Linux, где расширения нет.
-_CLI_NAMES = ("bpmkit.exe", "bpmkit")
-
-# Куда смотреть от корня-кандидата. `server/` — штатное место бинаря в поставке MCP,
-# корень — сборка «всё рядом».
-_CLI_SUBPATHS = (("server",), ())
-
-# На сколько уровней вверх от пакета поднимаемся в поисках корня MCP. Поставка кладёт
-# BPMkitStand ВНУТРЬ пакета MCP (`build/pack/BPMkitStand`), то есть корень пакета — на два
-# уровня выше каталога `standkit_companion`; берём с запасом на нестандартную распаковку.
-_CLI_MAX_UP = 4
+# Резолв CLI (имена бинаря, подпути, глубина подъёма, фолбэк на запуск из исходников,
+# переменная окружения) — общий хелпер `standkit.cli_resolve` (GAP-273): та же логика
+# нужна экрану лицензии хаба (`standkit_hub.license_api`), и держать её в двух местах
+# «дословно одинаковой» руками — значит рано или поздно её рассинхронизировать.
 
 # Сколько ждём ответа CLI. 30 с — с запасом на холодный старт `.exe` под антивирусом и
 # заведомо меньше интервала любого цикла: зависший CLI не должен копить тики.
@@ -124,56 +124,46 @@ class LicenseContext:
 # ------------------------------------------------------------------------------------
 # Поиск CLI
 # ------------------------------------------------------------------------------------
-def _split_command(value: str) -> list:
-    """Разбор строки запуска из настроек (`python -m bpmkit`, `"C:\\...\\bpmkit.exe"`).
-
-    `posix=False` на Windows обязателен: в posix-режиме `shlex` съедает обратные слэши как
-    экранирование и `C:\\Program Files\\bpmkit.exe` превращается в `C:Program Filesbpmkit.exe`.
-    Плата за это — сохранённые кавычки вокруг токенов, их снимаем сами.
-    """
-    posix = os.name != "nt"
-    parts = shlex.split(value, posix=posix)
-    if not posix:
-        parts = [p[1:-1] if len(p) >= 2 and p[0] == p[-1] == '"' else p for p in parts]
-    return [p for p in parts if p]
-
-
 def _candidate_roots(extra_roots: Optional[Sequence] = None) -> list:
     """Корни, в которых имеет смысл искать CLI: сначала явно переданные (тесты, будущие
-    настройки), затем каталоги вверх от самого пакета."""
-    roots: list = [Path(r) for r in (extra_roots or [])]
-    here = Path(__file__).resolve().parent
-    node = here
-    for _ in range(_CLI_MAX_UP):
-        node = node.parent
-        roots.append(node)
-    return roots
+    настройки), затем каталоги вверх от самого пакета.
+
+    Тонкая обёртка над `standkit.cli_resolve.candidate_roots`, а не прямой вызов на месте
+    использования: имя остаётся стабильным для тестов, которые подменяют именно его
+    (`monkeypatch.setattr(context_module, "_candidate_roots", ...)`), не заглядывая внутрь
+    общего хелпера.
+    """
+    return _shared_candidate_roots(__file__, extra_roots=extra_roots)
 
 
 def find_cli(settings, *, extra_roots: Optional[Sequence] = None) -> Optional[list]:
     """argv-префикс для запуска CLI BPMkit или `None`, если его рядом нет.
 
-    Порядок: явная настройка `companion.mcp_cli` (её задал человек — она сильнее любого
-    автодетекта), затем поиск бинаря рядом с поставкой. Угадывания «а вдруг он в PATH»
-    здесь нет намеренно: `bpmkit` в PATH может оказаться другой сборкой/другой версией,
-    а канал обязан спрашивать лицензию у ТОГО MCP, рядом с которым он установлен.
+    Порядок резолва (GAP-273; сильнее — выше):
+
+    1. Явная настройка `companion.mcp_cli` — её задал человек, она сильнее любого
+       автодетекта и не подменяется ничем.
+    2. Переменная окружения `BPMKIT_CLI` (тот же формат, что у настройки) — фолбэк для
+       машин, где путь неудобно/нельзя прописать в конфиге хаба (запуск MCP из исходников
+       на машине издателя, CI, разовая подмена).
+    3. Автодетект бинаря (`bpmkit.exe`/`bpmkit`) рядом с поставкой — как было.
+    4. Автодетект запуска из исходников: `<root>/server/main.py` (или
+       `<root>/BPMkit/server/main.py`) без бинаря — CLI = тот же python, что у хаба, плюс
+       путь к `main.py` (см. `standkit.cli_resolve` — там же обоснование каждого шага).
+
+    Угадывания «а вдруг он в PATH» здесь нет намеренно ни на одном из шагов автодетекта:
+    `bpmkit` в PATH может оказаться другой сборкой/другой версией, а канал обязан
+    спрашивать лицензию у ТОГО MCP, рядом с которым он установлен.
     """
     configured = str(getattr(settings, "mcp_cli", "") or "").strip()
     if configured:
-        as_path = Path(configured)
-        if as_path.is_file():
-            # Путь к файлу берём целиком: в нём могут быть пробелы, и дробить его нельзя.
-            return [str(as_path)]
-        parts = _split_command(configured)
-        return parts or None
+        return resolve_command_string(configured)
 
-    for root in _candidate_roots(extra_roots):
-        for subpath in _CLI_SUBPATHS:
-            for name in _CLI_NAMES:
-                candidate = root.joinpath(*subpath, name)
-                if candidate.is_file():
-                    return [str(candidate)]
-    return None
+    from_env = str(os.environ.get(CLI_ENV_VAR, "") or "").strip()
+    if from_env:
+        return resolve_command_string(from_env)
+
+    return search_roots(_candidate_roots(extra_roots))
 
 
 # ------------------------------------------------------------------------------------
@@ -262,9 +252,10 @@ def resolve(settings, *, run: Optional[Callable] = None,
     if not cli:
         raise ContextUnavailable(
             "Рядом не найден CLI BPMkit — укажите путь к нему в настройках хаба "
-            "(раздел «Канал обновлений», поле companion.mcp_cli)",
+            f"(раздел «Канал обновлений», поле companion.mcp_cli) либо переменной "
+            f"окружения {CLI_ENV_VAR}",
             kind="context_unavailable",
-            detail="автодетект bpmkit.exe рядом с поставкой не дал результата",
+            detail=describe_search_targets(_candidate_roots()),
         )
 
     override_url = str(getattr(settings, "backend_url", "") or "").strip().rstrip("/")

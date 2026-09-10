@@ -26,6 +26,7 @@ import json
 import os
 import socket
 import stat
+import sys
 import threading
 import time
 import urllib.error
@@ -34,6 +35,7 @@ from pathlib import Path
 
 import pytest
 
+from standkit.cli_resolve import CLI_ENV_VAR
 from standkit.models import Stand
 from standkit.registry import Registry
 from standkit_hub import license_api
@@ -71,6 +73,13 @@ def _clean_cache():
     license_api.invalidate_cache()
     yield
     license_api.invalidate_cache()
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    """`BPMKIT_CLI` (GAP-273) — тест обязан видеть только то, что сам задал, а не
+    то, что случайно осталось в окружении хоста/CI."""
+    monkeypatch.delenv(CLI_ENV_VAR, raising=False)
 
 
 @pytest.fixture()
@@ -134,6 +143,47 @@ def test_find_cli_returns_none_without_cli(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(license_api, "_candidate_roots", lambda extra_roots=None: [tmp_path])
     assert license_api.find_cli(CompanionSettings()) is None
+
+
+def test_find_cli_falls_back_to_source_main_py(tmp_path):
+    """GAP-273: MCP, запущенный из исходников (`server/main.py`, без бинаря) — тот же
+    общий хелпер `standkit.cli_resolve`, что и у `standkit_companion.context`."""
+    root = tmp_path / "BPMkit"
+    (root / "server").mkdir(parents=True)
+    main_py = root / "server" / "main.py"
+    main_py.write_text("", encoding="utf-8")
+
+    assert license_api.find_cli(CompanionSettings(), extra_roots=[root]) == \
+        [sys.executable, str(main_py)]
+
+
+def test_find_cli_uses_env_var_between_setting_and_autodetect(tmp_path, monkeypatch):
+    """`BPMKIT_CLI` (GAP-273) — ниже явной настройки, но выше автодетекта: тот же
+    порядок, что у канала обновлений."""
+    monkeypatch.setattr(license_api, "_candidate_roots", lambda extra_roots=None: [tmp_path])
+    monkeypatch.setenv(CLI_ENV_VAR, "python -m bpmkit")
+
+    assert license_api.find_cli(CompanionSettings()) == ["python", "-m", "bpmkit"]
+
+
+def test_find_cli_setting_overrides_env_var(cli_path, monkeypatch):
+    monkeypatch.setenv(CLI_ENV_VAR, "python -m совсем-другой-bpmkit")
+
+    assert license_api.find_cli(_settings(cli_path)) == [str(cli_path)]
+
+
+def test_missing_cli_message_lists_settings(tmp_path, monkeypatch):
+    """Текст отказа (GAP-273) обязан называть оба способа задать CLI."""
+    monkeypatch.setattr(license_api, "_candidate_roots", lambda extra_roots=None: [tmp_path])
+
+    with pytest.raises(license_api.LicenseCliError) as exc:
+        license_api.license_deactivate(CompanionSettings())
+
+    err = exc.value
+    assert "companion.mcp_cli" not in err.error and "Путь к CLI BPMkit" in err.error
+    assert CLI_ENV_VAR in err.error
+    assert str(tmp_path) in err.detail
+    assert CLI_ENV_VAR in err.detail
 
 
 # ======================================================================================
