@@ -13,11 +13,14 @@
 
 Почему модуль лежит в MIT-ядре хаба, а не в платном пакете канала. Экран лицензии
 обязан работать И в свободной редакции — именно там он нужнее всего («ключ ввёл, а
-что дальше?»). Поэтому резолв CLI здесь свой, а не импортированный из
-`standkit_companion.context`: пакета канала рядом может не быть вовсе. Логика
-резолва повторяет context.py сознательно и дословно (явная настройка сильнее
-автодетекта, поиск только рядом с поставкой, никакого PATH) — расхождение здесь
-означало бы «канал видит один MCP, экран лицензии другой».
+что дальше?»). Поэтому `find_cli` здесь свой (тонкая обёртка), а не импортированный
+из `standkit_companion.context`: пакета канала рядом может не быть вовсе. Сама логика
+резолва — общий хелпер `standkit.cli_resolve` (GAP-273): явная настройка сильнее
+переменной окружения `BPMKIT_CLI`, та сильнее автодетекта бинаря рядом с поставкой, а
+если бинаря нигде нет — фолбэк на запуск из исходников (`server/main.py`) тем же
+python, что у хаба. Общий хелпер, а не «дословное» повторение в двух модулях (так
+было до GAP-273) — расхождение здесь означало бы «канал видит один MCP, экран
+лицензии другой», а руками синхронизировать два места рано или поздно забудут.
 
 ЗАПРЕТЫ, ради которых модуль существует отдельно:
 
@@ -38,12 +41,18 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+from standkit.cli_resolve import (
+    CLI_ENV_VAR,
+    candidate_roots as _shared_candidate_roots,
+    describe_search_targets,
+    resolve_command_string,
+    search_roots,
+)
 from standkit.platform import run_console
 from standkit.registry import bpmkit_config_dir
 
@@ -85,10 +94,9 @@ _CLI_WRITE_TIMEOUT_S = 60.0
 
 _DETAIL_LIMIT = 300
 
-# Резолв CLI — дословно как в standkit_companion/context.py (см. докстринг модуля).
-_CLI_NAMES = ("bpmkit.exe", "bpmkit")
-_CLI_SUBPATHS = (("server",), ())
-_CLI_MAX_UP = 4
+# Резолв CLI (имена бинаря, подпути, фолбэк на запуск из исходников, переменная
+# окружения) — общий хелпер `standkit.cli_resolve` (GAP-273), тот же, что у
+# standkit_companion/context.py (см. докстринг модуля выше).
 
 _cache_lock = threading.Lock()
 _cache: dict = {}
@@ -122,26 +130,11 @@ class LicenseCliError(Exception):
 # ------------------------------------------------------------------------------------
 # Поиск CLI
 # ------------------------------------------------------------------------------------
-def _split_command(value: str) -> list:
-    """Разбор строки запуска из настроек (`python -m bpmkit`, `"C:\\...\\bpmkit.exe"`).
-
-    `posix=False` на Windows обязателен: иначе `shlex` съедает обратные слэши как
-    экранирование (см. тот же комментарий в `standkit_companion/context.py`).
-    """
-    posix = os.name != "nt"
-    parts = shlex.split(value, posix=posix)
-    if not posix:
-        parts = [p[1:-1] if len(p) >= 2 and p[0] == p[-1] == '"' else p for p in parts]
-    return [p for p in parts if p]
-
-
 def _candidate_roots(extra_roots: Optional[Sequence] = None) -> list:
-    roots: list = [Path(r) for r in (extra_roots or [])]
-    node = Path(__file__).resolve().parent
-    for _ in range(_CLI_MAX_UP):
-        node = node.parent
-        roots.append(node)
-    return roots
+    """Тонкая обёртка над `standkit.cli_resolve.candidate_roots` — имя остаётся
+    стабильным для тестов, которые подменяют именно его
+    (`monkeypatch.setattr(license_api, "_candidate_roots", ...)`)."""
+    return _shared_candidate_roots(__file__, extra_roots=extra_roots)
 
 
 def find_cli(settings, *, extra_roots: Optional[Sequence] = None) -> Optional[list]:
@@ -150,22 +143,25 @@ def find_cli(settings, *, extra_roots: Optional[Sequence] = None) -> Optional[li
     `settings` — секция `companion` конфига хаба (нужно единственное поле
     `mcp_cli`): у экрана лицензии и у канала обновлений ОДИН путь к MCP, второго
     поля в настройках не заводим.
+
+    Порядок резолва (GAP-273; сильнее — выше) — дословно тот же, что у
+    `standkit_companion.context.find_cli` (общий хелпер `standkit.cli_resolve`):
+
+    1. Явная настройка `companion.mcp_cli`.
+    2. Переменная окружения `BPMKIT_CLI` (тот же формат).
+    3. Автодетект бинаря (`bpmkit.exe`/`bpmkit`) рядом с поставкой.
+    4. Автодетект запуска из исходников (`server/main.py` тем же python, что у хаба),
+       если бинарь не нашёлся нигде.
     """
     configured = str(getattr(settings, "mcp_cli", "") or "").strip()
     if configured:
-        as_path = Path(configured)
-        if as_path.is_file():
-            return [str(as_path)]
-        parts = _split_command(configured)
-        return parts or None
+        return resolve_command_string(configured)
 
-    for root in _candidate_roots(extra_roots):
-        for subpath in _CLI_SUBPATHS:
-            for name in _CLI_NAMES:
-                candidate = root.joinpath(*subpath, name)
-                if candidate.is_file():
-                    return [str(candidate)]
-    return None
+    from_env = str(os.environ.get(CLI_ENV_VAR, "") or "").strip()
+    if from_env:
+        return resolve_command_string(from_env)
+
+    return search_roots(_candidate_roots(extra_roots))
 
 
 # ------------------------------------------------------------------------------------
@@ -212,8 +208,9 @@ def _cli_or_raise(settings) -> list:
     if not cli:
         raise LicenseCliError(
             "Рядом не найден CLI BPMkit — укажите путь к нему в настройках "
-            "(раздел «Канал обновлений», поле «Путь к CLI BPMkit»)",
-            detail="автодетект bpmkit.exe рядом с поставкой не дал результата",
+            f"(раздел «Канал обновлений», поле «Путь к CLI BPMkit») либо переменной "
+            f"окружения {CLI_ENV_VAR}",
+            detail=describe_search_targets(_candidate_roots()),
             status=503,
         )
     return cli
@@ -271,8 +268,7 @@ def license_info(settings, *, run: Optional[Callable] = None,
     """
     cli = find_cli(settings)
     if not cli:
-        return _free_snapshot("автодетект bpmkit.exe рядом с поставкой не дал результата; "
-                              "укажите путь к CLI в настройках")
+        return _free_snapshot(describe_search_targets(_candidate_roots()))
 
     key = tuple(cli) + LICENSE_INFO_TAIL
     cached = _cache_get(key)

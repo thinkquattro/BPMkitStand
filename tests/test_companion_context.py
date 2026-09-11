@@ -10,7 +10,11 @@
 * явная настройка `backend_url` перебивает адрес из поставки;
 * кэш действительно экономит запуск процесса (иначе тик трёх циклов = три запуска `.exe`);
 * конверт не утекает НИ В ОДНО сообщение об ошибке — stdout CLI содержит лицензионный ключ,
-  и попадание stdout в текст исключения означало бы ключ в логе хаба.
+  и попадание stdout в текст исключения означало бы ключ в логе хаба;
+* GAP-273: на машине издателя MCP запущен из исходников (`python …\\BPMkit\\server\\main.py`),
+  исполняемого файла рядом нет вовсе — резолв обязан находить CLI и в этом случае, а не только
+  через собранный `bpmkit.exe`, и переменная окружения `BPMKIT_CLI` обязана вставать в
+  правильное место порядка резолва (сильнее автодетекта, слабее явной настройки).
 
 Реальный процесс не запускается нигде: `resolve` принимает `run` как точку инъекции.
 """
@@ -18,10 +22,13 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 import pytest
 
+from standkit import cli_resolve as cli_resolve_module
+from standkit.cli_resolve import CLI_ENV_VAR
 from standkit_companion import context as context_module
 from standkit_companion.context import (
     CONTEXT_ARGV_TAIL,
@@ -78,6 +85,13 @@ def _clean_cache():
     invalidate_cache()
 
 
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    """`BPMKIT_CLI` — часть порядка резолва (GAP-273): тест обязан видеть только то,
+    что сам задал, а не то, что случайно осталось в окружении хоста/CI."""
+    monkeypatch.delenv(CLI_ENV_VAR, raising=False)
+
+
 def _cli(tmp_path, name: str = "bpmkit.exe"):
     """Файл-заглушка CLI: `find_cli` проверяет существование, а не исполняемость."""
     path = tmp_path / name
@@ -126,6 +140,163 @@ def test_find_cli_returns_none_when_nothing_found(tmp_path):
     """Пусто — значит пусто. Гадать «а вдруг он в PATH» нельзя: там может оказаться
     другая сборка MCP, и канал спросит лицензию не у того."""
     assert find_cli(CompanionSettings(), extra_roots=[tmp_path / "нет-такой-папки"]) is None
+
+
+# --------------------------------------------------------------------------------------
+# find_cli: фолбэк на запуск из исходников (GAP-273)
+# --------------------------------------------------------------------------------------
+def test_find_cli_falls_back_to_source_main_py(tmp_path):
+    """На машине издателя MCP запущен из исходников (`python …/server/main.py`) —
+    исполняемого файла рядом нет вовсе. Автодетект обязан найти этот случай, а не
+    молчать «bpmkit.exe не найден»."""
+    root = tmp_path / "BPMkit"
+    (root / "server").mkdir(parents=True)
+    main_py = root / "server" / "main.py"
+    main_py.write_text("", encoding="utf-8")
+
+    assert find_cli(CompanionSettings(), extra_roots=[root]) == [sys.executable, str(main_py)]
+
+
+def test_find_cli_falls_back_to_nested_bpmkit_source_layout(tmp_path):
+    """Второй вариант раскладки исходников: корень-кандидат на уровень ВЫШЕ папки
+    `BPMkit`, а не сама эта папка (так ложится чекаут исходников на машине издателя)."""
+    root = tmp_path / "checkout"
+    nested = root / "BPMkit" / "server"
+    nested.mkdir(parents=True)
+    main_py = nested / "main.py"
+    main_py.write_text("", encoding="utf-8")
+
+    assert find_cli(CompanionSettings(), extra_roots=[root]) == [sys.executable, str(main_py)]
+
+
+def test_find_cli_source_fallback_uses_same_python_as_hub(tmp_path, monkeypatch):
+    """CLI из исходников обязан запускаться ТЕМ ЖЕ python, что и сам хаб — не первым
+    `python`, случайно оказавшимся в PATH."""
+    root = tmp_path / "BPMkit"
+    (root / "server").mkdir(parents=True)
+    main_py = root / "server" / "main.py"
+    main_py.write_text("", encoding="utf-8")
+    monkeypatch.setattr(cli_resolve_module.sys, "executable", "/opt/hub-python/bin/python3")
+
+    assert find_cli(CompanionSettings(), extra_roots=[root])[0] == "/opt/hub-python/bin/python3"
+
+
+def test_python_for_hub_prefers_console_python_over_pythonw(tmp_path, monkeypatch):
+    """Хаб под `pythonw.exe` (без консоли — трей, служба) не смог бы прочитать вывод
+    дочернего CLI на stdout: рядом предпочитается `python.exe`."""
+    pythonw = tmp_path / "pythonw.exe"
+    pythonw.write_text("", encoding="utf-8")
+    python_exe = tmp_path / "python.exe"
+    python_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(cli_resolve_module.os, "name", "nt")
+    monkeypatch.setattr(cli_resolve_module.sys, "executable", str(pythonw))
+
+    assert cli_resolve_module.python_for_hub() == str(python_exe)
+
+
+def test_python_for_hub_keeps_pythonw_without_sibling(tmp_path, monkeypatch):
+    """Рядом с `pythonw.exe` нет `python.exe` (нестандартная раскладка) — фолбэк не
+    подставляет несуществующий файл, используется тот интерпретатор, что реально есть."""
+    pythonw = tmp_path / "pythonw.exe"
+    pythonw.write_text("", encoding="utf-8")
+    monkeypatch.setattr(cli_resolve_module.os, "name", "nt")
+    monkeypatch.setattr(cli_resolve_module.sys, "executable", str(pythonw))
+
+    assert cli_resolve_module.python_for_hub() == str(pythonw)
+
+
+def test_python_for_hub_keeps_console_python_as_is(monkeypatch):
+    """Обычный консольный `python` — без подмены, фолбэк не нужен вовсе."""
+    monkeypatch.setattr(cli_resolve_module.sys, "executable", "/usr/bin/python3")
+
+    assert cli_resolve_module.python_for_hub() == "/usr/bin/python3"
+
+
+def test_find_cli_prefers_binary_over_source_fallback_in_same_root(tmp_path):
+    """Бинарь и исходники лежат рядом (нештатно, но не запрещено) — собранная поставка
+    авторитетнее дерева исходников."""
+    root = tmp_path / "BPMkit"
+    (root / "server").mkdir(parents=True)
+    binary = root / "server" / "bpmkit.exe"
+    binary.write_text("", encoding="utf-8")
+    (root / "server" / "main.py").write_text("", encoding="utf-8")
+
+    assert find_cli(CompanionSettings(), extra_roots=[root]) == [str(binary)]
+
+
+def test_find_cli_prefers_binary_in_any_root_over_source_fallback(tmp_path):
+    """Бинарь ищется во ВСЕХ корнях-кандидатах ПРЕЖДЕ чем канал согласится на фолбэк
+    исходников хоть в одном из них — иначе более далёкий, но собранный MCP проиграл бы
+    ближнему черновику из исходников."""
+    source_root = tmp_path / "source-only"
+    (source_root / "server").mkdir(parents=True)
+    (source_root / "server" / "main.py").write_text("", encoding="utf-8")
+
+    binary_root = tmp_path / "binary-elsewhere"
+    (binary_root / "server").mkdir(parents=True)
+    binary = binary_root / "server" / "bpmkit.exe"
+    binary.write_text("", encoding="utf-8")
+
+    result = find_cli(CompanionSettings(), extra_roots=[source_root, binary_root])
+
+    assert result == [str(binary)]
+
+
+# --------------------------------------------------------------------------------------
+# find_cli: переменная окружения BPMKIT_CLI (GAP-273)
+# --------------------------------------------------------------------------------------
+def test_find_cli_uses_env_var_when_nothing_else_found(tmp_path, monkeypatch):
+    """`BPMKIT_CLI` — фолбэк ниже явной настройки, но выше автодетекта: должен
+    сработать, когда рядом с поставкой ничего не нашлось."""
+    monkeypatch.setenv(CLI_ENV_VAR, "python -m bpmkit")
+
+    result = find_cli(CompanionSettings(), extra_roots=[tmp_path / "нет-такой-папки"])
+
+    assert result == ["python", "-m", "bpmkit"]
+
+
+def test_find_cli_env_var_accepts_file_path(tmp_path, monkeypatch):
+    """`BPMKIT_CLI` — тот же формат, что настройка `mcp_cli`: путь к файлу берётся
+    целиком, а не дробится."""
+    cli = _cli(tmp_path / "Program Files", "bpmkit.exe")
+    monkeypatch.setenv(CLI_ENV_VAR, str(cli))
+
+    assert find_cli(CompanionSettings()) == [str(cli)]
+
+
+def test_find_cli_setting_overrides_env_var(tmp_path, monkeypatch):
+    """Явная настройка `companion.mcp_cli` сильнее переменной окружения — её задал
+    человек, и она не имеет права быть молча перебита окружением процесса."""
+    cli = _cli(tmp_path)
+    monkeypatch.setenv(CLI_ENV_VAR, "python -m совсем-другой-bpmkit")
+
+    assert find_cli(_settings(cli)) == [str(cli)]
+
+
+def test_find_cli_env_var_overrides_autodetect(tmp_path, monkeypatch):
+    """Переменная окружения сильнее автодетекта: если она задана, канал обязан
+    воспользоваться ею, даже когда рядом нашёлся бы и бинарь автодетектом."""
+    root = tmp_path / "BPMkit"
+    (root / "server").mkdir(parents=True)
+    (root / "server" / "bpmkit.exe").write_text("", encoding="utf-8")
+    monkeypatch.setenv(CLI_ENV_VAR, "python -m bpmkit")
+
+    result = find_cli(CompanionSettings(), extra_roots=[root])
+
+    assert result == ["python", "-m", "bpmkit"]
+
+
+def test_find_cli_env_var_overrides_source_fallback(tmp_path, monkeypatch):
+    """Переменная окружения сильнее и фолбэка на исходники — тот же приоритет, что и
+    против бинаря."""
+    root = tmp_path / "BPMkit"
+    (root / "server").mkdir(parents=True)
+    (root / "server" / "main.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv(CLI_ENV_VAR, "python -m bpmkit")
+
+    result = find_cli(CompanionSettings(), extra_roots=[root])
+
+    assert result == ["python", "-m", "bpmkit"]
 
 
 # --------------------------------------------------------------------------------------
@@ -194,6 +365,25 @@ def test_resolve_without_cli_says_what_to_fix(tmp_path, monkeypatch):
     assert err.retriable is True
     assert "mcp_cli" in str(err), "сообщение не называет, что именно чинить"
     assert runner.calls == [], "процесс запущен, хотя запускать нечего"
+
+
+def test_resolve_without_cli_mentions_env_var_and_lists_search_targets(tmp_path, monkeypatch):
+    """Текст отказа (GAP-273) обязан называть ОБА способа задать CLI — настройку и
+    переменную окружения — и перечислять, где именно автодетект уже искал: человек
+    чинит по этому тексту, не заглядывая в код резолва."""
+    empty_root = tmp_path / "пусто"
+    monkeypatch.setattr(context_module, "_candidate_roots",
+                        lambda extra_roots=None: [empty_root])
+
+    with pytest.raises(ContextUnavailable) as info:
+        resolve(CompanionSettings(mcp_cli=""), run=_ok_runner(), cache_ttl=0)
+
+    err = info.value
+    assert "companion.mcp_cli" in str(err)
+    assert CLI_ENV_VAR in str(err)
+    assert str(empty_root) in err.detail, "detail не называет проверенный корень"
+    assert "companion.mcp_cli" in err.detail
+    assert CLI_ENV_VAR in err.detail
 
 
 def test_resolve_no_license_is_a_different_problem(tmp_path):
