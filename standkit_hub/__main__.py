@@ -32,6 +32,7 @@ import webbrowser
 from pathlib import Path
 
 from standkit_hub.config import HubConfig
+from standkit_hub.mutex import acquire_hub_mutex
 from standkit_hub.security import InsecureBindError, generate_session_token
 from standkit_hub.server import DEFAULT_HUB_PORT, HubAlreadyRunning, bind_hub_server
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
@@ -141,6 +142,13 @@ def main(argv: list[str] | None = None) -> int:
         # адрес) — честный отказ с понятным текстом вместо трейсбека.
         print(f"[standkit-hub] не удалось занять {args.host}:{args.port} — {exc}", file=sys.stderr)
         return 1
+
+    # GAP-229/GAP-284: этот процесс подтверждённо поднимает СВОЙ сервер (не открывает
+    # браузер на уже работающем экземпляре -- тот путь завершился раньше, через
+    # HubAlreadyRunning выше) -- сигналим установщику/деинсталлятору BPMkit до входа в
+    # цикл обслуживания, тем же приёмом, что core.acquire_server_mutex() у сервера
+    # (BPMkit/server/bpmkit/core.py репозитория bpmsoft-mcp, вызывается перед mcp.run()).
+    acquire_hub_mutex()
 
     actual_port = httpd.server_address[1]
     if args.port and actual_port != args.port:
