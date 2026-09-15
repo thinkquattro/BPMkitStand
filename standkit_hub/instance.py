@@ -289,7 +289,7 @@ _PROCESS_IDENTITY_TOLERANCE_SEC = 5.0
 # как диспетчер BPMkit (GAP-311 Н1) — источник (venv/исходники) и
 # PyInstaller-сборка (см. ``standkit_hub.elevation.relaunch_command``) имена
 # исполняемого файла дают разные, поэтому проверяем ОБЕ подстроки.
-_HUB_PROCESS_IDENTITY_MARKERS = ("standkit_hub", "bpmkit-hub")
+_HUB_PROCESS_IDENTITY_MARKERS = ("standkit_hub", "standkit-hub", "standkit-gui", "bpmkit-hub")
 
 
 def _process_looks_like_hub(pid: int) -> bool:
@@ -350,6 +350,15 @@ def _same_process_as_recorded(expected: HubInstanceState) -> "tuple[bool, str]":
     if actual_create_time is not None and expected_create_time:
         if abs(actual_create_time - expected_create_time) <= _PROCESS_IDENTITY_TOLERANCE_SEC:
             return True, ""
+        # Время создания ИЗВЕСТНО и НЕ совпало — это другой процесс с тем же
+        # pid, и совпадение маркера в командной строке это не перекрывает
+        # (посторонний `vim standkit_hub/server.py` тоже содержит маркер).
+        # Маркер — только запасная проверка, когда время создания получить
+        # не удалось вовсе (повторное ревью GAP-311, М-А).
+        return False, (
+            f"не удалось подтвердить, что pid {expected.pid} — диспетчер (время создания "
+            "процесса не совпадает с записанным); остановите его вручную"
+        )
 
     if _process_looks_like_hub(expected.pid):
         return True, ""

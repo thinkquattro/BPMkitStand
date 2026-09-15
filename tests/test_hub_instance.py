@@ -424,3 +424,35 @@ def test_stop_running_instance_does_not_kill_a_real_unrelated_process(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+def test_create_time_mismatch_is_not_overridden_by_cmdline_marker(monkeypatch):
+    """Повторное ревью GAP-311, М-А: известное и несовпавшее время создания —
+    отказ, даже если в командной строке есть маркер хаба."""
+    from standkit_hub import instance as inst
+
+    state = inst.HubInstanceState(pid=4242, host="127.0.0.1", port=8770, started_at=1000.0)
+    state.process_create_time = 1000.0
+    monkeypatch.setattr(inst, "is_alive", lambda pid: True)
+    monkeypatch.setattr(inst, "process_create_time", lambda pid: 5000.0)
+    monkeypatch.setattr(inst, "_process_looks_like_hub", lambda pid: True)
+    ok, reason = inst._same_process_as_recorded(state)
+    assert ok is False
+    assert "время создания" in reason
+
+
+def test_cmdline_marker_used_when_create_time_unknown(monkeypatch):
+    from standkit_hub import instance as inst
+
+    state = inst.HubInstanceState(pid=4242, host="127.0.0.1", port=8770, started_at=1000.0)
+    monkeypatch.setattr(inst, "is_alive", lambda pid: True)
+    monkeypatch.setattr(inst, "process_create_time", lambda pid: None)
+    monkeypatch.setattr(inst, "_process_looks_like_hub", lambda pid: True)
+    assert inst._same_process_as_recorded(state) == (True, "")
+
+
+def test_console_script_names_are_hub_markers():
+    from standkit_hub import instance as inst
+
+    for name in ("standkit-hub", "standkit-gui", "standkit_hub", "bpmkit-hub"):
+        assert name in inst._HUB_PROCESS_IDENTITY_MARKERS

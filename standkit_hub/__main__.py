@@ -470,7 +470,19 @@ def main(argv: list[str] | None = None) -> int:
         # строгий, без отката), либо иная причина (нет прав, недоступный
         # адрес) — честный отказ с понятным текстом вместо трейсбека.
         if takeover_intent and exc.errno in (_errno.EADDRINUSE, _errno.EACCES):
-            message = f"порт {args.port} занят другим приложением"
+            # Проба не узнала хаб на порту, но это ещё не значит «чужое
+            # приложение»: зависший диспетчер не отвечает за таймаут пробы.
+            # Живой pid из файла состояния на том же порту — наш хаб, и текст
+            # должен направить к нему, а не искать постороннюю программу
+            # (повторное ревью GAP-311, М-Б).
+            hung = _instance.read_state(state_file)
+            if hung is not None and hung.port == args.port:
+                message = (
+                    f"работающий диспетчер (pid {hung.pid}) не ответил на проверку — "
+                    "возможно, он завис; закройте его вручную и повторите"
+                )
+            else:
+                message = f"порт {args.port} занят другим приложением"
         else:
             message = f"не удалось занять {args.host}:{args.port} — {exc}"
         print(f"[standkit-hub] {message}", file=sys.stderr)
