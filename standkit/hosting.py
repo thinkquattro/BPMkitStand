@@ -273,10 +273,10 @@ TRANSIENT_RPC_HINT = (
 # прав — одна формулировка на все места (start/stop/restart/list/wp).
 ELEVATION_HINT = (
     "\n\nПохоже, не хватает прав администратора: управление IIS через appcmd.exe "
-    "требует запуска диспетчера «от имени администратора» (elevated). В дашборде "
-    "это кнопка «без прав администратора» в шапке — она перезапускает диспетчер "
-    "через запрос UAC; в консоли — запуск standkit-hub от администратора. После "
-    "этого повторите операцию."
+    "требует прав администратора. В диспетчере — «Перезапустить с правами "
+    "администратора» (щит «без прав администратора» в шапке) либо «Только эту "
+    "операцию» в сообщении об ошибке; в консоли — запуск standkit-hub от имени "
+    "администратора. После этого повторите операцию."
 )
 
 
@@ -469,14 +469,70 @@ class KestrelBackend:
 # --------------------------------------------------------------------------
 
 
+def _is_wow64_process() -> bool:
+    """
+    Работает ли ТЕКУЩИЙ процесс в режиме WOW64 (32-битный процесс на
+    64-битной Windows).
+
+    ЗАЧЕМ. У 32-битного процесса Windows молча подменяет
+    ``%WINDIR%\\system32`` на ``%WINDIR%\\SysWOW64`` (File System Redirector):
+    путь к ``appcmd.exe``, собранный "напролом" через ``system32``, у такого
+    процесса ведёт не туда — 64-битного ``appcmd.exe`` в ``SysWOW64`` нет
+    (``inetsrv`` там не зеркалируется). Первый и дешёвый признак —
+    переменная окружения ``PROCESSOR_ARCHITEW6432``: Windows выставляет её
+    ИМЕННО 32-битным процессам, запущенным на 64-битной системе.
+    ``IsWow64Process`` — резервный путь, на случай, если переменную кто-то
+    стёр из окружения (redirection всё равно останется в силе).
+
+    Вынесена в отдельную маленькую функцию, а не инлайнена в
+    ``_resolve_appcmd``, чтобы подменяться в тестах на Linux (реальный ctypes
+    там недоступен, а ветку "мы WOW64" всё равно нужно проверить).
+    """
+    if os.environ.get("PROCESSOR_ARCHITEW6432"):
+        return True
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        is_wow64 = ctypes.c_long(0)
+        if not kernel32.IsWow64Process(kernel32.GetCurrentProcess(), ctypes.byref(is_wow64)):
+            return False
+        return bool(is_wow64.value)
+    except Exception:
+        return False
+
+
 def _resolve_appcmd() -> str:
-    """Резолвит путь к ``appcmd.exe``. Бросает ``HostingError`` вне Windows либо если файла нет."""
+    """
+    Резолвит путь к ``appcmd.exe``. Бросает ``HostingError`` вне Windows либо
+    если файла нет — про установку IIS Management Tools, а НЕ про права
+    администратора: отсутствие файла и нехватка elevation — разные диагнозы
+    (elevation классифицируется отдельно, по stderr самого appcmd, см.
+    ``IisElevationError`` ниже).
+
+    WOW64 (GAP-311 п.2): если текущий процесс 32-битный на 64-битной Windows
+    (``_is_wow64_process``) и существует ``%WINDIR%\\Sysnative\\inetsrv\\appcmd.exe``
+    — используем ЕГО. ``Sysnative`` — псевдо-каталог, который File System
+    Redirector НЕ трогает: путь через него всегда указывает на настоящий
+    64-битный ``system32``, даже из 32-битного процесса. Без этого 32-битный
+    ``standkit-hub`` (например, собранный PyInstaller-ом как x86-exe) молча
+    получал бы редирект в ``SysWOW64`` и там же честно не находил
+    ``appcmd.exe`` — с диагнозом "appcmd не найден", хотя IIS Management
+    Tools установлены.
+    """
     if sys.platform != "win32":
         raise HostingError(
             "host_kind=iis поддерживается только на Windows (нужен appcmd.exe) — "
             f"текущая платформа: {sys.platform!r}"
         )
-    appcmd = os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "system32", "inetsrv", "appcmd.exe")
+    windir = os.environ.get("WINDIR", "C:\\Windows")
+    if _is_wow64_process():
+        sysnative = os.path.join(windir, "Sysnative", "inetsrv", "appcmd.exe")
+        if os.path.isfile(sysnative):
+            return sysnative
+    appcmd = os.path.join(windir, "system32", "inetsrv", "appcmd.exe")
     if not os.path.isfile(appcmd):
         raise HostingError(
             f"appcmd.exe не найден: {appcmd} — убедитесь, что установлены IIS Management "

@@ -58,6 +58,11 @@ class HubInstanceState:
     elevated: Optional[bool] = None
     version: str = _standkit_version
     started_at: float = 0.0
+    # SID пользователя Windows, под которым работает ЭТОТ процесс (см.
+    # standkit.platform.current_user_sid). None — не Windows либо не удалось
+    # определить; отсутствие поля в старом файле состояния (запись до
+    # GAP-311 п.4) читается тем же None — обратная совместимость.
+    user_sid: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -65,6 +70,7 @@ class HubInstanceState:
     @classmethod
     def from_dict(cls, data: dict) -> "HubInstanceState":
         elevated = data.get("elevated")
+        user_sid = data.get("user_sid")
         return cls(
             pid=int(data["pid"]),
             host=str(data.get("host", "127.0.0.1")),
@@ -72,6 +78,7 @@ class HubInstanceState:
             elevated=bool(elevated) if elevated is not None else None,
             version=str(data.get("version", "")),
             started_at=float(data.get("started_at", 0.0)),
+            user_sid=str(user_sid) if user_sid else None,
         )
 
 
@@ -127,7 +134,11 @@ def clear_state(path: Path, *, pid: Optional[int] = None) -> None:
 
 
 def should_takeover(
-    running: Optional[HubInstanceState], *, we_elevated: Optional[bool], explicit: bool = False
+    running: Optional[HubInstanceState],
+    *,
+    we_elevated: Optional[bool],
+    explicit: bool = False,
+    our_sid: Optional[str] = None,
 ) -> bool:
     """
     Нужно ли новому процессу отобрать порт у работающего.
@@ -135,11 +146,24 @@ def should_takeover(
     ``explicit`` — пришёл флаг ``--takeover`` (перезапуск по кнопке дашборда):
     там решение уже принято пользователем, файл состояния лишь подсказывает,
     кого гасить; если состояния нет — гасить некого, но и отступать не надо
-    (порт освободит уходящий сам).
+    (порт освободит уходящий сам). При ``explicit=True`` сверку SID НЕ делаем
+    — за неё уже отвечает более ранняя проверка инициатора в
+    ``standkit_hub.__main__`` (см. ``--initiator-sid``, GAP-311 п.4): если она
+    пропустила запрос дальше, значит SID совпал (или его нельзя определить
+    ни с одной стороны), и здесь решение принято.
+
+    ``our_sid`` — SID ТЕКУЩЕГО (нового) процесса. Если мы elevated, у
+    работающего экземпляра известен ``user_sid``, у нас известен ``our_sid``,
+    и они РАЗЛИЧАЮТСЯ — не перехватываем даже автоматически: значит, кто-то
+    из другой учётной записи запустил (или сам поднял через UAC) свой
+    процесс диспетчера рядом с процессом первого пользователя, и молча
+    останавливать чужой рабочий экземпляр нельзя.
     """
     if explicit:
         return True
     if running is None:
+        return False
+    if we_elevated and our_sid and running.user_sid and our_sid != running.user_sid:
         return False
     # Повышение прав — единственный автоматический повод. Обратного (elevated
     # уступает обычному) не бывает.
@@ -176,7 +200,9 @@ def wait_port_released(host: str, port: int, *, timeout: float = DEFAULT_TAKEOVE
     return probe_hub_instance(host, port, timeout=0.5) is None
 
 
-def current_state(host: str, port: int, *, elevated: Optional[bool]) -> HubInstanceState:
+def current_state(
+    host: str, port: int, *, elevated: Optional[bool], user_sid: Optional[str] = None
+) -> HubInstanceState:
     """Слепок ТЕКУЩЕГО процесса — то, что пишется в файл состояния сразу после bind'а."""
     return HubInstanceState(
         pid=os.getpid(),
@@ -185,4 +211,5 @@ def current_state(host: str, port: int, *, elevated: Optional[bool]) -> HubInsta
         elevated=elevated,
         version=_standkit_version,
         started_at=time.time(),
+        user_sid=user_sid,
     )

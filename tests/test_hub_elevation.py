@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from standkit import platform as _platform
 from standkit_hub import elevation, instance
 from standkit_hub.config import HubConfig
 from standkit_hub.instance import HubInstanceState
@@ -75,6 +76,60 @@ def test_handoff_is_owner_only(tmp_path):
     assert (path.stat().st_mode & 0o777) == 0o600
 
 
+# --- SID/имя текущего пользователя (standkit.platform) ---
+
+
+def test_current_user_sid_is_none_off_windows(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert _platform.current_user_sid() is None
+
+
+def test_current_user_name_prefers_userdomain_username(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("USERDOMAIN", "CORP")
+    monkeypatch.setenv("USERNAME", "ivanov")
+    assert _platform.current_user_name() == "CORP\\ivanov"
+
+
+def test_current_user_name_without_domain(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("USERDOMAIN", raising=False)
+    monkeypatch.setenv("USERNAME", "ivanov")
+    assert _platform.current_user_name() == "ivanov"
+
+
+def test_refusal_text_substitutes_user():
+    text = elevation.refusal_text("CORP\\ivanov")
+    assert "CORP\\ivanov" in text
+    assert "не поддерживается" in text
+
+
+def test_refusal_text_without_user_is_not_fatal():
+    assert "неизвестно" in elevation.refusal_text(None)
+
+
+# --- файл результата одноразовой операции с правами ---
+
+
+def test_write_result_atomic_round_trip(tmp_path):
+    path = tmp_path / "result.json"
+    elevation.write_result_atomic(path, {"status": "ok", "at": 1.0})
+
+    assert elevation.read_result(path) == {"status": "ok", "at": 1.0}
+    # Никакого временного файла-мусора не должно оставаться.
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_read_result_missing_file_is_none(tmp_path):
+    assert elevation.read_result(tmp_path / "nope.json") is None
+
+
+def test_read_result_broken_json_is_none(tmp_path):
+    path = tmp_path / "broken.json"
+    path.write_text("{не json", encoding="utf-8")
+    assert elevation.read_result(path) is None
+
+
 # --- аргументы перезапуска ---
 
 
@@ -83,14 +138,64 @@ def test_build_relaunch_params_has_takeover_and_no_browser(tmp_path):
         port=8770, handoff=tmp_path / "h.json", config_path=tmp_path / "hub.json"
     )
 
-    assert params[:2] == ["-m", "standkit_hub"]
+    # build_relaunch_params отдаёт ХВОСТ аргументов — "-m standkit_hub"/
+    # исполняемый файл добавляет relaunch_command (frozen-aware, GAP-311 п.3).
+    assert params[:2] != ["-m", "standkit_hub"]
     # Без --takeover новый (elevated) экземпляр упёрся бы в single-instance
     # проверку и молча вышел — ровно тот дефект, ради которого всё затевалось.
     assert "--takeover" in params
     # Браузер, запущенный из elevated-процесса, сам был бы elevated.
     assert "--no-browser" in params
+    assert "--desktop" not in params
     assert params[params.index("--port") + 1] == "8770"
     assert params[params.index("--session-token-file") + 1] == str(tmp_path / "h.json")
+
+
+def test_build_relaunch_params_desktop_uses_desktop_flag(tmp_path):
+    """Старый процесс работал в режиме pywebview — новый должен открыть СВОЁ окно,
+    а не полагаться на уже открытую вкладку (см. docstring build_relaunch_params)."""
+    params = elevation.build_relaunch_params(port=8770, desktop=True)
+
+    assert "--desktop" in params
+    assert "--no-browser" not in params
+
+
+def test_relaunch_command_venv_uses_pythonw_and_dash_m(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr(elevation, "windows_pythonw_executable", lambda: "pythonw.exe")
+
+    executable, params = elevation.relaunch_command(["--port", "8770"])
+
+    assert executable == "pythonw.exe"
+    assert params[:2] == ["-m", "standkit_hub"]
+    assert params[2:] == ["--port", "8770"]
+
+
+def test_relaunch_command_frozen_uses_own_executable(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", r"C:\Program Files\BPMkit\BPMkit-hub.exe", raising=False)
+
+    executable, params = elevation.relaunch_command(["--port", "8770"])
+
+    assert executable == r"C:\Program Files\BPMkit\BPMkit-hub.exe"
+    # PyInstaller-сборка не разворачивает "-m standkit_hub" — модуля как
+    # отдельно импортируемого пакета в exe нет.
+    assert params == ["--port", "8770"]
+
+
+def test_relaunch_elevated_frozen_uses_own_executable(monkeypatch, _windows):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "/opt/BPMkit-hub", raising=False)
+    calls = []
+
+    def _fake(executable, params, cwd):
+        calls.append((executable, params))
+        return 42
+
+    elevation.relaunch_elevated(["--port", "8770"], shell_execute=_fake)
+
+    assert calls[0][0] == "/opt/BPMkit-hub"
+    assert "-m" not in calls[0][1]
 
 
 def test_quote_params_quotes_paths_with_spaces():
@@ -224,6 +329,37 @@ def test_should_takeover_without_state():
     assert instance.should_takeover(None, we_elevated=True, explicit=True) is True
 
 
+def test_should_takeover_refuses_other_account_even_when_we_are_elevated():
+    # Работающий процесс без прав, но принадлежит ДРУГОЙ учётной записи —
+    # автоматически перехватывать нельзя (GAP-311 п.4), несмотря на то, что
+    # без учёта SID это было бы ровно "повышение прав" — единственный
+    # автоматический повод.
+    running = HubInstanceState(pid=1, host="127.0.0.1", port=8770, elevated=False, user_sid="S-1-5-21-AAA")
+
+    assert (
+        instance.should_takeover(running, we_elevated=True, explicit=False, our_sid="S-1-5-21-BBB") is False
+    )
+
+
+def test_should_takeover_same_sid_keeps_previous_behavior():
+    running = HubInstanceState(pid=1, host="127.0.0.1", port=8770, elevated=False, user_sid="S-1-5-21-AAA")
+
+    assert instance.should_takeover(running, we_elevated=True, explicit=False, our_sid="S-1-5-21-AAA") is True
+
+
+def test_should_takeover_unknown_sid_does_not_block():
+    # Один или оба SID не определены (не Windows, сбой WinAPI) — сверку не
+    # делаем, прежнее поведение сохраняется.
+    running = HubInstanceState(pid=1, host="127.0.0.1", port=8770, elevated=False, user_sid=None)
+
+    assert instance.should_takeover(running, we_elevated=True, explicit=False, our_sid="S-1-5-21-BBB") is True
+
+
+def test_hub_instance_state_from_dict_without_user_sid_is_backward_compatible():
+    state = HubInstanceState.from_dict({"pid": 1, "host": "127.0.0.1", "port": 8770})
+    assert state.user_sid is None
+
+
 # --- API хаба ---
 
 
@@ -280,7 +416,9 @@ def test_api_elevation_requires_auth(tmp_path):
         status, data = _request(f"{base}/api/hub/elevation", token=token)
         assert status == 200
         assert data["supported"] is (sys.platform == "win32")
-        assert set(data) == {"supported", "elevated", "can_restart", "reason"}
+        assert set(data) == {"supported", "elevated", "can_restart", "reason", "user", "restart"}
+        # Перезапуск не запрашивался — состояния нет.
+        assert data["restart"] is None
     finally:
         _shutdown(httpd)
 

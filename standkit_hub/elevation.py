@@ -59,6 +59,24 @@ _SHELL_EXECUTE_SUCCESS_THRESHOLD = 32
 ERROR_CANCELLED = 1223
 _SW_SHOWNORMAL = 1
 
+# Текст отказа при повышении прав ПОД ДРУГОЙ учётной записью (GAP-311 п.4):
+# новый (elevated) процесс обнаруживает, что запрос UAC подтвердил не тот
+# пользователь, что запустил исходный процесс, и молча выходит, оставляя
+# старый процесс работать как ни в чём не бывало. ``{user}`` — имя учётки,
+# которая ФАКТИЧЕСКИ подтвердила права (см. standkit.platform.current_user_name).
+REFUSAL_TEXT_TEMPLATE = (
+    "Права подтверждены другой учётной записью ({user}). Диспетчер работает с "
+    "реестром стендов и ключами текущего пользователя Windows, поэтому "
+    "повышение под другой учётной записью не поддерживается. Войдите в Windows "
+    "пользователем с правами администратора или попросите администратора "
+    "добавить вашу учётную запись в группу «Администраторы»."
+)
+
+
+def refusal_text(user: Optional[str]) -> str:
+    """Готовый текст отказа (см. ``REFUSAL_TEXT_TEMPLATE``) с подставленным именем."""
+    return REFUSAL_TEXT_TEMPLATE.format(user=user or "неизвестно")
+
 
 class ElevationError(Exception):
     """Не удалось перезапустить диспетчер с правами администратора (текст пригоден для показа)."""
@@ -129,6 +147,50 @@ def discard_handoff(path: Path) -> None:
         pass
 
 
+def write_result_atomic(path: Path, payload: dict) -> None:
+    """
+    Атомарно пишет JSON-результат одноразовой операции с правами (отказ по
+    SID при перезапуске диспетчера, статус одноразовой elevated-операции над
+    стендом — см. ``standkit_hub.elevated_op``).
+
+    ЗАЧЕМ АТОМАРНО. Наблюдатель на СТОРОНЕ СТАРОГО процесса (или сам хендлер
+    ``GET /api/hub/elevated-op/<id>``) опрашивает этот файл параллельно с его
+    записью новым процессом — обычная запись оставила бы окно, в котором
+    читатель видит пустой либо обрубленный JSON. ``os.replace`` на одном томе
+    — атомарная операция и на POSIX, и на NTFS: временный файл либо целиком
+    появляется на месте финального, либо не появляется вовсе.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_result(path: Path) -> Optional[dict]:
+    """
+    Читает JSON-результат одноразовой операции, если файл уже появился.
+
+    ``None`` — файла ещё нет (обычный исход при опросе "пока ждём") либо он
+    оказался нечитаемым/битым (гонка с записью на файловых системах без
+    строгой атомарности ``rename`` — трактуем консервативно, как "пока нет").
+    Файл НЕ удаляется здесь: у файла результата, в отличие от файла передачи
+    сессии, нет секрета внутри, а решение "когда удалить" разное у двух
+    вызывающих (наблюдатель перезапуска — сразу; ``GET .../elevated-op/<id>``
+    — тоже сразу, но по своему пути), поэтому удаление — забота вызывающего.
+    """
+    path = Path(path)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def read_handoff(
     path: Path, *, ttl: float = HANDOFF_TTL_SEC, now: Optional[float] = None
 ) -> Optional[str]:
@@ -175,9 +237,13 @@ def build_relaunch_params(
     port: int,
     handoff: Optional[Path] = None,
     config_path: Optional[Path] = None,
+    desktop: bool = False,
+    initiator_sid: Optional[str] = None,
+    result_file: Optional[Path] = None,
 ) -> list[str]:
     """
-    Аргументы командной строки нового (elevated) процесса хаба.
+    Аргументы (ХВОСТ, без имени модуля/исполняемого файла — тот добавляет
+    ``relaunch_command``) нового (elevated) процесса хаба.
 
     Чистая функция без побочных эффектов — ровно тот же приём, что и в
     ``standkit_hub.agent_control.build_agent_argv``: маппинг «состояние → флаги»
@@ -188,17 +254,77 @@ def build_relaunch_params(
     ровно тот сценарий, из-за которого ручной «запуск ярлыка от имени
     администратора» не давал никакого эффекта.
 
-    ``--no-browser`` тоже обязателен, и по двум причинам: вкладка у
-    пользователя уже открыта (сессия переезжает через файл передачи), а
-    браузер, запущенный ИЗ elevated-процесса, сам оказался бы elevated —
-    этого не хочет никто.
+    ``desktop`` — в каком режиме работал СТАРЫЙ процесс (см. параметр
+    ``desktop_mode`` у ``make_handler``/``bind_hub_server``): ``True`` даёт
+    ``--desktop`` вместо ``--no-browser``. В режиме pywebview закрытие окна
+    старого процесса не оставляет открытой вкладки браузера, которую можно
+    было бы просто переиспользовать через файл передачи сессии — новому
+    процессу нужно САМОМУ открыть окно, иначе пользователь остаётся без
+    какого-либо интерфейса. ``--no-browser`` в браузерном режиме остаётся по
+    тем же двум причинам, что раньше: вкладка у пользователя уже открыта
+    (сессия переезжает через файл передачи), а браузер, запущенный ИЗ
+    elevated-процесса, сам оказался бы elevated — этого не хочет никто.
+
+    ``initiator_sid``/``result_file`` — проверка «ту же учётную запись ли
+    подтвердили в UAC» (GAP-311 п.4): новый процесс сверяет SID и пишет исход
+    в ``result_file`` ДО того, как сделать что-либо с портом/состоянием.
     """
-    params = ["-m", "standkit_hub", "--port", str(port), "--takeover", "--no-browser"]
+    params = ["--port", str(port), "--takeover"]
+    params.append("--desktop" if desktop else "--no-browser")
     if config_path is not None:
         params += ["--config", str(config_path)]
     if handoff is not None:
         params += ["--session-token-file", str(handoff)]
+    if initiator_sid is not None:
+        params += ["--initiator-sid", str(initiator_sid)]
+    if result_file is not None:
+        params += ["--result-file", str(result_file)]
     return params
+
+
+def build_elevated_op_params(
+    *,
+    stand: str,
+    action: str,
+    result_file: Path,
+    config_path: Optional[Path] = None,
+    initiator_sid: Optional[str] = None,
+) -> list[str]:
+    """
+    Аргументы (хвост) одноразового elevated-процесса ``--elevated-op``
+    (``standkit_hub.elevated_op``, GAP-311 п.6) — младший брат
+    ``build_relaunch_params``: не про весь диспетчер, а про ОДНУ операцию над
+    ОДНИМ стендом. Порт/``--takeover``/``--no-browser``/``--desktop`` тут не
+    нужны — новый процесс не поднимает HTTP-сервер вовсе. Сессионный токен
+    НЕ передаётся ни явно, ни через файл передачи: одноразовому процессу
+    просто нечем его использовать.
+    """
+    params = ["--elevated-op", action, "--stand", stand, "--result-file", str(result_file)]
+    if config_path is not None:
+        params += ["--config", str(config_path)]
+    if initiator_sid is not None:
+        params += ["--initiator-sid", str(initiator_sid)]
+    return params
+
+
+def relaunch_command(params_tail: Sequence[str]) -> "tuple[str, list[str]]":
+    """
+    Исполняемый файл + ПОЛНЫЙ список аргументов нового процесса — с учётом
+    того, что в поставке BPMkit диспетчер запускается не интерпретатором
+    Python, а PyInstaller-сборкой (``BPMkit-hub.exe``, GAP-311 п.3).
+
+    ``sys.frozen`` — стандартный признак PyInstaller-бутстрапа: внутри такого
+    exe модуля ``standkit_hub`` как отдельно импортируемого пакета для
+    ``-m`` нет (весь код упакован в сам exe), поэтому для него исполняемым
+    файлом становится сам ``sys.executable`` (это и есть ``BPMkit-hub.exe``),
+    а ``params_tail`` передаётся как есть, без ``-m standkit_hub``.
+
+    Иначе (запуск из исходников/venv) — прежнее поведение: ``pythonw.exe``
+    (без консольного окна) + ``-m standkit_hub`` перед хвостом аргументов.
+    """
+    if getattr(sys, "frozen", False):
+        return sys.executable, list(params_tail)
+    return windows_pythonw_executable(), ["-m", "standkit_hub", *params_tail]
 
 
 def quote_params(params: Sequence[str]) -> str:
@@ -244,14 +370,23 @@ def relaunch_elevated(
     выходит ни одно исключение ОС «как есть».
 
     ``shell_execute`` подменяется в тестах: настоящий вызов показал бы окно UAC.
+
+    ``executable`` — явное указание исполняемого файла (в основном для
+    тестов, которым не важна разница frozen/venv). Если не передан,
+    вычисляется через ``relaunch_command`` (frozen-aware, GAP-311 п.3):
+    у PyInstaller-сборки ``params`` уже готовый хвост, БЕЗ ``-m standkit_hub``
+    — его туда, если нужно, добавит ``relaunch_command`` сам.
     """
     if not elevation_supported():
         raise ElevationError("Перезапуск с правами администратора доступен только на Windows.")
 
-    executable = executable or windows_pythonw_executable()
+    if executable is None:
+        executable, full_params = relaunch_command(params)
+    else:
+        full_params = list(params)
     call = shell_execute or _default_shell_execute
     try:
-        rc = call(executable, quote_params(params), str(cwd or Path.home()))
+        rc = call(executable, quote_params(full_params), str(cwd or Path.home()))
     except Exception as exc:  # ctypes/WinAPI — что угодно, наружу отдаём понятный текст
         raise ElevationError(f"Не удалось запросить повышение прав: {exc}") from exc
 

@@ -29,14 +29,16 @@ import argparse
 import os
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
+from typing import Optional
 
-from standkit.platform import is_elevated
+from standkit.platform import current_user_name, current_user_sid, is_elevated
 from standkit_hub import instance as _instance
 from standkit_hub.config import HubConfig
 from standkit_hub.mutex import acquire_hub_mutex
-from standkit_hub.elevation import read_handoff
+from standkit_hub.elevation import read_handoff, refusal_text, write_result_atomic
 from standkit_hub.security import InsecureBindError, generate_session_token
 from standkit_hub.server import DEFAULT_HUB_PORT, HubAlreadyRunning, bind_hub_server
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
@@ -49,17 +51,21 @@ def _describe_elevation(value) -> str:
     return "да" if value else "нет"
 
 
-def _takeover_running_instance(exc: HubAlreadyRunning, state_file: Path, *, explicit: bool) -> bool:
+def _takeover_running_instance(
+    exc: HubAlreadyRunning, state_file: Path, *, explicit: bool, our_sid: Optional[str]
+) -> bool:
     """
     Отобрать ли порт у уже работающего диспетчера — и, если да, погасить его и
     дождаться освобождения порта.
 
     Возвращает True, только если порт реально свободен и повторный bind имеет
     смысл. Правила решения — в ``standkit_hub.instance.should_takeover``
-    (коротко: явный ``--takeover`` либо «мы elevated, а он нет»).
+    (коротко: явный ``--takeover`` либо «мы elevated, а он нет», за
+    исключением случая, когда работающий экземпляр принадлежит ДРУГОЙ
+    учётной записи — тогда автоматический перехват не делаем, см. GAP-311 п.4).
     """
     state = _instance.read_state(state_file)
-    if not _instance.should_takeover(state, we_elevated=is_elevated(), explicit=explicit):
+    if not _instance.should_takeover(state, we_elevated=is_elevated(), explicit=explicit, our_sid=our_sid):
         return False
 
     if state is None:
@@ -148,7 +154,57 @@ def main(argv: list[str] | None = None) -> int:
             "перезапуска с правами администратора"
         ),
     )
+    parser.add_argument(
+        "--initiator-sid",
+        default=None,
+        help=(
+            "SID пользователя Windows, ЗАПРОСИВШЕГО повышение прав (внутренний флаг "
+            "перезапуска/одноразовой операции с правами, GAP-311 п.4) — если запрос UAC "
+            "подтвердила ДРУГАЯ учётная запись, процесс отказывается работать и пишет "
+            "причину в --result-file"
+        ),
+    )
+    parser.add_argument(
+        "--result-file",
+        default=None,
+        help=(
+            "файл, куда пишется исход попытки повышения прав ({status: accepted|refused, ...}) "
+            "— внутренний флаг, пользователем не задаётся вручную"
+        ),
+    )
+    parser.add_argument(
+        "--elevated-op",
+        choices=("start", "stop", "restart"),
+        default=None,
+        help=(
+            "выполнить ОДНУ операцию с правами администратора над стендом (--stand) и выйти, "
+            "без запуска HTTP-сервера — внутренний режим, поднимаемый диспетчером через UAC "
+            "(GAP-311 п.6)"
+        ),
+    )
+    parser.add_argument(
+        "--stand",
+        default=None,
+        help="имя стенда для --elevated-op",
+    )
     args = parser.parse_args(argv)
+
+    if args.elevated_op:
+        # ДО любых bind/mutex/state/handoff: это одноразовый процесс "выполнить
+        # и выйти", HTTP-сервер ему не нужен вовсе (см. standkit_hub.elevated_op).
+        from standkit_hub import elevated_op as _elevated_op
+
+        if not args.stand or not args.result_file:
+            print("[standkit-hub] --elevated-op требует --stand и --result-file", file=sys.stderr)
+            return 1
+        config_path = Path(args.config) if args.config else None
+        return _elevated_op.run(
+            stand=args.stand,
+            action=args.elevated_op,
+            result_file=Path(args.result_file),
+            config_path=config_path,
+            initiator_sid=args.initiator_sid,
+        )
 
     if args.install_shortcut or args.uninstall_shortcut:
         result = install_desktop_shortcut() if args.install_shortcut else uninstall_desktop_shortcut()
@@ -169,6 +225,42 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[standkit-hub] не удалось подготовить папку реестра: {exc}", file=sys.stderr)
 
     state_file = _instance.state_path(config.resolve_run_dir())
+    our_sid = current_user_sid()
+
+    # Проверка учётки, подтвердившей UAC (GAP-311 п.4): --initiator-sid кладёт
+    # туда SID пользователя, который ЗАПРОСИЛ повышение (кнопка "Перезапустить
+    # с правами администратора" / одноразовая операция). Если запрос UAC
+    # подтвердила ДРУГАЯ учётка — этот процесс не имеет права молча занять
+    # порт/реестр стендов текущего пользователя: реестр, ключи шифрования
+    # секретов и файлы диспетчера привязаны к профилю Windows, и "просто
+    # продолжить" означало бы тихую потерю доступа к своим же данным для
+    # исходного пользователя. Поэтому — отказ ДО bind/mutex/state/handoff.
+    if args.initiator_sid:
+        if our_sid and our_sid != args.initiator_sid:
+            message = refusal_text(current_user_name())
+            print(f"[standkit-hub] {message}", file=sys.stderr)
+            if args.result_file:
+                try:
+                    write_result_atomic(
+                        Path(args.result_file),
+                        {
+                            "status": "refused",
+                            "message": message,
+                            "user": current_user_name(),
+                            "at": time.time(),
+                        },
+                    )
+                except OSError:
+                    pass
+            return 3
+        if args.result_file:
+            try:
+                write_result_atomic(
+                    Path(args.result_file),
+                    {"status": "accepted", "at": time.time()},
+                )
+            except OSError:
+                pass
 
     # Сессия от предыдущего экземпляра (перезапуск с правами администратора):
     # файл одноразовый и протухающий, поэтому «не прочитали» — штатный исход,
@@ -198,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
             session_token=session_token,
             insecure=args.insecure,
             on_fallback=_report_port_busy,
+            desktop_mode=args.desktop,
         )
 
     try:
@@ -209,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         # такой запуск молча открывал браузер на СТАРОМ, неэлевированном
         # экземпляре — пользователь видел ту же ошибку прав, будучи уверен, что
         # всё сделал правильно.
-        if _takeover_running_instance(exc, state_file, explicit=args.takeover):
+        if _takeover_running_instance(exc, state_file, explicit=args.takeover, our_sid=our_sid):
             try:
                 httpd = _bind()
             except (HubAlreadyRunning, InsecureBindError, OSError) as exc2:
@@ -240,7 +333,10 @@ def main(argv: list[str] | None = None) -> int:
     # (в т.ч. с правами администратора тот процесс или нет).
     elevated = is_elevated()
     try:
-        _instance.write_state(state_file, _instance.current_state(args.host, actual_port, elevated=elevated))
+        _instance.write_state(
+            state_file,
+            _instance.current_state(args.host, actual_port, elevated=elevated, user_sid=our_sid),
+        )
     except OSError as exc:
         print(f"[standkit-hub] не удалось записать файл состояния: {exc}", file=sys.stderr)
     url = f"http://{args.host}:{actual_port}/?t={session_token}"

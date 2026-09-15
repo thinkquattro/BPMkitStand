@@ -156,6 +156,90 @@ def is_elevated() -> Optional[bool]:
         return None
 
 
+def current_user_sid() -> Optional[str]:
+    """
+    SID ТЕКУЩЕГО пользователя Windows (строка вида ``S-1-5-21-...``).
+
+    ЗАЧЕМ. Запрос UAC (``standkit_hub.elevation.relaunch_elevated``) может
+    быть подтверждён ЛЮБОЙ учётной записью из группы «Администраторы» —
+    Windows не требует, чтобы это была та же учётка, что запустила исходный
+    процесс. Реестр стендов, ключи шифрования секретов и файлы диспетчера в
+    ``run_dir``/``%APPDATA%`` привязаны к профилю КОНКРЕТНОГО пользователя
+    Windows, поэтому повышение прав «не под собой» для диспетчера означает не
+    ускорение, а потерю доступа к собственным данным (GAP-311 п.4). SID, а не
+    имя — потому что имя переименовывается, а SID пользователя неизменен.
+
+    ``None`` — не Windows либо ЛЮБОЙ сбой (WinAPI недоступен, ctypes упал):
+    в этом случае сверку SID делать не с чем, и вызывающий код (elevation,
+    ``standkit_hub.instance.should_takeover``) трактует это как «не проверяем»,
+    а не как отказ.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+        TOKEN_QUERY = 0x0008
+        TokenUser = 1
+
+        htoken = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(htoken)):
+            return None
+        try:
+            size = wintypes.DWORD(0)
+            # Первый вызов — только чтобы узнать нужный размер буфера.
+            advapi32.GetTokenInformation(htoken, TokenUser, None, 0, ctypes.byref(size))
+            if size.value == 0:
+                return None
+            buf = ctypes.create_string_buffer(size.value)
+            if not advapi32.GetTokenInformation(htoken, TokenUser, buf, size, ctypes.byref(size)):
+                return None
+            # TOKEN_USER — это { SID_AND_ATTRIBUTES User }, первое поле —
+            # указатель PSID (не встроенный SID, поэтому просто читаем указатель).
+            sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+            str_sid_ptr = ctypes.c_wchar_p()
+            if not advapi32.ConvertSidToStringSidW(sid_ptr, ctypes.byref(str_sid_ptr)):
+                return None
+            try:
+                value = str_sid_ptr.value
+            finally:
+                kernel32.LocalFree(str_sid_ptr)
+            return value
+        finally:
+            kernel32.CloseHandle(htoken)
+    except Exception:
+        # Любой сбой ctypes/WinAPI — честное «не знаю», проверку SID пропускаем.
+        return None
+
+
+def current_user_name() -> Optional[str]:
+    """
+    Человекочитаемое имя ТЕКУЩЕГО пользователя ОС — для текста отказа при
+    повышении прав под другой учётной записью (``standkit_hub.elevation``,
+    GAP-311 п.4) и для поля ``user`` в ``GET /api/hub/elevation``.
+
+    На Windows предпочитаем ``ДОМЕН\\Имя`` из ``USERDOMAIN``/``USERNAME`` —
+    ровно так Windows подписывает учётку в самом диалоге UAC, поэтому текст
+    отказа узнаваем. ``getpass.getuser()`` — переносимый фолбэк (и основной
+    путь вне Windows). ``None`` — не удалось определить ничем.
+    """
+    if sys.platform == "win32":
+        name = os.environ.get("USERNAME")
+        if name:
+            domain = os.environ.get("USERDOMAIN")
+            return f"{domain}\\{name}" if domain else name
+    try:
+        import getpass
+
+        return getpass.getuser()
+    except Exception:
+        return None
+
+
 def is_alive(pid: int) -> bool:
     """Проверяет, жив ли процесс с данным pid (кроссплатформенно)."""
     if pid <= 0:

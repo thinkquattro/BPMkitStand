@@ -53,6 +53,7 @@ import errno
 import json
 import mimetypes
 import re
+import secrets
 import threading
 import time
 from datetime import timezone
@@ -66,7 +67,7 @@ from standkit import __version__ as _standkit_version
 from standkit import lifecycle as _lifecycle
 from standkit import logs as _logs
 from standkit import platform as _platform
-from standkit.hosting import HostingError
+from standkit.hosting import HostingError, IisElevationError
 from standkit.lifecycle import AdoptionRequired, AdoptionUnavailable, LifecycleError
 from standkit.models import HostKind, Stand, Transport
 from standkit.registry import Registry, RegistryError, default_registry_path
@@ -136,6 +137,18 @@ _STAND_REGISTER_PATH = "/api/stand/register"
 # стенду (данные приходят телом запроса), поэтому это отдельный путь, а не
 # суб-действие /api/stand/<name>/*.
 _IIS_DETECT_PATH = "/api/iis/detect"
+
+# Одноразовая операция с правами администратора над ОДНИМ стендом IIS
+# (GAP-311 п.6) — отдельный путь, а не суб-действие /api/stand/<name>/*,
+# потому что она не проходит через обычный HTTP-цикл: запускает отдельный
+# elevated-процесс (см. standkit_hub.elevated_op) и опрашивается по op_id.
+_ELEVATED_OP_PATH = "/api/hub/elevated-op"
+# Матчит ЛЮБОЙ хвост после .../elevated-op/ — по контракту (см. GAP-311 п.6)
+# невалидный op_id должен дать 400 «свой», а не молчаливый общий 404
+# несуществующего пути; поэтому регэксп путевого сегмента отделён от
+# проверки формата (ровно 32 hex — secrets.token_hex(16)).
+_ELEVATED_OP_ANY_RE = re.compile(r"^/api/hub/elevated-op/(?P<op_id>[^/]+)$")
+_OP_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 # Поля формы регистрации, которые сервер готов принять и записать в Stand —
 # белый список (всё, чего нет в этом множестве, в реестр не попадает, даже
@@ -867,6 +880,66 @@ def build_companion_runner(config_path: Path):
         return None, f"канал обновлений не запущен: {type(exc).__name__}: {exc}"
 
 
+def _resolve_stand_action(
+    config_path: Path, name: str, action: str, *, force: bool = False
+) -> "tuple[int, dict]":
+    """
+    Общее ядро выполнения stand-действия (start/stop/restart) над записью
+    реестра — код и тело ответа, БЕЗ похода в HTTP.
+
+    ЗАЧЕМ ОБЩАЯ ФУНКЦИЯ. Ровно эту же классификацию ошибок (в т.ч.
+    ``elevation_required`` при ``IisElevationError``) должен видеть не только
+    ``POST /api/stand/<name>/<action>``, но и одноразовый elevated-процесс
+    (``standkit_hub.elevated_op``, GAP-311 п.6) — там нет HTTP-хендлера
+    вовсе, но исход операции пишется в тот же формат (``{"ok": true, "pid"?}``
+    / ``{"error": ...}``), чтобы не заводить вторую, неизбежно расходящуюся
+    копию этой логики.
+    """
+    config = _load_config(config_path)
+    registry = _load_registry(config)
+    if name not in registry:
+        return 404, {"error": f"стенд '{name}' не найден"}
+    client = FederatedClient(registry)
+    try:
+        if action in ("stop", "restart"):
+            result = getattr(client, action)(name, force=force)
+        else:
+            result = getattr(client, action)(name)
+    except (RemoteCallError, SecretError) as exc:
+        return 502, {"error": str(exc)}
+    except AdoptionRequired as exc:
+        # Стенд поднят вне диспетчера, найден валидный кандидат — НЕ
+        # убиваем ничего молча: отдаём кандидата фронту (409), тот
+        # показывает подтверждение и повторяет запрос с ?force=1.
+        return 409, {"error": str(exc), "adopt_required": True, "candidate": exc.candidate.to_dict()}
+    except AdoptionUnavailable as exc:
+        return 404, {"error": str(exc)}
+    except LifecycleError as exc:
+        # Понятная причина отказа (dotnet не найден в PATH, процесс умер сразу
+        # после старта, стенд запущен не диспетчером и т.п.) — фронт обязан
+        # показать текст пользователю, а не просто "ошибка".
+        return 400, {"error": str(exc)}
+    except IisElevationError as exc:
+        # Отдельно ОТ обычного HostingError (перехват — ПЕРЕД ним): appcmd
+        # отказал именно из-за нехватки прав администратора, и фронт должен
+        # предложить кнопку "Перезапустить с правами администратора" /
+        # "Выполнить с правами администратора", а не общий текст ошибки без
+        # признака (GAP-311 п.1).
+        return 400, {"error": str(exc), "elevation_required": True}
+    except HostingError as exc:
+        # Прочий отказ бэкенда хостинга (appcmd/docker/kubectl не найден,
+        # App Pool/контейнер/деплоймент не остановился и т.п.) — честный
+        # текст ошибки пользователю (включая stderr команды), а не молчаливый
+        # 500.
+        return 400, {"error": str(exc)}
+    except NotImplementedError as exc:
+        return 400, {"error": str(exc)}
+    payload: dict = {"ok": True}
+    if action in ("start", "restart") and isinstance(result, int):
+        payload["pid"] = result
+    return 200, payload
+
+
 def make_handler(
     *,
     config_path: Path,
@@ -874,6 +947,7 @@ def make_handler(
     web_dir: Optional[Path] = None,
     max_body_bytes: int = _security.DEFAULT_MAX_BODY_BYTES,
     max_logs_n: int = _security.DEFAULT_MAX_LOGS_N,
+    desktop_mode: bool = False,
 ) -> type:
     """
     Фабрика класса-обработчика запросов хаба с "захваченными" зависимостями
@@ -1363,62 +1437,15 @@ def make_handler(
             return raw in ("1", "true", "yes")
 
         def _api_stand_action(self, name: str, action: str, *, force: bool = False) -> None:
-            config = _load_config(config_path)
-            registry = _load_registry(config)
-            if name not in registry:
-                self._send_json(404, {"error": f"стенд '{name}' не найден"})
-                return
-            client = FederatedClient(registry)
-            try:
-                if action in ("stop", "restart"):
-                    result = getattr(client, action)(name, force=force)
-                else:
-                    result = getattr(client, action)(name)
-            except (RemoteCallError, SecretError) as exc:
-                self._send_json(502, {"error": str(exc)})
-                return
-            except AdoptionRequired as exc:
-                # Стенд поднят вне диспетчера, найден валидный кандидат — НЕ
-                # убиваем ничего молча: отдаём кандидата фронту (409), тот
-                # показывает подтверждение и повторяет запрос с ?force=1.
-                self._send_json(
-                    409,
-                    {
-                        "error": str(exc),
-                        "adopt_required": True,
-                        "candidate": exc.candidate.to_dict(),
-                    },
-                )
-                return
-            except AdoptionUnavailable as exc:
-                self._send_json(404, {"error": str(exc)})
-                return
-            except LifecycleError as exc:
-                # Понятная причина отказа (dotnet не найден в PATH, процесс
-                # умер сразу после старта, стенд запущен не диспетчером и т.п.)
-                # — фронт обязан показать текст пользователю, а не просто "ошибка".
-                self._send_json(400, {"error": str(exc)})
-                return
-            except HostingError as exc:
-                # Отказ бэкенда хостинга (appcmd/docker/kubectl не найден, нет
-                # прав, App Pool/контейнер/деплоймент не остановился и т.п.) —
-                # честный текст ошибки пользователю (включая stderr команды),
-                # а не молчаливый 500.
-                self._send_json(400, {"error": str(exc)})
-                return
-            except NotImplementedError as exc:
-                self._send_json(400, {"error": str(exc)})
-                return
-            payload: dict = {"ok": True}
-            if action in ("start", "restart") and isinstance(result, int):
-                payload["pid"] = result
-            # Состояние стенда только что изменилось — просим фоновый поллер
-            # не досыпать интервал. Сам опрос идёт в его потоке, ответ на
-            # мутацию им НЕ задерживается.
-            poller = self._poller()
-            if poller is not None:
-                poller.poke()
-            self._send_json(200, payload)
+            code, payload = _resolve_stand_action(config_path, name, action, force=force)
+            if code == 200:
+                # Состояние стенда только что изменилось — просим фоновый
+                # поллер не досыпать интервал. Сам опрос идёт в его потоке,
+                # ответ на мутацию им НЕ задерживается.
+                poller = self._poller()
+                if poller is not None:
+                    poller.poke()
+            self._send_json(code, payload)
 
         def _api_stand_adopt(self, name: str) -> None:
             """
@@ -1837,8 +1864,17 @@ def make_handler(
             любая IIS-операция обречена (``appcmd.exe`` не читает даже свою
             конфигурацию), и узнавать об этом из ошибки после клика «Старт» —
             плохой сценарий.
+
+            ``user`` — имя текущей учётной записи (для текста «работает под
+            ...» в шапке); ``restart`` — состояние ПОСЛЕДНЕГО запрошенного
+            перезапуска (``{"status": "pending"|"refused"|"failed", ...}``)
+            либо ``null``, если перезапуск не запрашивался или уже завершился
+            успехом (в этом случае хаб и так скоро остановится, спрашивать не
+            у кого — см. ``_watch_restart_result``).
             """
             can_restart, reason = _elevation.can_restart_elevated()
+            with self.server.restart_lock:
+                restart_state = dict(self.server.restart_state) if self.server.restart_state else None
             self._send_json(
                 200,
                 {
@@ -1846,6 +1882,8 @@ def make_handler(
                     "elevated": _platform.is_elevated(),
                     "can_restart": can_restart,
                     "reason": reason,
+                    "user": _platform.current_user_name(),
+                    "restart": restart_state,
                 },
             )
 
@@ -1853,42 +1891,183 @@ def make_handler(
             """
             Перезапускает диспетчер «от имени администратора» (запрос UAC).
 
-            Порядок принципиален: сначала запрашиваем повышение прав и только
-            при УСПЕХЕ планируем собственное завершение. Иначе отказ в UAC
-            оставил бы пользователя вообще без диспетчера.
+            Порядок с GAP-311 п.5: подтверждённый UAC ещё не значит «новый
+            процесс подхватит работу» — он может отказаться сам (другая
+            учётная запись, GAP-311 п.4). Поэтому здесь только ЗАПРОС и
+            фоновый наблюдатель (``_watch_restart_result``); собственное
+            завершение старый процесс планирует НЕ отсюда, а из наблюдателя,
+            и только после явного ``accepted`` в файле результата.
 
-            Ответ 202, а не 200: работа не завершена, а начата — новый процесс
-            ещё поднимается. Вкладка после этого просто ждёт, пока хаб снова
-            начнёт отвечать (сессия переезжает через файл передачи, см.
-            standkit_hub/elevation.py).
+            Ответ 202, а не 200: работа не завершена, а начата. 409 — либо
+            пользователь уже отклонил запрос UAC (``cancelled``), либо
+            предыдущий запрос ещё не разрешился (``pending``).
             """
+            with self.server.restart_lock:
+                current = self.server.restart_state
+                if current is not None and current.get("status") == "pending":
+                    self._send_json(
+                        409, {"error": "Перезапуск уже запрошен — дождитесь окна Windows."}
+                    )
+                    return
+
             can_restart, reason = _elevation.can_restart_elevated()
             if not can_restart:
                 self._send_json(400, {"error": reason})
                 return
 
             config = _load_config(config_path)
-            handoff = _elevation.handoff_path(config.resolve_run_dir())
+            run_dir = config.resolve_run_dir()
+            handoff = _elevation.handoff_path(run_dir)
             try:
                 _elevation.write_handoff(handoff, session_token)
             except OSError as exc:
                 self._send_json(500, {"error": f"Не удалось подготовить передачу сессии: {exc}"})
                 return
 
+            result_file = run_dir / _RESTART_RESULT_FILE_NAME
+            # Остаток от прошлой (отменённой/протухшей) попытки не должен
+            # быть прочитан наблюдателем как исход ЭТОЙ попытки.
+            try:
+                result_file.unlink()
+            except OSError:
+                pass
+
             params = _elevation.build_relaunch_params(
-                port=self._hub_port(), handoff=handoff, config_path=config_path
+                port=self._hub_port(),
+                handoff=handoff,
+                config_path=config_path,
+                desktop=desktop_mode,
+                initiator_sid=_platform.current_user_sid(),
+                result_file=result_file,
             )
             try:
                 _elevation.relaunch_elevated(params)
+            except _elevation.ElevationCancelled as exc:
+                # Отдельно от прочих ElevationError: пользователь осознанно
+                # нажал «Нет» в окне UAC — фронт должен показать это иначе,
+                # чем сбой запроса (``cancelled``, не просто текст ошибки).
+                _elevation.discard_handoff(handoff)
+                self._send_json(409, {"error": str(exc), "cancelled": True})
+                return
             except _elevation.ElevationError as exc:
-                # И отказ в UAC, и сбой ShellExecuteW: файл передачи с токеном
-                # не должен пережить неудачную попытку.
                 _elevation.discard_handoff(handoff)
                 self._send_json(400, {"error": str(exc)})
                 return
 
+            with self.server.restart_lock:
+                self.server.restart_state = {"status": "pending", "at": time.time()}
             self._send_json(202, {"ok": True, "restarting": True})
-            _schedule_shutdown(self.server)
+            threading.Thread(
+                target=_watch_restart_result,
+                args=(self.server, result_file, handoff),
+                name="standkit-hub-restart-watch",
+                daemon=True,
+            ).start()
+
+        # --- API: одноразовая операция с правами над стендом IIS (GAP-311 п.6) ---
+
+        def _api_hub_elevated_op_start(self) -> None:
+            """
+            ``POST /api/hub/elevated-op`` — {"stand": str, "action": "start"|
+            "stop"|"restart"} — одноразовая операция с правами администратора
+            над ОДНИМ стендом IIS, без перезапуска всего диспетчера.
+
+            Ответы: 202 ``{"ok": true, "op_id"}`` — запущено, опрашивать
+            ``GET /api/hub/elevated-op/<op_id>``; 409 ``{"cancelled": true}``
+            — отказ в UAC; 400/404 — валидация (не IIS, стенд не найден,
+            elevation не поддерживается на этой ОС).
+            """
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            name = body.get("stand")
+            action = body.get("action")
+            if not isinstance(name, str) or not _security.validate_stand_name(name):
+                self._send_json(400, {"error": "invalid stand name"})
+                return
+            if action not in ("start", "stop", "restart"):
+                self._send_json(400, {"error": f"недопустимое действие: {action!r}"})
+                return
+
+            config = _load_config(config_path)
+            registry = _load_registry(config)
+            if name not in registry:
+                self._send_json(404, {"error": f"стенд '{name}' не найден"})
+                return
+            record = registry.get(name)
+            if record.host_kind != HostKind.IIS:
+                self._send_json(
+                    400,
+                    {"error": "однократная операция с правами доступна только для стендов IIS"},
+                )
+                return
+            if not _elevation.elevation_supported():
+                self._send_json(
+                    400, {"error": "Операция с правами администратора доступна только на Windows."}
+                )
+                return
+
+            op_id = secrets.token_hex(16)
+            result_file = config.resolve_run_dir() / f"standkit-hub-elevated-op-{op_id}.json"
+            params = _elevation.build_elevated_op_params(
+                stand=name,
+                action=action,
+                result_file=result_file,
+                config_path=config_path,
+                initiator_sid=_platform.current_user_sid(),
+            )
+            try:
+                _elevation.relaunch_elevated(params)
+            except _elevation.ElevationCancelled as exc:
+                self._send_json(409, {"error": str(exc), "cancelled": True})
+                return
+            except _elevation.ElevationError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+
+            with self.server.elevated_op_lock:
+                self.server.elevated_ops[op_id] = time.monotonic()
+            self._send_json(202, {"ok": True, "op_id": op_id})
+
+        def _api_hub_elevated_op_status(self, op_id: str) -> None:
+            """
+            ``GET /api/hub/elevated-op/<op_id>`` — опрос исхода одноразовой
+            операции. Результат читается ИЗ ФАЙЛА (пишет отдельный elevated-
+            процесс, см. ``standkit_hub.elevated_op``) и удаляется отсюда же —
+            повторный опрос уже отданного результата вернёт 404 (op_id забыт).
+            """
+            with self.server.elevated_op_lock:
+                started_at = self.server.elevated_ops.get(op_id)
+            if started_at is None:
+                self._send_json(404, {"error": "операция не найдена"})
+                return
+
+            config = _load_config(config_path)
+            result_file = config.resolve_run_dir() / f"standkit-hub-elevated-op-{op_id}.json"
+            result = _elevation.read_result(result_file)
+            if result is not None:
+                try:
+                    result_file.unlink()
+                except OSError:
+                    pass
+                with self.server.elevated_op_lock:
+                    self.server.elevated_ops.pop(op_id, None)
+                self._send_json(200, result)
+                return
+
+            if time.monotonic() - started_at < _elevation.HANDOFF_TTL_SEC:
+                self._send_json(200, {"status": "pending"})
+                return
+
+            with self.server.elevated_op_lock:
+                self.server.elevated_ops.pop(op_id, None)
+            self._send_json(
+                200,
+                {
+                    "status": "expired",
+                    "message": "Операция не выполнена: запрос Windows остался без ответа.",
+                },
+            )
 
         # --- API: ярлык ---
 
@@ -2230,6 +2409,17 @@ def make_handler(
                 self._api_hub_elevation()
                 return
 
+            m = _ELEVATED_OP_ANY_RE.match(path)
+            if m:
+                if not self._authorize_read():
+                    return
+                op_id = m.group("op_id")
+                if not _OP_ID_RE.match(op_id):
+                    self._send_json(400, {"error": "invalid op_id"})
+                    return
+                self._api_hub_elevated_op_status(op_id)
+                return
+
             m = _SECRET_RE.match(path)
             if m:
                 if not self._authorize_read():
@@ -2331,6 +2521,14 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_hub_restart_elevated()
+                return
+
+            if path == _ELEVATED_OP_PATH:
+                # Тоже сильная мутация (новый elevated-процесс), та же связка
+                # CSRF-заголовок + локальный Origin.
+                if not self._authorize_mutation():
+                    return
+                self._api_hub_elevated_op_start()
                 return
 
             if path == "/api/shortcut/install":
@@ -2445,6 +2643,87 @@ def make_handler(
 _SHUTDOWN_DELAY_SEC = 1.0
 
 
+# Имя файла результата перезапуска в run_dir — предыдущий (от отменённой/
+# протухшей попытки) перед НОВЫМ запросом удаляется, чтобы не прочитать чужой
+# исход как относящийся к текущей попытке.
+_RESTART_RESULT_FILE_NAME = "standkit-hub-restart-result.json"
+
+# Шаг опроса файла результата перезапуска наблюдателем (_watch_restart_result).
+_RESTART_RESULT_POLL_INTERVAL_SEC = 0.3
+
+
+def _watch_restart_result(
+    server: "HubHTTPServer",
+    result_file: Path,
+    handoff: Path,
+    *,
+    ttl: float = _elevation.HANDOFF_TTL_SEC,
+    poll_interval: float = _RESTART_RESULT_POLL_INTERVAL_SEC,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """
+    Фоновый наблюдатель за исходом перезапуска «с правами администратора»
+    (GAP-311 п.5): опрашивает ``result_file``, который НОВЫЙ процесс пишет ДО
+    того, как что-либо сделать с портом/состоянием (см. ``standkit_hub.__main__``,
+    ``--initiator-sid``/``--result-file``), и только по его исходу решает
+    судьбу СТАРОГО процесса.
+
+    ЗАЧЕМ ВООБЩЕ ЖДАТЬ, А НЕ ГАСИТЬСЯ СРАЗУ. Раньше старый процесс планировал
+    собственное завершение сразу после успешного ``ShellExecuteW`` — если
+    новый процесс откажется работать (другая учётная запись подтвердила UAC,
+    GAP-311 п.4), пользователь остался бы вообще без диспетчера. Теперь
+    старый процесс живёт, пока явно не увидит ``accepted`` (тогда порт можно
+    уступить), либо не решит, что дальше ждать бессмысленно (``refused`` —
+    прочитано из файла; таймаут — файл не появился за ``ttl``).
+
+    ``clock``/``sleep`` подменяются в тестах — реальные секунды
+    ``HANDOFF_TTL_SEC`` ни один тест ждать не должен.
+    """
+    deadline = clock() + ttl
+    outcome: Optional[dict] = None
+    while clock() < deadline:
+        outcome = _elevation.read_result(result_file)
+        if outcome is not None:
+            break
+        sleep(poll_interval)
+    if outcome is None:
+        # Последняя проверка ровно на дедлайне — не потерять результат,
+        # появившийся впритык.
+        outcome = _elevation.read_result(result_file)
+
+    try:
+        result_file.unlink()
+    except OSError:
+        pass
+
+    if outcome is not None and outcome.get("status") == "accepted":
+        with server.restart_lock:
+            server.restart_state = None
+        _elevation.discard_handoff(handoff)
+        _schedule_shutdown(server)
+        return
+
+    _elevation.discard_handoff(handoff)
+    if outcome is not None and outcome.get("status") == "refused":
+        state = {
+            "status": "refused",
+            "message": outcome.get("message") or "Перезапуск отклонён другой учётной записью.",
+            "at": outcome.get("at", time.time()),
+        }
+    else:
+        state = {
+            "status": "failed",
+            "message": (
+                "Новый процесс диспетчера не ответил — возможно, запрос "
+                "Windows остался без ответа."
+            ),
+            "at": time.time(),
+        }
+    with server.restart_lock:
+        server.restart_state = state
+
+
 def _schedule_shutdown(server, *, delay: float = _SHUTDOWN_DELAY_SEC) -> threading.Thread:
     """
     Планирует остановку хаба в ОТДЕЛЬНОМ потоке.
@@ -2505,6 +2784,19 @@ class HubHTTPServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_cls)
         self.config_path = config_path
         self.status_poller: Optional[StatusPoller] = None
+        # Состояние перезапуска "с правами администратора" (GAP-311 п.5) —
+        # общее для всех потоков-обработчиков ОДНОГО сервера, поэтому под
+        # своим Lock'ом, а не полем Handler'а (Handler создаётся на каждый
+        # запрос заново). None — перезапуск не запрашивался (или прошлый уже
+        # завершился успехом и хаб всё равно скоро остановится).
+        self.restart_lock = threading.Lock()
+        self.restart_state: Optional[dict] = None
+        # Слепки одноразовых операций с правами над стендом IIS (GAP-311 п.6):
+        # op_id -> started_at (монотонное время запуска runas). Нужно только
+        # чтобы отличить "ещё идёт" от "протухло, ответа от Windows не будет"
+        # в GET /api/hub/elevated-op/<id> — сам результат лежит в файле.
+        self.elevated_op_lock = threading.Lock()
+        self.elevated_ops: dict = {}
         # Канал обновлений: атрибуты существуют ВСЕГДА, включая свободную
         # редакцию, — обработчики читают их через getattr и не обязаны знать,
         # какая редакция установлена.
@@ -2567,6 +2859,7 @@ def create_hub_server(
     web_dir: Optional[Path] = None,
     insecure: bool = False,
     poll: bool = True,
+    desktop_mode: bool = False,
 ) -> HubHTTPServer:
     """
     Биндит и возвращает готовый ``HubHTTPServer`` (БЕЗ ``serve_forever``)
@@ -2583,7 +2876,9 @@ def create_hub_server(
     ``GET /api/events`` отвечает 503.
     """
     _security.validate_bind_security(host, tls_enabled=False, insecure=insecure)
-    handler_cls = make_handler(config_path=config_path, session_token=session_token, web_dir=web_dir)
+    handler_cls = make_handler(
+        config_path=config_path, session_token=session_token, web_dir=web_dir, desktop_mode=desktop_mode
+    )
     return HubHTTPServer((host, port), handler_cls, config_path=config_path, poll=poll)
 
 
@@ -2672,6 +2967,7 @@ def bind_hub_server(
     poll: bool = True,
     on_fallback: Optional[Callable[[int, OSError], None]] = None,
     single_instance: bool = True,
+    desktop_mode: bool = False,
 ) -> HubHTTPServer:
     """
     ``create_hub_server`` + откат на эфемерный порт, если запрошенный занят.
@@ -2718,6 +3014,7 @@ def bind_hub_server(
             web_dir=web_dir,
             insecure=insecure,
             poll=poll,
+            desktop_mode=desktop_mode,
         )
     except OSError as exc:
         if port == 0 or exc.errno not in _PORT_BUSY_ERRNOS:
@@ -2732,4 +3029,5 @@ def bind_hub_server(
             web_dir=web_dir,
             insecure=insecure,
             poll=poll,
+            desktop_mode=desktop_mode,
         )
