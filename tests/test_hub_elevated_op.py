@@ -177,16 +177,20 @@ class _FakeServer:
         self.shutdown_called = True
 
 
-def test_watch_restart_result_accepted_schedules_shutdown(tmp_path, monkeypatch):
+def test_watch_restart_result_serving_clears_state_without_shutdown(tmp_path, monkeypatch):
+    """
+    GAP-311 В4/В5/М12: "serving" больше НЕ планирует самозавершение отсюда —
+    это уже сделал файл-запрос остановки (Б1), на более раннем шаге нового
+    процесса. Наблюдатель лишь очищает restart_state для UI.
+    """
     server = _FakeServer()
     result_file = tmp_path / "result.json"
     handoff = tmp_path / "handoff.json"
     handoff.write_text("{}", encoding="utf-8")
-    elevation.write_result_atomic(result_file, {"status": "accepted", "at": time.time()})
+    elevation.write_result_atomic(result_file, {"status": "serving", "pid": 999, "port": 8770, "at": time.time()})
 
-    shutdown_calls = []
     monkeypatch.setattr(
-        "standkit_hub.server._schedule_shutdown", lambda srv: shutdown_calls.append(srv)
+        "standkit_hub.server._schedule_shutdown", lambda srv, **kw: pytest.fail("не должен звонить")
     )
 
     _watch_restart_result(
@@ -194,9 +198,12 @@ def test_watch_restart_result_accepted_schedules_shutdown(tmp_path, monkeypatch)
     )
 
     assert server.restart_state is None
-    assert shutdown_calls == [server]
-    assert not handoff.exists()
     assert not result_file.exists()
+    # handoff новый процесс читает и удаляет САМ (read_handoff) — наблюдатель
+    # его в случае serving не трогает; здесь handoff остался нетронутым
+    # только потому, что в тесте его никто не читал, но наблюдатель это и не
+    # должен делать (в отличие от refused/failed/таймаута ниже).
+    assert handoff.exists()
 
 
 def test_watch_restart_result_refused_sets_state(tmp_path, monkeypatch):
@@ -207,7 +214,9 @@ def test_watch_restart_result_refused_sets_state(tmp_path, monkeypatch):
     elevation.write_result_atomic(
         result_file, {"status": "refused", "message": "не та учётка", "at": 123.0}
     )
-    monkeypatch.setattr("standkit_hub.server._schedule_shutdown", lambda srv: pytest.fail("не должен звонить"))
+    monkeypatch.setattr(
+        "standkit_hub.server._schedule_shutdown", lambda srv, **kw: pytest.fail("не должен звонить")
+    )
 
     _watch_restart_result(
         server, result_file, handoff, ttl=1.0, poll_interval=0.01, clock=time.monotonic, sleep=lambda s: None
@@ -215,6 +224,27 @@ def test_watch_restart_result_refused_sets_state(tmp_path, monkeypatch):
 
     assert server.restart_state["status"] == "refused"
     assert server.restart_state["message"] == "не та учётка"
+    assert not handoff.exists()
+
+
+def test_watch_restart_result_failed_keeps_own_message(tmp_path, monkeypatch):
+    server = _FakeServer()
+    result_file = tmp_path / "result.json"
+    handoff = tmp_path / "handoff.json"
+    handoff.write_text("{}", encoding="utf-8")
+    elevation.write_result_atomic(
+        result_file, {"status": "failed", "message": "порт занят третьим процессом", "at": 55.0}
+    )
+    monkeypatch.setattr(
+        "standkit_hub.server._schedule_shutdown", lambda srv, **kw: pytest.fail("не должен звонить")
+    )
+
+    _watch_restart_result(
+        server, result_file, handoff, ttl=1.0, poll_interval=0.01, clock=time.monotonic, sleep=lambda s: None
+    )
+
+    assert server.restart_state["status"] == "failed"
+    assert server.restart_state["message"] == "порт занят третьим процессом"
     assert not handoff.exists()
 
 
@@ -226,7 +256,9 @@ def test_watch_restart_result_timeout_sets_failed(tmp_path, monkeypatch):
 
     # Фейковые часы: первый вызов clock() = 0 (дедлайн), дальше >= 1 (истекло).
     ticks = iter([0.0, 0.0, 2.0, 2.0])
-    monkeypatch.setattr("standkit_hub.server._schedule_shutdown", lambda srv: pytest.fail("не должен звонить"))
+    monkeypatch.setattr(
+        "standkit_hub.server._schedule_shutdown", lambda srv, **kw: pytest.fail("не должен звонить")
+    )
 
     _watch_restart_result(
         server,
@@ -240,6 +272,7 @@ def test_watch_restart_result_timeout_sets_failed(tmp_path, monkeypatch):
 
     assert server.restart_state["status"] == "failed"
     assert "не ответил" in server.restart_state["message"]
+    assert not handoff.exists()
 
 
 # --- HTTP: POST/GET /api/hub/elevated-op и повторный запрос перезапуска ---
@@ -363,14 +396,19 @@ def test_elevated_op_status_pending_then_ok(tmp_path):
     httpd, base, token, config_path = _hub_with_iis_stand(tmp_path)
     try:
         op_id = "b" * 32
+        config = HubConfig.load(config_path)
+        result_file = config.resolve_run_dir() / f"standkit-hub-elevated-op-{op_id}.json"
         with httpd.elevated_op_lock:
-            httpd.elevated_ops[op_id] = time.monotonic()
+            httpd.elevated_ops[op_id] = {
+                "started_at": time.monotonic(),
+                "result_file": result_file,
+                "stand": "iis1",
+            }
+            httpd.elevated_op_stands.add("iis1")
 
         status, data = _request(f"{base}/api/hub/elevated-op/{op_id}", token=token)
         assert status == 200 and data["status"] == "pending"
 
-        config = HubConfig.load(config_path)
-        result_file = config.resolve_run_dir() / f"standkit-hub-elevated-op-{op_id}.json"
         elevation.write_result_atomic(result_file, {"status": "ok", "message": "", "at": time.time()})
 
         status, data = _request(f"{base}/api/hub/elevated-op/{op_id}", token=token)
@@ -380,23 +418,35 @@ def test_elevated_op_status_pending_then_ok(tmp_path):
         # op_id забыт — повторный опрос уже отданного результата даёт 404.
         status, _ = _request(f"{base}/api/hub/elevated-op/{op_id}", token=token)
         assert status == 404
+        # ...и стенд больше не числится "занятым" (В3) — новая операция для
+        # него снова возможна.
+        assert "iis1" not in httpd.elevated_op_stands
     finally:
         _shutdown(httpd)
 
 
 def test_elevated_op_status_expired_after_ttl(tmp_path, monkeypatch):
-    httpd, base, token, _ = _hub_with_iis_stand(tmp_path)
+    httpd, base, token, config_path = _hub_with_iis_stand(tmp_path)
     try:
         monkeypatch.setattr(elevation, "HANDOFF_TTL_SEC", 0.0)
         op_id = "c" * 32
+        config = HubConfig.load(config_path)
+        result_file = config.resolve_run_dir() / f"standkit-hub-elevated-op-{op_id}.json"
         with httpd.elevated_op_lock:
-            httpd.elevated_ops[op_id] = time.monotonic() - 10.0
+            httpd.elevated_ops[op_id] = {
+                "started_at": time.monotonic() - 10.0,
+                "result_file": result_file,
+                "stand": "iis1",
+            }
+            httpd.elevated_op_stands.add("iis1")
 
         status, data = _request(f"{base}/api/hub/elevated-op/{op_id}", token=token)
         assert status == 200 and data["status"] == "expired"
+        assert "завершилась" in data["message"]
 
         status, _ = _request(f"{base}/api/hub/elevated-op/{op_id}", token=token)
         assert status == 404
+        assert "iis1" not in httpd.elevated_op_stands
     finally:
         _shutdown(httpd)
 
@@ -448,5 +498,133 @@ def test_restart_elevated_cancelled_returns_409(tmp_path, monkeypatch):
         status, data = _request(f"{base}/api/hub/restart-elevated", token=token, method="POST", origin=base)
         assert status == 409
         assert data.get("cancelled") is True
+    finally:
+        _shutdown(httpd)
+
+
+# --- В3: настоящая гонка двух параллельных POST restart-elevated ---
+
+
+def test_restart_elevated_parallel_requests_only_one_proceeds(tmp_path, monkeypatch):
+    """Два параллельных POST — только один должен реально дойти до
+    ``relaunch_elevated`` (второй обязан получить 409 "requesting" ДО того,
+    как первый успеет пометить состояние ``pending``/``None``): подмена
+    ``relaunch_elevated`` намеренно задерживается, чтобы окно гонки было
+    широким, а не полагаться на удачное планирование потоков."""
+    registry_path = tmp_path / "projects.json"
+    registry_path.write_text('{"projects": {}}', encoding="utf-8")
+    config_path = _config_with_registry(tmp_path, registry_path)
+    token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=token, poll=False)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    _wait_for_port(port)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        monkeypatch.setattr(elevation, "elevation_supported", lambda: True)
+        monkeypatch.setattr(elevation, "is_elevated", lambda: False)
+
+        calls = []
+        release = threading.Event()
+
+        def _slow_relaunch(params, **kwargs):
+            calls.append(params)
+            release.wait(timeout=5.0)
+            raise elevation.ElevationCancelled("отклонено (тест)")
+
+        monkeypatch.setattr(elevation, "relaunch_elevated", _slow_relaunch)
+
+        results = {}
+
+        def _fire(key):
+            results[key] = _request(
+                f"{base}/api/hub/restart-elevated", token=token, method="POST", origin=base
+            )
+
+        t1 = threading.Thread(target=_fire, args=("first",))
+        t1.start()
+        # Первый запрос должен успеть дойти до relaunch_elevated (и застрять
+        # там на release.wait) прежде, чем стартует второй — иначе тест не
+        # проверяет гонку, а проверяет случайное планирование.
+        deadline = time.monotonic() + 5.0
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls, "первый запрос не дошёл до relaunch_elevated"
+
+        status2, data2 = _request(
+            f"{base}/api/hub/restart-elevated", token=token, method="POST", origin=base
+        )
+
+        release.set()
+        t1.join(timeout=5.0)
+
+        assert status2 == 409
+        assert "дождитесь" in data2["error"]
+        assert len(calls) == 1  # второй запрос НЕ дошёл до relaunch_elevated вовсе
+
+        status1, data1 = results["first"]
+        assert status1 == 409
+        assert data1.get("cancelled") is True
+    finally:
+        _shutdown(httpd)
+
+
+def test_elevated_op_parallel_requests_same_stand_only_one_proceeds(tmp_path, monkeypatch):
+    """Аналог предыдущего теста для одноразовой операции (GAP-311 В3): два
+    параллельных запроса на ОДИН И ТОТ ЖЕ стенд — второй обязан получить 409
+    "уже запрошена" вместо второго окна UAC."""
+    registry_path = _registry_with_iis_stand(tmp_path)
+    config_path = _config_with_registry(tmp_path, registry_path)
+    token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=token, poll=False)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    _wait_for_port(port)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        monkeypatch.setattr(elevation, "elevation_supported", lambda: True)
+
+        calls = []
+        release = threading.Event()
+
+        def _slow_relaunch(params, **kwargs):
+            calls.append(params)
+            release.wait(timeout=5.0)
+            raise elevation.ElevationCancelled("отклонено (тест)")
+
+        monkeypatch.setattr(elevation, "relaunch_elevated", _slow_relaunch)
+
+        results = {}
+
+        def _fire(key):
+            results[key] = _request(
+                f"{base}/api/hub/elevated-op",
+                token=token,
+                method="POST",
+                origin=base,
+                body={"stand": "iis1", "action": "restart"},
+            )
+
+        t1 = threading.Thread(target=_fire, args=("first",))
+        t1.start()
+        deadline = time.monotonic() + 5.0
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls, "первый запрос не дошёл до relaunch_elevated"
+
+        status2, data2 = _request(
+            f"{base}/api/hub/elevated-op",
+            token=token,
+            method="POST",
+            origin=base,
+            body={"stand": "iis1", "action": "restart"},
+        )
+
+        release.set()
+        t1.join(timeout=5.0)
+
+        assert status2 == 409
+        assert "уже запрошена" in data2["error"]
+        assert len(calls) == 1
     finally:
         _shutdown(httpd)

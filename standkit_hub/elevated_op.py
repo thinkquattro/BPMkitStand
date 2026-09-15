@@ -27,6 +27,7 @@ frozen-aware) — параметрами из ``standkit_hub.elevation.build_ele
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -37,28 +38,46 @@ from standkit.models import HostKind
 from standkit.platform import current_user_name, current_user_sid
 from standkit.registry import Registry, RegistryError, default_registry_path
 from standkit.secrets import SecretError
+from standkit_hub import security as _security
 from standkit_hub.client import FederatedClient, RemoteCallError
 from standkit_hub.config import HubConfig
-from standkit_hub.elevation import REFUSAL_TEXT_TEMPLATE, write_result_atomic
+from standkit_hub.elevation import REFUSAL_TEXT_TEMPLATE, ReparseGuardError, write_result_atomic
 
 # Действия, которые допускает одноразовая операция — то же множество, что и
 # у ``POST /api/stand/<name>/<action>`` без «status»/«logs»/«adopt» (те не
 # требуют elevation и не имеют смысла в этом режиме).
 ACTIONS = ("start", "stop", "restart")
 
+# Код возврата, когда путь result-файла оказался reparse point/symlink (В7):
+# отдельно от обычных 0/1/3 — результат в этом случае НЕ записан вовсе (ни
+# частично, ни ошибкой), и наблюдатель со стороны сервера увидит истёкший
+# таймаут ("expired"), а не молчаливый провал.
+RC_REPARSE_REFUSED = 4
+
 
 def _registry_path_of(config: HubConfig) -> Path:
     return Path(config.registry_path) if config.registry_path else default_registry_path()
 
 
-def _write(result_file: Path, payload: dict) -> None:
-    """Обёртка над ``write_result_atomic``, которая никогда не бросает —
-    процесс обязан завершиться (с каким-нибудь кодом возврата), даже если
-    сам файл результата почему-то не пишется (диск только на чтение и т.п.)."""
+def _write(result_file: Path, payload: dict, *, fallback_rc: int) -> int:
+    """
+    Записывает результат и возвращает итоговый код возврата ПРОЦЕССА.
+
+    ``ReparseGuardError`` (GAP-311 В7) — путь result-файла (или его каталог)
+    оказался reparse point/symlink, подложенным ДО повышения прав: запись
+    ОТКАЗАНА целиком (не пишем даже часть), явное сообщение в stderr,
+    ``RC_REPARSE_REFUSED`` вместо обычного кода. Прочие ``OSError``
+    (диск read-only и т.п.) — best-effort, процесс всё равно должен
+    завершиться с ``fallback_rc``, а не повиснуть.
+    """
     try:
         write_result_atomic(result_file, payload)
+    except ReparseGuardError as exc:
+        print(f"[standkit-hub-elevated-op] отказ записи результата: {exc}", file=sys.stderr)
+        return RC_REPARSE_REFUSED
     except OSError:
         pass
+    return fallback_rc
 
 
 def run(
@@ -90,7 +109,7 @@ def run(
     if initiator_sid:
         our_sid = current_user_sid()
         if our_sid and our_sid != initiator_sid:
-            _write(
+            return _write(
                 result_file,
                 {
                     "status": "refused",
@@ -98,42 +117,59 @@ def run(
                     "user": current_user_name(),
                     "at": time.time(),
                 },
+                fallback_rc=3,
             )
-            return 3
 
     if action not in ACTIONS:
-        _write(result_file, {"status": "error", "message": f"неизвестное действие: {action!r}", "at": time.time()})
-        return 1
+        return _write(
+            result_file,
+            {"status": "error", "message": f"неизвестное действие: {action!r}", "at": time.time()},
+            fallback_rc=1,
+        )
+
+    # Повторная валидация имени стенда (В7, defense in depth): этот процесс
+    # получает ``stand`` через argv УЖЕ elevated — сервер валидировал его ДО
+    # запуска ``runas``, но argv в принципе виден/подменяем другим процессом
+    # той же машины, и elevated-режим не должен доверять ему слепо.
+    if not _security.validate_stand_name(stand):
+        return _write(
+            result_file,
+            {"status": "error", "message": "недопустимое имя стенда", "at": time.time()},
+            fallback_rc=1,
+        )
 
     cfg_path = Path(config_path) if config_path else HubConfig.config_path()
     try:
         config = HubConfig.load(cfg_path)
         registry = Registry.load(_registry_path_of(config))
     except (OSError, RegistryError, ValueError) as exc:
-        _write(
+        return _write(
             result_file,
             {"status": "error", "message": f"конфигурация/реестр не прочитаны: {exc}", "at": time.time()},
+            fallback_rc=1,
         )
-        return 1
 
     if stand not in registry:
-        _write(result_file, {"status": "error", "message": f"стенд '{stand}' не найден", "at": time.time()})
-        return 1
+        return _write(
+            result_file,
+            {"status": "error", "message": f"стенд '{stand}' не найден", "at": time.time()},
+            fallback_rc=1,
+        )
 
     # Белый список: только IIS. Прочие host_kind не нуждаются в elevation
     # (kestrel/docker/k8s управляются без прав администратора), и пускать их
     # через этот режим означало бы напрасный запрос UAC.
     record = registry.get(stand)
     if record.host_kind != HostKind.IIS:
-        _write(
+        return _write(
             result_file,
             {
                 "status": "error",
                 "message": "однократная операция с правами доступна только для стендов IIS",
                 "at": time.time(),
             },
+            fallback_rc=1,
         )
-        return 1
 
     client = FederatedClient(registry)
     try:
@@ -142,14 +178,11 @@ def run(
         else:
             result = getattr(client, action)(stand)
     except (RemoteCallError, SecretError, HostingError, LifecycleError) as exc:
-        _write(result_file, {"status": "error", "message": str(exc), "at": time.time()})
-        return 1
+        return _write(result_file, {"status": "error", "message": str(exc), "at": time.time()}, fallback_rc=1)
     except Exception as exc:  # noqa: BLE001 - последняя линия защиты: процесс обязан оставить результат
-        _write(result_file, {"status": "error", "message": str(exc), "at": time.time()})
-        return 1
+        return _write(result_file, {"status": "error", "message": str(exc), "at": time.time()}, fallback_rc=1)
 
     payload: dict = {"status": "ok", "message": "", "at": time.time()}
     if isinstance(result, int):
         payload["pid"] = result
-    _write(result_file, payload)
-    return 0
+    return _write(result_file, payload, fallback_rc=0)

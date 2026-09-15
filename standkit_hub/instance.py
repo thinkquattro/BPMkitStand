@@ -31,19 +31,29 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
 from standkit import __version__ as _standkit_version
-from standkit.platform import ProcessError, is_alive, stop
+from standkit.platform import ProcessError, is_alive, stop, wait_for_exit
 
 STATE_FILE_NAME = "standkit-hub.json"
+# Файл-запрос штатной остановки (GAP-311 Б1) — см. докстринг stop_running_instance.
+STOP_REQUEST_FILE_NAME = "standkit-hub-stop-request.json"
 
 # Сколько ждать, пока перехваченный экземпляр отпустит порт.
 DEFAULT_TAKEOVER_TIMEOUT = 20.0
 _PORT_POLL_INTERVAL = 0.25
+
+# Сколько ждать реакции на файл-запрос остановки, ПРЕЖДЕ чем эскалировать до
+# platform.stop (жёсткого убийства самого pid, без дерева). Должно с запасом
+# покрывать период опроса наблюдателя на стороне работающего хаба
+# (см. standkit_hub.server._StopRequestWatcher, опрашивает раз в ~0.5с) плюс
+# _SHUTDOWN_DELAY_SEC на закрытие сокета.
+DEFAULT_STOP_REQUEST_TIMEOUT = 5.0
 
 
 @dataclass
@@ -87,11 +97,38 @@ def state_path(run_dir: Path) -> Path:
     return Path(run_dir) / STATE_FILE_NAME
 
 
-def write_state(path: Path, state: HubInstanceState) -> Path:
-    """Пишет файл состояния (создавая каталог). Секретов в нём нет — обычные права."""
+def _atomic_write_text(path: Path, text: str) -> None:
+    """
+    Пишет файл АТОМАРНО: временный файл в ТОМ ЖЕ каталоге (той же файловой
+    системе — иначе ``os.replace`` не был бы атомарным) + ``os.replace``.
+
+    ЗАЧЕМ. Файл состояния/запроса остановки читает второй процесс, который
+    может подоспеть в СЕРЕДИНЕ обычной ``write_text`` — увидит пустой либо
+    обрубленный JSON (M13). Имя временного файла — со случайным суффиксом
+    (``secrets.token_hex``), а не предсказуемым ``.tmp<pid>``: предсказуемое
+    имя в общедоступном ``run_dir`` — цель для подмены (см. GAP-311 В7,
+    ``standkit_hub.elevation.write_result_atomic`` — тот же приём).
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def write_state(path: Path, state: HubInstanceState) -> Path:
+    """Пишет файл состояния АТОМАРНО (M13). Секретов в нём нет — обычные права."""
+    path = Path(path)
+    _atomic_write_text(path, json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
     return path
 
 
@@ -119,16 +156,67 @@ def clear_state(path: Path, *, pid: Optional[int] = None) -> None:
     Удаляет файл состояния (никогда не бросает).
 
     ``pid`` — защита от гонки при перехвате: старый экземпляр, умирая, не
-    должен снести файл, который УЖЕ переписал новый. Удаляем, только если в
-    файле всё ещё наш pid.
+    должен снести файл, который УЖЕ переписал новый (M13: удаляем только
+    если файл СЕЙЧАС читается как валидный JSON с ровно нашим pid — битый,
+    нечитаемый или чужой файл не трогаем вовсе, а не только «чужой pid»).
     """
     path = Path(path)
     if pid is not None:
         current = read_state(path, require_alive=False)
-        if current is not None and current.pid != pid:
+        if current is None or current.pid != pid:
             return
     try:
         path.unlink()
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------
+# Файл-запрос штатной остановки (GAP-311 Б1)
+# --------------------------------------------------------------------------
+
+
+def stop_request_path(run_dir: Path) -> Path:
+    """Путь к файлу-запросу остановки внутри ``run_dir``."""
+    return Path(run_dir) / STOP_REQUEST_FILE_NAME
+
+
+def write_stop_request(
+    path: Path, *, target_pid: int, requester_pid: Optional[int] = None, now: Optional[float] = None
+) -> Path:
+    """
+    Пишет файл-запрос «останови себя штатно» (атомарно, см. ``_atomic_write_text``).
+
+    ``target_pid`` — кого просят остановиться (``os.getpid()`` работающего
+    экземпляра из его же файла состояния); ``requester_pid`` — кто просит
+    (диагностика, в решении не участвует).
+    """
+    path = Path(path)
+    payload = {
+        "target_pid": int(target_pid),
+        "requester_pid": int(requester_pid) if requester_pid is not None else None,
+        "at": float(now if now is not None else time.time()),
+    }
+    _atomic_write_text(path, json.dumps(payload, ensure_ascii=False))
+    return path
+
+
+def read_stop_request(path: Path) -> Optional[dict]:
+    """Читает файл-запрос остановки. ``None`` — файла нет либо он битый (НЕ удаляет файл)."""
+    path = Path(path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or "target_pid" not in data:
+        return None
+    return data
+
+
+def discard_stop_request(path: Path) -> None:
+    """Удаляет файл-запрос остановки, если он есть (никогда не бросает)."""
+    try:
+        Path(path).unlink()
     except OSError:
         pass
 
@@ -170,14 +258,78 @@ def should_takeover(
     return bool(we_elevated) and running.elevated is False
 
 
-def stop_running_instance(state: HubInstanceState, *, timeout: float = 10.0) -> bool:
+def _same_process_as_recorded(expected: HubInstanceState, run_dir: Path) -> bool:
     """
-    Останавливает перехватываемый экземпляр (эскалация «мягко → жёстко» —
-    ``standkit.platform.stop``). Никогда не бросает: не удалось погасить —
-    вернём False, вызывающий честно скажет об этом пользователю.
+    Не даёт эскалации до жёсткого убийства (``platform.stop``) попасть в
+    ЧУЖОЙ, не связанный с диспетчером процесс, если ОС переиспользовала pid
+    между моментом, когда мы прочитали файл состояния (``expected``), и
+    моментом жёсткого убийства (окно — секунды таймаута мягкой остановки,
+    GAP-311 Б1). Сверяем ``pid``+``started_at`` из ТЕКУЩЕГО файла состояния с
+    тем, что было в снимке: файл исчез, переписан другим pid или другим
+    ``started_at`` — это уже не тот процесс, и мы честно откажемся его убивать.
     """
+    current = read_state(state_path(run_dir), require_alive=False)
+    if current is None:
+        return False
+    return current.pid == expected.pid and current.started_at == expected.started_at
+
+
+def stop_running_instance(
+    state: HubInstanceState,
+    *,
+    run_dir: Path,
+    requester_pid: Optional[int] = None,
+    stop_request_timeout: float = DEFAULT_STOP_REQUEST_TIMEOUT,
+    hard_timeout: float = 10.0,
+) -> bool:
+    """
+    Останавливает перехватываемый экземпляр диспетчера БЕЗ убийства его
+    дерева процессов (GAP-311 Б1).
+
+    ЗАЧЕМ ВООБЩЕ ПЕРЕДЕЛАНО. Раньше здесь напрямую звался
+    ``standkit.platform.stop`` (`` taskkill /T``/эквивалент) — тот убивает
+    ВЕСЬ процесс-дерево, а kestrel-стенды и локальный агент — ПРЯМЫЕ дети
+    процесса хаба (``standkit.platform.spawn_hidden``). Перехват порта
+    (перезапуск с правами администратора, ручной запуск ярлыка «от имени
+    администратора») убивал заодно и все живые стенды пользователя — грубый
+    побочный эффект, никак не связанный с целью «поднять НОВЫЙ хаб на этом
+    порту».
+
+    Порядок:
+      1. штатный запрос: пишем файл-запрос остановки (``write_stop_request``)
+         и ждём ``stop_request_timeout`` секунд, что работающий хаб (его
+         фоновый наблюдатель, см. ``standkit_hub.server._StopRequestWatcher``)
+         увидит запрос и остановит СВОЙ HTTP-сервер штатно (``shutdown()``) —
+         дети живут, их же родителем становится init/system.
+      2. если процесс всё равно жив — старая версия хаба без наблюдателя,
+         процесс подвешен, файловая система недоступна и т.п. — эскалируем до
+         ``platform.stop(..., tree=False)``: убиваем ТОЛЬКО указанный pid, без
+         ``/T``. ПЕРЕД этим сверяем (``_same_process_as_recorded``), что pid
+         всё ещё представляет ТОТ ЖЕ процесс — иначе рискуем убить чужой,
+         которому ОС успела переотдать освободившийся pid.
+
+    Никогда не бросает: не удалось погасить — вернём False, вызывающий
+    честно скажет об этом пользователю.
+    """
+    path = stop_request_path(run_dir)
     try:
-        return stop(state.pid, timeout=timeout)
+        write_stop_request(path, target_pid=state.pid, requester_pid=requester_pid)
+    except OSError:
+        pass
+    else:
+        if wait_for_exit(state.pid, stop_request_timeout):
+            discard_stop_request(path)
+            return True
+    discard_stop_request(path)
+
+    if not is_alive(state.pid):
+        return True
+    if not _same_process_as_recorded(state, run_dir):
+        # Больше не тот процесс (или файл состояния уже не про него) —
+        # эскалацию до убийства не делаем: не наш риск.
+        return not is_alive(state.pid)
+    try:
+        return stop(state.pid, timeout=hard_timeout, tree=False)
     except (ProcessError, OSError):
         return False
 

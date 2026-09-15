@@ -156,6 +156,74 @@ def is_elevated() -> Optional[bool]:
         return None
 
 
+def _configure_sid_winapi(advapi32, kernel32) -> None:
+    """
+    Выставляет ``argtypes``/``restype`` для WinAPI-вызовов, участвующих в
+    ``current_user_sid()``.
+
+    ЗАЧЕМ ЭТО ОБЯЗАТЕЛЬНО (а не «для порядка»). Без явных ``argtypes`` ctypes
+    конвертирует переданный Python ``int`` по умолчанию как обычный ``int``
+    (32 бита), а НЕ как указатель/хендл (64 бита на x64 Windows) — верхняя
+    половина адреса SID/хендла токена молча обрубается, и вызов либо падает,
+    либо (хуже) отдаёт мусорный SID без единого исключения. Ревью GAP-311
+    поймало это именно на ``ConvertSidToStringSidW`` — токен и хендлы страдают
+    от того же класса ошибки.
+
+    Вынесена в отдельную функцию: тестируется на Linux подменой
+    ``advapi32``/``kernel32`` объектами-заглушками, без реального ctypes/WinAPI.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+
+    # PSID — это указатель НЕ на фиксированную структуру, а на переменной
+    # длины блок байт; c_void_p — единственный корректный тип для него.
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = wintypes.HANDLE
+
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+
+def _convert_sid_to_string(advapi32, kernel32, sid_ptr: int) -> Optional[str]:
+    """
+    Оборачивает ``ConvertSidToStringSidW`` + освобождение результата
+    (``LocalFree``) — вынесено отдельно от ``current_user_sid``, чтобы шаг
+    «передать указатель SID в WinAPI» проверялся тестом изолированно от
+    OpenProcessToken/GetTokenInformation.
+
+    ``sid_ptr`` ЯВНО заворачивается в ``ctypes.c_void_p`` перед вызовом:
+    голый Python ``int`` в вызове без argtypes ctypes отправил бы как 32-битный
+    ``int`` (см. ``_configure_sid_winapi``) — на x64 адрес обрубился бы.
+    """
+    import ctypes
+
+    if not sid_ptr:
+        return None
+    str_sid_ptr = ctypes.c_wchar_p()
+    if not advapi32.ConvertSidToStringSidW(ctypes.c_void_p(sid_ptr), ctypes.byref(str_sid_ptr)):
+        return None
+    try:
+        return str_sid_ptr.value
+    finally:
+        kernel32.LocalFree(str_sid_ptr)
+
+
 def current_user_sid() -> Optional[str]:
     """
     SID ТЕКУЩЕГО пользователя Windows (строка вида ``S-1-5-21-...``).
@@ -182,6 +250,7 @@ def current_user_sid() -> Optional[str]:
 
         advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        _configure_sid_winapi(advapi32, kernel32)
 
         TOKEN_QUERY = 0x0008
         TokenUser = 1
@@ -201,14 +270,7 @@ def current_user_sid() -> Optional[str]:
             # TOKEN_USER — это { SID_AND_ATTRIBUTES User }, первое поле —
             # указатель PSID (не встроенный SID, поэтому просто читаем указатель).
             sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
-            str_sid_ptr = ctypes.c_wchar_p()
-            if not advapi32.ConvertSidToStringSidW(sid_ptr, ctypes.byref(str_sid_ptr)):
-                return None
-            try:
-                value = str_sid_ptr.value
-            finally:
-                kernel32.LocalFree(str_sid_ptr)
-            return value
+            return _convert_sid_to_string(advapi32, kernel32, sid_ptr)
         finally:
             kernel32.CloseHandle(htoken)
     except Exception:
@@ -254,16 +316,27 @@ def stop(
     *,
     timeout: float = DEFAULT_STOP_TIMEOUT,
     poll_interval: float = DEFAULT_STOP_POLL_INTERVAL,
+    tree: bool = True,
 ) -> bool:
     """
     Останавливает процесс по pid с эскалацией «мягко → таймаут → жёстко».
 
     Порядок:
-      1. мягкое завершение — POSIX: ``SIGTERM``; Windows: ``CTRL_BREAK_EVENT``
-         (процесс стенда спавнится в собственной группе, см. ``spawn_hidden``)
-         плюс ``taskkill /T`` БЕЗ ``/F``;
+      1. мягкое завершение — POSIX: ``SIGTERM`` (ТОЛЬКО этому pid, группа
+         процессов никогда не трогается — см. ``_stop_posix``); Windows:
+         ``CTRL_BREAK_EVENT`` плюс ``taskkill`` БЕЗ ``/F``;
       2. ожидание до ``timeout`` секунд с опросом раз в ``poll_interval``;
-      3. если не завершился — жёстко: ``SIGKILL`` / ``taskkill /T /F``.
+      3. если не завершился — жёстко: ``SIGKILL`` / ``taskkill /F``.
+
+    ``tree`` (Windows-специфично, GAP-311 Б1) — включать ли ``/T`` (дерево
+    процессов) в ``taskkill``. ``True`` (по умолчанию) — прежнее поведение,
+    нужное для остановки самого СТЕНДА (kestrel вместе со своими детьми).
+    ``False`` — убить ТОЛЬКО указанный pid: обязателен, когда таргет — сам
+    процесс диспетчера standkit-hub, а не стенд, потому что kestrel-стенды и
+    локальный агент — прямые дети хаба (``spawn_hidden``), и ``/T`` вместе с
+    хабом гасит их все. На POSIX параметр принимается для симметрии сигнатуры,
+    но ни на что не влияет — здесь дерево и так никогда не убивалось
+    (``os.kill(pid, ...)`` бьёт точно в указанный pid, а не в группу).
 
     ``timeout=0`` пропускает ожидание и эскалирует сразу (используется в тестах,
     чтобы не ждать реальное время).
@@ -275,7 +348,7 @@ def stop(
         return True
 
     if sys.platform == "win32":
-        return _stop_windows(pid, timeout=timeout, poll_interval=poll_interval)
+        return _stop_windows(pid, timeout=timeout, poll_interval=poll_interval, tree=tree)
     return _stop_posix(pid, timeout=timeout, poll_interval=poll_interval)
 
 
@@ -355,9 +428,11 @@ def _send_ctrl_break(pid: int) -> None:
         pass
 
 
-def _taskkill(pid: int, *, force: bool) -> None:
-    """``taskkill /PID <pid> /T`` (дерево процессов), с ``/F`` — жёстко."""
-    args = ["taskkill", "/PID", str(pid), "/T"]
+def _taskkill(pid: int, *, force: bool, tree: bool = True) -> None:
+    """``taskkill /PID <pid>`` (``/T`` — дерево процессов, ``/F`` — жёстко)."""
+    args = ["taskkill", "/PID", str(pid)]
+    if tree:
+        args.append("/T")
     if force:
         args.append("/F")
     try:
@@ -371,16 +446,16 @@ def _taskkill(pid: int, *, force: bool) -> None:
         raise ProcessError(f"Не удалось остановить процесс {pid}: {exc}") from exc
 
 
-def _stop_windows(pid: int, *, timeout: float, poll_interval: float) -> bool:
+def _stop_windows(pid: int, *, timeout: float, poll_interval: float, tree: bool = True) -> bool:
     # Мягко: CTRL_BREAK (если консоль общая) + taskkill без /F — тот шлёт
     # WM_CLOSE и даёт процессу отработать штатное завершение.
     _send_ctrl_break(pid)
-    _taskkill(pid, force=False)
+    _taskkill(pid, force=False, tree=tree)
     if wait_for_exit(pid, timeout, poll_interval):
         return True
 
     # Не успел — жёстко.
-    _taskkill(pid, force=True)
+    _taskkill(pid, force=True, tree=tree)
     wait_for_exit(pid, min(timeout, _HARD_KILL_WAIT), poll_interval)
     return not is_alive(pid)
 

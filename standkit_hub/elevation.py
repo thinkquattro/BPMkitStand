@@ -37,6 +37,9 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
+import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -76,6 +79,52 @@ REFUSAL_TEXT_TEMPLATE = (
 def refusal_text(user: Optional[str]) -> str:
     """Готовый текст отказа (см. ``REFUSAL_TEXT_TEMPLATE``) с подставленным именем."""
     return REFUSAL_TEXT_TEMPLATE.format(user=user or "неизвестно")
+
+
+class ReparseGuardError(Exception):
+    """
+    Путь (или его родительский каталог) — reparse point/symlink, запись/чтение
+    отказана (GAP-311 В7).
+    """
+
+
+def _is_reparse_or_symlink(path: Path) -> bool:
+    """
+    ``True`` — путь САМ является reparse point (NTFS junction/symlink на
+    Windows, через ``st_file_attributes``) либо обычным symlink (POSIX).
+
+    ЗАЧЕМ. Модель угроз: ``run_dir``, файл result-файла и файл передачи
+    сессии — все под путями, которые НЕПОВЫШЕННЫЙ пользователь мог подготовить
+    заранее (это его собственный профиль). Если на месте ожидаемого файла или
+    каталога заранее подложен reparse point/symlink, ПОВЫШЕННЫЙ процесс,
+    доверяя пути из argv, писал/читал бы туда, куда указывает подмена —
+    классический вектор повышения привилегий (TOCTOU). Путь, которого пока
+    не существует, не подозрителен: создание файла — это и есть штатная
+    запись, а не подмена существующего.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if sys.platform == "win32":
+        FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+        attrs = getattr(st, "st_file_attributes", 0)
+        return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+    return stat.S_ISLNK(st.st_mode)
+
+
+def ensure_not_reparse(path: Path) -> None:
+    """
+    Бросает ``ReparseGuardError``, если САМ путь ИЛИ его родительский каталог
+    — reparse point/symlink (GAP-311 В7). Вызывается elevated-процессом ПЕРЕД
+    записью result-файла и ПЕРЕД чтением файла передачи сессии — оба момента,
+    где повышенный процесс доверяет пути, полученному из argv/конфига,
+    подготовленному ДО повышения прав.
+    """
+    path = Path(path)
+    for candidate in (path, path.parent):
+        if _is_reparse_or_symlink(candidate):
+            raise ReparseGuardError(f"путь {candidate} — reparse point/symlink, отказ")
 
 
 class ElevationError(Exception):
@@ -124,6 +173,17 @@ def write_handoff(path: Path, session_token: str, *, now: Optional[float] = None
     Права выставляются В МОМЕНТ создания (``os.open`` с ``mode=0o600``), а не
     после записи: иначе между созданием и ``chmod`` существует окно, в котором
     файл с токеном доступен всем.
+
+    ВАЖНО (GAP-311 M14): ``0o600`` -- это POSIX-режим. На Windows у него НЕТ
+    эффекта на права доступа (NTFS/ACL режим ``os.open`` не устанавливает
+    вовсе) — реальная защита файла на Windows целиком полагается на ACL
+    родительского каталога профиля пользователя (``run_dir`` по умолчанию
+    лежит внутри ``%LOCALAPPDATA%``/аналога, куда по умолчанию имеет доступ
+    только сам пользователь и SYSTEM/Administrators). Если ``run_dir``
+    сконфигурирован ВНЕ профиля пользователя (нестандартная установка), это
+    неявное предположение нарушается — обнаружение и WARN в лог диспетчера
+    при старте см. в ``standkit_hub.__main__`` (проверка "run_dir вне
+    профиля пользователя").
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,11 +207,11 @@ def discard_handoff(path: Path) -> None:
         pass
 
 
-def write_result_atomic(path: Path, payload: dict) -> None:
+def write_result_atomic(path: Path, payload: dict, *, check_reparse: bool = True) -> None:
     """
     Атомарно пишет JSON-результат одноразовой операции с правами (отказ по
-    SID при перезапуске диспетчера, статус одноразовой elevated-операции над
-    стендом — см. ``standkit_hub.elevated_op``).
+    SID/serving/failed при перезапуске диспетчера, статус одноразовой
+    elevated-операции над стендом — см. ``standkit_hub.elevated_op``).
 
     ЗАЧЕМ АТОМАРНО. Наблюдатель на СТОРОНЕ СТАРОГО процесса (или сам хендлер
     ``GET /api/hub/elevated-op/<id>``) опрашивает этот файл параллельно с его
@@ -159,12 +219,30 @@ def write_result_atomic(path: Path, payload: dict) -> None:
     читатель видит пустой либо обрубленный JSON. ``os.replace`` на одном томе
     — атомарная операция и на POSIX, и на NTFS: временный файл либо целиком
     появляется на месте финального, либо не появляется вовсе.
+
+    ``check_reparse`` (GAP-311 В7) — перед записью проверяем, что путь/его
+    каталог не reparse point/symlink (см. ``ensure_not_reparse``): пишет это
+    ПОВЫШЕННЫЙ процесс по пути из argv, подготовленному ДО повышения прав.
+    Имя временного файла — со случайным суффиксом (``secrets.token_hex``, а
+    не предсказуемым ``.tmp<pid>``) и создаётся ``O_CREAT|O_EXCL`` — чтобы
+    сам временный файл тоже нельзя было подстроить заранее.
     """
     path = Path(path)
+    if check_reparse:
+        ensure_not_reparse(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False))
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def read_result(path: Path) -> Optional[dict]:
@@ -192,7 +270,7 @@ def read_result(path: Path) -> Optional[dict]:
 
 
 def read_handoff(
-    path: Path, *, ttl: float = HANDOFF_TTL_SEC, now: Optional[float] = None
+    path: Path, *, ttl: float = HANDOFF_TTL_SEC, now: Optional[float] = None, check_reparse: bool = True
 ) -> Optional[str]:
     """
     Читает сессионный токен из файла передачи и УДАЛЯЕТ файл — при любом
@@ -202,8 +280,15 @@ def read_handoff(
     Вызывающий (``standkit_hub.__main__``) в этом случае просто генерирует
     новый сессионный токен: перезапуск состоится, но вкладку придётся открыть
     заново по ярлыку.
+
+    ``check_reparse`` (GAP-311 В7) — ПЕРЕД чтением (тем более удалением)
+    проверяем, что путь/его каталог не reparse point/symlink: путь пришёл из
+    argv, подготовленного ДО повышения прав. Reparse — файл НЕ трогаем вовсе
+    (ни читаем, ни удаляем) и отдаём ``None``, как при любом другом отказе.
     """
     path = Path(path)
+    if check_reparse and (_is_reparse_or_symlink(path) or _is_reparse_or_symlink(path.parent)):
+        return None
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -235,6 +320,7 @@ def read_handoff(
 def build_relaunch_params(
     *,
     port: int,
+    host: Optional[str] = None,
     handoff: Optional[Path] = None,
     config_path: Optional[Path] = None,
     desktop: bool = False,
@@ -268,17 +354,27 @@ def build_relaunch_params(
     ``initiator_sid``/``result_file`` — проверка «ту же учётную запись ли
     подтвердили в UAC» (GAP-311 п.4): новый процесс сверяет SID и пишет исход
     в ``result_file`` ДО того, как сделать что-либо с портом/состоянием.
+
+    ``host`` (M15) — передаётся ЯВНО, только если отличается от дефолтного
+    ``127.0.0.1``: без этого новый процесс, запущенный с флагами по умолчанию,
+    слушал бы не тот адрес, на котором на самом деле стоял старый (нестандартная
+    настройка ``--host``). ``config_path``, если задан, приводится к
+    АБСОЛЮТНОМУ (``resolve()``) — новый процесс стартует с ДРУГИМ рабочим
+    каталогом (``cwd`` у ``ShellExecuteW`` — домашняя папка пользователя, см.
+    ``relaunch_elevated``), и относительный путь там означал бы другой файл.
     """
     params = ["--port", str(port), "--takeover"]
     params.append("--desktop" if desktop else "--no-browser")
+    if host is not None and host != "127.0.0.1":
+        params += ["--host", str(host)]
     if config_path is not None:
-        params += ["--config", str(config_path)]
+        params += ["--config", str(Path(config_path).resolve())]
     if handoff is not None:
-        params += ["--session-token-file", str(handoff)]
+        params += ["--session-token-file", str(Path(handoff).resolve())]
     if initiator_sid is not None:
         params += ["--initiator-sid", str(initiator_sid)]
     if result_file is not None:
-        params += ["--result-file", str(result_file)]
+        params += ["--result-file", str(Path(result_file).resolve())]
     return params
 
 
@@ -299,9 +395,9 @@ def build_elevated_op_params(
     НЕ передаётся ни явно, ни через файл передачи: одноразовому процессу
     просто нечем его использовать.
     """
-    params = ["--elevated-op", action, "--stand", stand, "--result-file", str(result_file)]
+    params = ["--elevated-op", action, "--stand", stand, "--result-file", str(Path(result_file).resolve())]
     if config_path is not None:
-        params += ["--config", str(config_path)]
+        params += ["--config", str(Path(config_path).resolve())]
     if initiator_sid is not None:
         params += ["--initiator-sid", str(initiator_sid)]
     return params
@@ -330,16 +426,17 @@ def relaunch_command(params_tail: Sequence[str]) -> "tuple[str, list[str]]":
 def quote_params(params: Sequence[str]) -> str:
     """
     Склеивает аргументы в строку для ``ShellExecuteW`` (он принимает ОДНУ
-    строку, а не argv): аргументы с пробелами — в кавычках.
+    строку, а не argv).
 
-    Пути с пробелами тут норма (``C:\\Program Files\\...``,
-    ``C:\\Users\\Имя Фамилия\\AppData\\...``), поэтому это не украшательство.
+    Реализация — ``subprocess.list2cmdline`` (M15): та же логика экранирования,
+    что использует сам CPython при запуске процессов на Windows (кавычки И
+    экранирование ВНУТРЕННИХ кавычек/обратных слэшей по правилам
+    ``CommandLineToArgvW``) — самодельное «пробел → в кавычки» не обрабатывало
+    пути с кавычками внутри (казуистика, но именно на ней ломается наивная
+    склейка). Пути с пробелами тут норма (``C:\\Program Files\\...``,
+    ``C:\\Users\\Имя Фамилия\\AppData\\...``).
     """
-    out = []
-    for p in params:
-        text = str(p)
-        out.append(f'"{text}"' if (" " in text or "\t" in text) else text)
-    return " ".join(out)
+    return subprocess.list2cmdline([str(p) for p in params])
 
 
 def _default_shell_execute(executable: str, params: str, cwd: str) -> int:

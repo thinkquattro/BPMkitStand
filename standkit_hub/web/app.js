@@ -1556,12 +1556,24 @@
   // так просто выполнить: повторный запуск ярлыка видел уже работающий
   // экземпляр на том же порту и просто открывал браузер на нём.
 
-  const RESTART_WAIT_MS = 90000;
+  // Клиентский дедлайн ожидания ≥ серверного TTL заявки на elevation (180с,
+  // см. контракт GAP-311) — иначе клиент сдаётся раньше, чем сервер сам
+  // признал заявку истёкшей, и показывает "не дождались" при живом ожидании.
+  const RESTART_WAIT_MS = 200000;
   const RESTART_POLL_MS = 1000;
+  const ELEVATED_OP_WAIT_MS = 200000;
   const ELEVATED_OP_POLL_MS = 1000;
 
   function sleep(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  // Общий помост «кнопка занята запросом»: блокирует её на время запроса и
+  // возвращает управление в любом терминальном исходе (успех, отказ, ошибка,
+  // дедлайн) — без этого повторный клик во время ожидания UAC/операции мог
+  // бы отправить второй такой же запрос.
+  function setElevationButtonBusy(btn, busy) {
+    if (btn) btn.disabled = !!busy;
   }
 
   // Последний ответ GET /api/hub/elevation — используется и шапкой (щит), и
@@ -1655,15 +1667,27 @@
     document.getElementById("elevated-op-overlay").hidden = true;
   }
 
-  async function waitForHubBack() {
+  // Общее сообщение «хаб уже отвечает, но не под нашей сессией» — терминальный
+  // исход, который на первой фазе (старый хаб отвечает 401) и на второй (уже
+  // отвечает НОВЫЙ хаб, но 401) означает одно и то же: файл передачи сессии
+  // протух, либо elevated-процесс поднят под другой учётной записью.
+  function showSessionNotMovedOverlay() {
+    showRestartOverlay(
+      "Диспетчер перезапущен с правами администратора, но сессия не перенеслась.",
+      "Откройте дашборд заново — по ярлыку «BPMkit Диспетчер» на рабочем столе.",
+      true
+    );
+  }
+
+  async function waitForHubBack(triggerBtn) {
     const deadline = Date.now() + RESTART_WAIT_MS;
     // Пока СТАРЫЙ хаб отвечает, он же знает исход запроса UAC (отказ/провал
     // относительно ТОГО restart-elevated, который мы только что отправили,
     // см. GET /api/hub/elevation::restart) — спрашиваем его напрямую вместо
     // того, чтобы гадать по одной лишь потере связи. Как только связь с ним
-    // обрывается (сам процесс должен завершиться после успешного захвата
-    // порта новым, elevated, экземпляром), переключаемся на ожидание нового
-    // по /api/version — это и есть исходное поведение перезапуска.
+    // обрывается (старый процесс завершается сам при захвате порта новым,
+    // elevated, экземпляром — контракт GAP-311), переключаемся на ожидание
+    // нового по /api/version — это и есть исходное поведение перезапуска.
     let oldHubGone = false;
     while (Date.now() < deadline) {
       await sleep(RESTART_POLL_MS);
@@ -1672,6 +1696,7 @@
           const data = await apiGet("/api/hub/elevation");
           const restart = data && data.restart;
           if (restart && restart.status === "refused") {
+            setElevationButtonBusy(triggerBtn, false);
             showRestartOverlay(
               restart.message || "Повышение прав не подтверждено — диспетчер продолжает работать без них.",
               "",
@@ -1680,6 +1705,7 @@
             return;
           }
           if (restart && restart.status === "failed") {
+            setElevationButtonBusy(triggerBtn, false);
             showRestartOverlay(
               restart.message || "Перезапуск диспетчера с правами администратора не удался.",
               "",
@@ -1687,20 +1713,16 @@
             );
             return;
           }
-          // restart.status === "pending" (или сам ответ ещё не в курсе) —
-          // старый хаб всё ещё жив и ждёт вместе с нами, продолжаем опрос.
+          // restart.status === "requesting" | "pending" (или сам ответ ещё
+          // не в курсе) — старый хаб всё ещё жив и ждёт вместе с нами.
           continue;
         } catch (e) {
           if (e && e.status === 401) {
-            // Хаб уже отвечает (значит, это уже НОВЫЙ процесс), но сессия не
-            // переехала (файл передачи протух или новый процесс запущен под
-            // другой учётной записью). Молчаливый reload дал бы пустую
-            // страницу с ошибками — честнее сказать прямо.
-            showRestartOverlay(
-              "Диспетчер перезапущен с правами администратора, но сессия не перенеслась.",
-              "Откройте дашборд заново — по ярлыку «BPMkit Диспетчер» на рабочем столе.",
-              true
-            );
+            // Хаб уже отвечает (значит, это уже НОВЫЙ процесс), но сессия
+            // не переехала — молчаливый reload дал бы пустую страницу с
+            // ошибками, честнее сказать прямо.
+            setElevationButtonBusy(triggerBtn, false);
+            showSessionNotMovedOverlay();
             return;
           }
           if (isNetworkError(e)) {
@@ -1718,13 +1740,22 @@
           window.location.reload();
           return;
         } catch (e) {
+          if (e && e.status === 401) {
+            // Тот же тупик, что и выше, только увиденный уже НА второй фазе
+            // (отвечает новый процесс, сессия всё равно не перенеслась).
+            setElevationButtonBusy(triggerBtn, false);
+            showSessionNotMovedOverlay();
+            return;
+          }
           // Обрыв связи продолжается — новый процесс ещё не поднялся, ждём дальше.
         }
       }
     }
+    setElevationButtonBusy(triggerBtn, false);
     showRestartOverlay(
       "Не дождались перезапуска диспетчера.",
-      "Возможно, запрос UAC остался без ответа. Откройте дашборд заново по ярлыку."
+      "Возможно, запрос UAC остался без ответа. Откройте дашборд заново по ярлыку.",
+      true
     );
   }
 
@@ -1733,6 +1764,11 @@
   // «Перезапустить с правами администратора» в ошибке elevation_required —
   // везде одно и то же подтверждение, один и то же POST, один и тот же оверлей.
   async function restartElevatedFlow(triggerBtn) {
+    // Кнопка уже занята предыдущим кликом (двойной клик до того, как она
+    // успела дизейблиться, или повторный вызов из другого места разметки,
+    // ссылающегося на ту же кнопку) — второй запрос не отправляем.
+    if (triggerBtn && triggerBtn.disabled) return;
+    setElevationButtonBusy(triggerBtn, true);
     const confirmed = await styledConfirm(
       "Перезапуск с правами администратора",
       "Перезапустить диспетчер с правами администратора? Windows покажет окно с запросом прав — " +
@@ -1740,22 +1776,26 @@
         "Запущенные стенды не останавливаются.",
       "Перезапустить"
     );
-    if (!confirmed) return;
-    if (triggerBtn) triggerBtn.disabled = true;
+    if (!confirmed) {
+      setElevationButtonBusy(triggerBtn, false);
+      return;
+    }
     try {
       await apiSend("POST", "/api/hub/restart-elevated");
     } catch (e) {
-      if (triggerBtn) triggerBtn.disabled = false;
+      setElevationButtonBusy(triggerBtn, false);
       if (e && e.status === 409 && e.data && e.data.cancelled) {
-        // Отказ в самом окне UAC (или перезапуск уже запрошен кем-то другим)
-        // — это не ошибка сервера, а явное решение пользователя в системном
-        // диалоге; оверлей ожидания тут не нужен, диспетчер и не пытался переехать.
+        // Отказ в самом окне UAC — это не ошибка сервера, а явное решение
+        // пользователя в системном диалоге; оверлей ожидания тут не нужен,
+        // диспетчер и не пытался переехать.
         showActionStatus(
           "Повышение прав не подтверждено — диспетчер продолжает работать без них.",
           true
         );
         return;
       }
+      // 409 БЕЗ cancelled (перезапуск уже запрошен кем-то другим, ещё
+      // requesting/pending) — это настоящая ошибка, текст отдаёт сервер.
       showActionStatus(
         `Не удалось перезапустить диспетчер с правами администратора: ${describeApiError(e)}`,
         true
@@ -1765,19 +1805,25 @@
     showRestartOverlay(
       "Подтвердите запрос Windows (UAC), если он ещё открыт. Ждём, пока диспетчер поднимется заново…"
     );
-    waitForHubBack();
+    // Кнопка остаётся занятой на всё ожидание: если исход терминальный
+    // (refused/failed/таймаут/сессия не перенеслась), waitForHubBack сама
+    // её разблокирует; при успехе страница перезагрузится, и это неважно.
+    waitForHubBack(triggerBtn);
   }
 
   // Сценарий «только эта операция» (GAP-311, П2): без перезапуска диспетчера,
   // одна операция стенда выполняется через elevated-помощника. Используется
   // и из кнопки «Только эту операцию» в ошибке стенда, и из блока «Однократная
   // операция с правами администратора» в «О программе».
-  async function runElevatedOp(stand, action) {
+  async function runElevatedOp(stand, action, triggerBtn) {
+    if (triggerBtn && triggerBtn.disabled) return;
+    setElevationButtonBusy(triggerBtn, true);
     let opId;
     try {
       const data = await apiSend("POST", "/api/hub/elevated-op", { stand, action });
       opId = data && data.op_id;
     } catch (e) {
+      setElevationButtonBusy(triggerBtn, false);
       if (e && e.status === 409 && e.data && e.data.cancelled) {
         showActionStatus(
           "Повышение прав не подтверждено — диспетчер продолжает работать без них.",
@@ -1785,6 +1831,8 @@
         );
         return;
       }
+      // 409 БЕЗ cancelled (та же операция уже запрошена и ждёт исхода) —
+      // настоящая ошибка, текст отдаёт сервер.
       showActionStatus(
         `Не удалось выполнить операцию с правами администратора: ${describeApiError(e)}`,
         true
@@ -1794,28 +1842,54 @@
     showElevatedOpOverlay(
       "Подтвердите запрос Windows (UAC), если он ещё открыт. Выполняем операцию с правами администратора…"
     );
-    await pollElevatedOp(opId, stand);
+    await pollElevatedOp(opId, stand, triggerBtn);
   }
 
-  async function pollElevatedOp(opId, stand) {
+  async function pollElevatedOp(opId, stand, triggerBtn) {
     if (!opId) {
       hideElevatedOpOverlay();
+      setElevationButtonBusy(triggerBtn, false);
       showActionStatus("Диспетчер не вернул идентификатор операции.", true);
       return;
     }
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    // Клиентский дедлайн — тот же приём, что у waitForHubBack: без него сбой
+    // GET .../elevated-op/<id> (или бесконечный "pending") держал бы кнопку
+    // занятой и оверлей открытым вечно.
+    const deadline = Date.now() + ELEVATED_OP_WAIT_MS;
+    while (Date.now() < deadline) {
       await sleep(ELEVATED_OP_POLL_MS);
       let data;
       try {
         data = await apiGet(`/api/hub/elevated-op/${encodeURIComponent(opId)}`);
       } catch (e) {
-        // Связь моргнула ровно во время подтверждения UAC — это не провал,
-        // пробуем ещё раз на следующем витке, оверлей не трогаем.
+        if (e && e.status === 404) {
+          // op_id неизвестен диспетчеру — например, диспетчер перезапускался
+          // (тот же процесс или другой) и потерял состояние операции. Ждать
+          // дальше бессмысленно: результат не восстановить, это терминальный исход.
+          setElevationButtonBusy(triggerBtn, false);
+          showElevatedOpOverlay(
+            "Диспетчер перезапустился, пока выполнялась операция — результат неизвестен.",
+            true
+          );
+          return;
+        }
+        if (e && e.status === 401) {
+          // Сессия не подтверждена — тоже верный признак, что диспетчер
+          // успел перезапуститься; дальше опрашивать нечего.
+          setElevationButtonBusy(triggerBtn, false);
+          showElevatedOpOverlay(
+            "Сессия дашборда не подтверждена — похоже, диспетчер перезапустился. Откройте дашборд заново.",
+            true
+          );
+          return;
+        }
+        // Сетевой сбой (или иной статус) — не сдаёмся до дедлайна, пробуем
+        // ещё раз на следующем витке, оверлей не трогаем.
         continue;
       }
       if (!data || data.status === "pending") continue;
       hideElevatedOpOverlay();
+      setElevationButtonBusy(triggerBtn, false);
       if (data.status === "ok") {
         showActionStatus(data.message || "Операция выполнена с правами администратора", false);
         await refreshStands();
@@ -1830,6 +1904,8 @@
       }
       return;
     }
+    setElevationButtonBusy(triggerBtn, false);
+    showElevatedOpOverlay("Не дождались результата операции.", true);
   }
 
   // --- блок «нет прав» в ошибке действия со стендом (см. onStandAction) ---
@@ -1856,14 +1932,16 @@
     const el = document.getElementById("stand-elevation-error");
     if (!el) return;
     document.getElementById("stand-elevation-error-close").addEventListener("click", hideStandElevationError);
-    document.getElementById("stand-elevation-error-restart-btn").addEventListener("click", () => {
+    const restartBtn = document.getElementById("stand-elevation-error-restart-btn");
+    restartBtn.addEventListener("click", () => {
       hideStandElevationError();
-      restartElevatedFlow();
+      restartElevatedFlow(restartBtn);
     });
-    document.getElementById("stand-elevation-error-once-btn").addEventListener("click", () => {
+    const onceBtn = document.getElementById("stand-elevation-error-once-btn");
+    onceBtn.addEventListener("click", () => {
       const op = pendingElevationOp;
       hideStandElevationError();
-      if (op) runElevatedOp(op.name, op.action);
+      if (op) runElevatedOp(op.name, op.action, onceBtn);
     });
   }
 
@@ -1891,7 +1969,7 @@
         const stand = standSel && standSel.value;
         const action = actionSel && actionSel.value;
         if (!stand) return;
-        runElevatedOp(stand, action);
+        runElevatedOp(stand, action, runBtn);
       });
     }
   }

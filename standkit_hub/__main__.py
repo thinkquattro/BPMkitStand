@@ -38,10 +38,70 @@ from standkit.platform import current_user_name, current_user_sid, is_elevated
 from standkit_hub import instance as _instance
 from standkit_hub.config import HubConfig
 from standkit_hub.mutex import acquire_hub_mutex
-from standkit_hub.elevation import read_handoff, refusal_text, write_result_atomic
+from standkit_hub.elevation import ReparseGuardError, read_handoff, refusal_text, write_result_atomic
 from standkit_hub.security import InsecureBindError, generate_session_token
 from standkit_hub.server import DEFAULT_HUB_PORT, HubAlreadyRunning, bind_hub_server
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
+
+# Сколько в сумме ждать строгий bind перехваченного порта (GAP-311 В4/В6):
+# порт может освободиться не мгновенно даже после успешной остановки старого
+# процесса — повторяем bind, а не пытаемся один раз.
+_TAKEOVER_BIND_TIMEOUT_SEC = 20.0
+_TAKEOVER_BIND_RETRY_SEC = 0.5
+
+
+def _bind_with_retries(
+    bind_fn,
+    *,
+    timeout: float = _TAKEOVER_BIND_TIMEOUT_SEC,
+    poll_interval: float = _TAKEOVER_BIND_RETRY_SEC,
+    sleep=time.sleep,
+    clock=time.monotonic,
+):
+    """
+    Повторяет ``bind_fn()`` до первого успеха либо истечения ``timeout``
+    (GAP-311 В4/В6): после остановки перехваченного процесса ОС не всегда
+    готова тут же отдать порт повторно (закрытие сокета — не гарантированно
+    мгновенная операция), а одна неудачная попытка не должна ронять весь
+    перехват. Пробрасывает последнее исключение, если время вышло.
+    """
+    deadline = clock() + timeout
+    while True:
+        try:
+            return bind_fn()
+        except (HubAlreadyRunning, OSError):
+            if clock() >= deadline:
+                raise
+            sleep(poll_interval)
+
+
+def _write_relaunch_result(result_file: str, *, status: str, message: str = "", **extra) -> None:
+    """
+    Пишет исход попытки перезапуска/перехвата в ``result_file`` (GAP-311
+    В4/В5) — ``refused``/``serving``/``failed``. Единственная точка входа для
+    этого из ``main()``: гарантирует одинаковый формат payload'а и не даёт
+    процессу упасть на самой записи результата (reparse-отказ/диск только на
+    чтение — best-effort, сообщение в stderr).
+
+    ОСТАТОЧНЫЙ РИСК (задокументировано осознанно, а не забыто): между тем,
+    как старый процесс получает файл-запрос остановки (см. ``standkit_hub.instance``,
+    GAP-311 Б1) и реально останавливается, и тем, как этот (новый) процесс
+    успевает выполнить bind, — есть окно, в котором "старый уже остановлен, а
+    новый ещё не поднялся". Если в ЭТОМ окне новый процесс упадёт (краш,
+    OOM-killer, потеря диска) ДО записи ``failed``, пользователь на секунды
+    останется без диспетчера вовсе — приём "строгий bind с повторами до
+    таймаута" уменьшает вероятность, но не устраняет её полностью; полное
+    устранение потребовало бы транзакционной передачи порта между процессами,
+    чего ОС не предоставляет.
+    """
+    payload: dict = {"status": status, "at": time.time()}
+    if message:
+        payload["message"] = message
+    payload.update(extra)
+    try:
+        write_result_atomic(Path(result_file), payload)
+    except (OSError, ReparseGuardError) as exc:
+        print(f"[standkit-hub] не удалось записать результат перезапуска: {exc}", file=sys.stderr)
 
 
 def _describe_elevation(value) -> str:
@@ -52,10 +112,12 @@ def _describe_elevation(value) -> str:
 
 
 def _takeover_running_instance(
-    exc: HubAlreadyRunning, state_file: Path, *, explicit: bool, our_sid: Optional[str]
+    exc: HubAlreadyRunning, state_file: Path, run_dir: Path, *, explicit: bool, our_sid: Optional[str]
 ) -> bool:
     """
-    Отобрать ли порт у уже работающего диспетчера — и, если да, погасить его и
+    Отобрать ли порт у уже работающего диспетчера — и, если да, попросить его
+    остановиться штатно (файл-запрос остановки, GAP-311 Б1: НЕ убивает дерево
+    процессов — живые kestrel-стенды и локальный агент остаются работать) и
     дождаться освобождения порта.
 
     Возвращает True, только если порт реально свободен и повторный bind имеет
@@ -78,7 +140,7 @@ def _takeover_running_instance(
             f"[standkit-hub] перехватываю порт {exc.port} у работающего диспетчера "
             f"(pid {state.pid}, права администратора: {_describe_elevation(state.elevated)})"
         )
-        if not _instance.stop_running_instance(state):
+        if not _instance.stop_running_instance(state, run_dir=run_dir, requester_pid=os.getpid()):
             print(
                 f"[standkit-hub] не удалось остановить процесс {state.pid} — перехват отменён",
                 file=sys.stderr,
@@ -89,6 +151,41 @@ def _takeover_running_instance(
         print(f"[standkit-hub] порт {exc.port} так и не освободился — перехват отменён", file=sys.stderr)
         return False
     return True
+
+
+def _warn_if_run_dir_outside_profile(run_dir: Path) -> None:
+    """
+    WARN в лог диспетчера при старте, если ``run_dir`` (файл состояния,
+    handoff, stop-request — см. ``standkit_hub.instance``/``elevation``)
+    сконфигурирован ВНЕ домашнего каталога пользователя (GAP-311 M14).
+
+    ЗАЧЕМ. ``write_handoff``/``instance._atomic_write_text`` ставят режим
+    ``0o600`` при создании файла — на Windows это НЕ устанавливает ACL (см.
+    docstring ``elevation.write_handoff``): реальная защита файла с токеном
+    сессии целиком полагается на то, что ``run_dir`` лежит внутри профиля
+    пользователя, куда по умолчанию (без явного расшаривания) нет доступа у
+    других локальных учёток. Нестандартная конфигурация (``run_dir`` указан
+    в общей/сетевой папке) тихо ломает это предположение — лучше явно
+    предупредить в лог при каждом старте, чем оставить дыру незамеченной.
+
+    Best-effort: ошибка определения домашнего каталога (напр. переменные
+    окружения не заданы) — тихо пропускается, а не роняет запуск.
+    """
+    try:
+        home = Path.home().resolve()
+        resolved = Path(run_dir).resolve()
+    except OSError:
+        return
+    try:
+        resolved.relative_to(home)
+    except ValueError:
+        print(
+            f"[standkit-hub] ВНИМАНИЕ: run_dir ({resolved}) находится вне домашнего "
+            f"каталога пользователя ({home}) — файлы с правами 0o600 (handoff, состояние) "
+            "на Windows не защищены ACL профиля; убедитесь, что каталог недоступен другим "
+            "локальным учётным записям",
+            file=sys.stderr,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -211,6 +308,32 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[standkit-hub] {result.message}")
         return 0 if result.ok else 1
 
+    our_sid = current_user_sid()
+
+    # Проверка учётки, подтвердившей UAC (GAP-311 п.4/В4) — ПЕРВЫМ ДЕЛОМ, до
+    # HubConfig.load()/ensure_registry_dir(): --initiator-sid кладёт туда SID
+    # пользователя, который ЗАПРОСИЛ повышение (кнопка "Перезапустить с
+    # правами администратора" / одноразовая операция). Если запрос UAC
+    # подтвердила ДРУГАЯ учётка — этот процесс не имеет права даже ПРОЧИТАТЬ
+    # конфиг/реестр текущего пользователя, не то что занять его порт: реестр
+    # стендов, ключи шифрования секретов и файлы диспетчера привязаны к
+    # профилю Windows, и "просто продолжить" означало бы тихую потерю доступа
+    # к своим же данным для исходного пользователя.
+    if args.initiator_sid:
+        if our_sid and our_sid != args.initiator_sid:
+            message = refusal_text(current_user_name())
+            print(f"[standkit-hub] {message}", file=sys.stderr)
+            if args.result_file:
+                _write_relaunch_result(
+                    args.result_file, status="refused", message=message, user=current_user_name()
+                )
+            return 3
+        # SID совпал (или не определить ни с одной стороны) — молча
+        # продолжаем. "Accepted" здесь больше НЕ пишется (В4/В5): протокол
+        # заменён на явные "serving"/"failed" ПОСЛЕ реального перехвата и
+        # bind'а (см. ниже) — раньше "accepted" сообщало лишь о совпадении
+        # SID, а не о том, что новый процесс действительно поднял сервер.
+
     config_path = Path(args.config) if args.config else HubConfig.config_path()
     config = HubConfig.load(config_path)
 
@@ -224,43 +347,9 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"[standkit-hub] не удалось подготовить папку реестра: {exc}", file=sys.stderr)
 
-    state_file = _instance.state_path(config.resolve_run_dir())
-    our_sid = current_user_sid()
-
-    # Проверка учётки, подтвердившей UAC (GAP-311 п.4): --initiator-sid кладёт
-    # туда SID пользователя, который ЗАПРОСИЛ повышение (кнопка "Перезапустить
-    # с правами администратора" / одноразовая операция). Если запрос UAC
-    # подтвердила ДРУГАЯ учётка — этот процесс не имеет права молча занять
-    # порт/реестр стендов текущего пользователя: реестр, ключи шифрования
-    # секретов и файлы диспетчера привязаны к профилю Windows, и "просто
-    # продолжить" означало бы тихую потерю доступа к своим же данным для
-    # исходного пользователя. Поэтому — отказ ДО bind/mutex/state/handoff.
-    if args.initiator_sid:
-        if our_sid and our_sid != args.initiator_sid:
-            message = refusal_text(current_user_name())
-            print(f"[standkit-hub] {message}", file=sys.stderr)
-            if args.result_file:
-                try:
-                    write_result_atomic(
-                        Path(args.result_file),
-                        {
-                            "status": "refused",
-                            "message": message,
-                            "user": current_user_name(),
-                            "at": time.time(),
-                        },
-                    )
-                except OSError:
-                    pass
-            return 3
-        if args.result_file:
-            try:
-                write_result_atomic(
-                    Path(args.result_file),
-                    {"status": "accepted", "at": time.time()},
-                )
-            except OSError:
-                pass
+    run_dir = config.resolve_run_dir()
+    _warn_if_run_dir_outside_profile(run_dir)
+    state_file = _instance.state_path(run_dir)
 
     # Сессия от предыдущего экземпляра (перезапуск с правами администратора):
     # файл одноразовый и протухающий, поэтому «не прочитали» — штатный исход,
@@ -293,6 +382,21 @@ def main(argv: list[str] | None = None) -> int:
             desktop_mode=args.desktop,
         )
 
+    def _bind_strict():
+        # Перехват (GAP-311 В6): БЕЗ отката на эфемерный порт. Новый процесс
+        # обязан занять ИМЕННО тот порт, на котором висела уже открытая
+        # вкладка (origin — часть контракта сессии/localStorage) — откат на
+        # случайный порт сделал бы перехват бессмысленным.
+        return bind_hub_server(
+            args.host,
+            args.port,
+            config_path=config_path,
+            session_token=session_token,
+            insecure=args.insecure,
+            desktop_mode=args.desktop,
+            strict_port=True,
+        )
+
     try:
         httpd = _bind()
     except HubAlreadyRunning as exc:
@@ -302,21 +406,43 @@ def main(argv: list[str] | None = None) -> int:
         # такой запуск молча открывал браузер на СТАРОМ, неэлевированном
         # экземпляре — пользователь видел ту же ошибку прав, будучи уверен, что
         # всё сделал правильно.
-        if _takeover_running_instance(exc, state_file, explicit=args.takeover, our_sid=our_sid):
+        if _takeover_running_instance(exc, state_file, run_dir, explicit=args.takeover, our_sid=our_sid):
+            # Порт мог освободиться формально (сокет закрыт), но ОС не всегда
+            # готова тут же отдать его повторно — поэтому bind СТРОГО на тот
+            # же порт делается С ПОВТОРАМИ до таймаута (GAP-311 В4/В6), а не
+            # одной попыткой.
             try:
-                httpd = _bind()
+                httpd = _bind_with_retries(_bind_strict)
             except (HubAlreadyRunning, InsecureBindError, OSError) as exc2:
-                print(f"[standkit-hub] перехват не удался: {exc2}", file=sys.stderr)
+                message = f"перехват не удался: {exc2}"
+                print(f"[standkit-hub] {message}", file=sys.stderr)
+                if args.result_file:
+                    _write_relaunch_result(args.result_file, status="failed", message=message)
                 return 1
+        elif args.result_file:
+            # Нас подняли специально ЗАМЕНИТЬ работающий экземпляр (кнопка
+            # дашборда/ярлык «от администратора» с --result-file), но условия
+            # перехвата (standkit_hub.instance.should_takeover) не выполнены
+            # — молча открыть браузер на старом здесь НЕЛЬЗЯ: старый процесс
+            # ждёт понятного исхода в result-файле, а не тишины (В4/В5).
+            message = "перехват порта не выполнен: работающий экземпляр перехвату не подлежит"
+            print(f"[standkit-hub] {message}", file=sys.stderr)
+            _write_relaunch_result(args.result_file, status="failed", message=message)
+            return 1
         else:
             return _open_running_instance(exc, no_browser=args.no_browser)
     except InsecureBindError as exc:
         print(f"[standkit-hub] {exc}", file=sys.stderr)
+        if args.result_file:
+            _write_relaunch_result(args.result_file, status="failed", message=str(exc))
         return 1
     except OSError as exc:
         # Порт не занят, но bind всё равно не удался (нет прав, недоступный
         # адрес) — честный отказ с понятным текстом вместо трейсбека.
-        print(f"[standkit-hub] не удалось занять {args.host}:{args.port} — {exc}", file=sys.stderr)
+        message = f"не удалось занять {args.host}:{args.port} — {exc}"
+        print(f"[standkit-hub] {message}", file=sys.stderr)
+        if args.result_file:
+            _write_relaunch_result(args.result_file, status="failed", message=message)
         return 1
 
     # GAP-229/GAP-284: этот процесс подтверждённо поднимает СВОЙ сервер (не открывает
@@ -339,6 +465,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     except OSError as exc:
         print(f"[standkit-hub] не удалось записать файл состояния: {exc}", file=sys.stderr)
+
+    if args.result_file:
+        # Успех: сервер реально поднялся на порту (GAP-311 В4/В5) — старый
+        # процесс (если он ещё жив — обычно уже нет, см. docstring
+        # _write_relaunch_result) узнает об этом только для отражения в UI;
+        # своё завершение он планирует НЕ по этому файлу, а по факту
+        # получения файла-запроса остановки (см. standkit_hub.instance,
+        # GAP-311 Б1) — тот уходит РАНЬШЕ, на шаге перехвата порта.
+        _write_relaunch_result(args.result_file, status="serving", pid=os.getpid(), port=actual_port)
+
     url = f"http://{args.host}:{actual_port}/?t={session_token}"
     print(f"[standkit-hub] дашборд слушает {args.host}:{actual_port}")
     print(f"[standkit-hub] права администратора: {_describe_elevation(elevated)}")

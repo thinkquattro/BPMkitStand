@@ -51,18 +51,134 @@ HUB_MUTEX_NAME = "BPMkitHubDispatcher"
 _hub_mutex_handle = None
 
 
+def _mutex_security_descriptor_sddl():
+    """SDDL дискреционного ACL мьютекса (GAP-311 В8).
+
+    ЗАЧЕМ. Без явного дескриптора ``CreateMutexW(None, ...)`` создаёт мьютекс с ACL по
+    умолчанию токена процесса-создателя. Если диспетчер поднят elevated (после
+    `standkit_hub.elevation` перезапуска УЖЕ elevated-учёткой, см. GAP-311 п.3-5), неэлевейтед
+    процесс той же учётки (установщик, деинсталлятор, GUI-обёртка) не всегда может даже
+    ОТКРЫТЬ такой мьютекс на SYNCHRONIZE -- Restart Manager и мастер Inno Setup (см. модульный
+    docstring) в этом случае не увидят "диспетчер жив" и ведут себя как при GAP-229/GAP-284.
+
+    Права: SYSTEM (``SY``) и Administrators (``BA``) -- полный доступ (``GA``, на случай
+    диагностики/восстановления руками из-под системной учётки); владелец elevated-процесса --
+    полный доступ; Everyone (``WD``) -- ТОЛЬКО ``SYNCHRONIZE`` (``0x00100000``), этого
+    достаточно для ``WaitForSingleObject``/``OpenMutex`` со стороны неэлевейтед установщика и
+    НЕ даёт постороннему процессу той же машины закрыть/изменить чужой мьютекс.
+
+    ``OW`` (owner-токен SDDL) сюда НЕ подставлен: он надёжно документирован для ACL
+    файлов/веток реестра, создаваемых как часть операции создания объекта с "owner rights", но
+    для synchronization-объектов такого явного гарантированного поведения во всех версиях
+    Windows нет -- вместо него используется явный SID текущего пользователя
+    (`standkit.platform.current_user_sid`). SID недоступен (не Windows/ошибка WinAPI) --
+    используется буквальный ``OW`` как запасной вариант, поскольку сама эта функция вызывается
+    только из `_win_create_mutex_handle`, которая и так работает только на Windows.
+    """
+    from standkit.platform import current_user_sid
+
+    user_sid = current_user_sid()
+    owner_clause = f"(A;;GA;;;{user_sid})" if user_sid else "(A;;GA;;;OW)"
+    return f"D:(A;;GA;;;SY)(A;;GA;;;BA){owner_clause}(A;;0x00100000;;;WD)"
+
+
+def _configure_mutex_sd_winapi(advapi32, kernel32):
+    """Явные ``argtypes``/``restype`` для WinAPI-вызовов построения security descriptor
+    (GAP-311 В8) -- та же причина, что у ``standkit.platform._configure_sid_winapi``: без
+    явного ``argtypes`` ctypes может усечь 64-битный указатель (``PSECURITY_DESCRIPTOR``,
+    возвращаемый по ссылке) до 32 бит на x64, молча повредив дескриптор вместо явной ошибки.
+
+    Вынесена отдельно от `_sddl_to_security_attributes`, чтобы тест мог подменить
+    ``advapi32``/``kernel32`` заглушками (обычные объекты с изменяемыми атрибутами) и
+    проверить РОВНО состав проставленных ``argtypes``/``restype`` на линуксовом раннере, не
+    выполняя сам WinAPI-вызов (см. tests/test_hub_mutex.py)."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+
+
+def _sddl_to_security_attributes(advapi32, kernel32, sddl):
+    """Строит ``SECURITY_ATTRIBUTES`` из SDDL-строки через
+    ``ConvertStringSecurityDescriptorToSecurityDescriptorW`` (GAP-311 В8).
+
+    Возвращает ``(sa, sd_ptr)`` при успехе -- ``sa`` передаётся в ``CreateMutexW`` через
+    ``ctypes.byref``, ``sd_ptr`` вызывающая сторона обязана освободить через
+    ``kernel32.LocalFree`` ПОСЛЕ ``CreateMutexW`` (ядро копирует дескриптор при создании
+    объекта -- держать ``sd_ptr`` дольше не нужно). Любой отказ WinAPI (``FALSE``/NULL) --
+    ``OSError``, без частично заполненной структуры."""
+    import ctypes
+    from ctypes import wintypes
+
+    _configure_mutex_sd_winapi(advapi32, kernel32)
+
+    class _SECURITY_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [
+            ("nLength", wintypes.DWORD),
+            ("lpSecurityDescriptor", ctypes.c_void_p),
+            ("bInheritHandle", wintypes.BOOL),
+        ]
+
+    sd_ptr = ctypes.c_void_p()
+    sd_size = wintypes.DWORD()
+    ok = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, 1, ctypes.byref(sd_ptr), ctypes.byref(sd_size)
+    )
+    if not ok or not sd_ptr.value:
+        raise OSError("ConvertStringSecurityDescriptorToSecurityDescriptorW не создал дескриптор")
+
+    sa = _SECURITY_ATTRIBUTES()
+    sa.nLength = ctypes.sizeof(_SECURITY_ATTRIBUTES)
+    sa.lpSecurityDescriptor = sd_ptr
+    sa.bInheritHandle = False
+    return sa, sd_ptr
+
+
 def _win_create_mutex_handle(name):
     """Сырой вызов WinAPI CreateMutexW -- вынесен ОТДЕЛЬНО от acquire_hub_mutex(), чтобы
     тесты подменяли (monkeypatch/mock.patch.object) именно эту функцию и не зависели от
     реальной ОС: CI гоняет линуксовый раннер, где ctypes.WinDLL не существует вовсе, а тест
     «ошибка WinAPI не роняет старт диспетчера» обязан быть зелёным и там (см.
-    tests/test_hub_mutex.py, конвенция -- tests/test_server_mutex.py поставки BPMkit)."""
+    tests/test_hub_mutex.py, конвенция -- tests/test_server_mutex.py поставки BPMkit).
+
+    С явным security descriptor (GAP-311 В8, см. `_mutex_security_descriptor_sddl`) -- ЛЮБАЯ
+    ошибка на этапе его построения (``advapi32`` недоступен, SDDL не распарсился и т.п.)
+    ПОДАВЛЯЕТСЯ здесь же и приводит к откату на прежнее поведение --
+    ``CreateMutexW(None, ...)`` с ACL по умолчанию: мьютекс лучше создать с более широким
+    (штатным) ACL, чем не создать вовсе."""
     import ctypes
     from ctypes import wintypes
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateMutexW.argtypes = [wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32.CreateMutexW.restype = wintypes.HANDLE
-    return kernel32.CreateMutexW(None, False, name)
+
+    sa = None
+    sd_ptr = None
+    try:
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        sa, sd_ptr = _sddl_to_security_attributes(
+            advapi32, kernel32, _mutex_security_descriptor_sddl()
+        )
+    except Exception:
+        sa, sd_ptr = None, None
+
+    try:
+        lp_attrs = ctypes.byref(sa) if sa is not None else None
+        return kernel32.CreateMutexW(lp_attrs, False, name)
+    finally:
+        if sd_ptr is not None:
+            try:
+                kernel32.LocalFree(sd_ptr)
+            except Exception:
+                pass
 
 
 def acquire_hub_mutex():

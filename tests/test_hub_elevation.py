@@ -205,6 +205,136 @@ def test_quote_params_quotes_paths_with_spaces():
     assert line.startswith("-m standkit_hub")
 
 
+def test_quote_params_uses_list2cmdline_and_escapes_embedded_quotes():
+    """M15: `quote_params` делегирует `subprocess.list2cmdline` — не только
+    пробелы, но и встроенные кавычки/бэкслеши экранируются по правилам MSVCRT
+    (та же логика, что реально разбирает Windows при парсинге argv нового
+    процесса), а не собственным упрощённым форматированием."""
+    import subprocess
+
+    params = ["--token", 'a "quoted" value', "--path", r"C:\dir\sub"]
+    line = elevation.quote_params(params)
+
+    assert line == subprocess.list2cmdline(params)
+    assert '\\"quoted\\"' in line
+
+
+# --- В7: reparse point/symlink на месте result-файла/handoff — отказ записи/чтения ---
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-симлинк; на Windows защищает st_file_attributes")
+def test_write_result_atomic_refuses_when_target_is_symlink(tmp_path):
+    real_target = tmp_path / "elsewhere.json"
+    link_path = tmp_path / "result.json"
+    link_path.symlink_to(real_target)
+
+    with pytest.raises(elevation.ReparseGuardError):
+        elevation.write_result_atomic(link_path, {"status": "serving"})
+
+    assert not real_target.exists()  # запись ОТКАЗАНА целиком, не "частично мимо"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-симлинк; на Windows защищает st_file_attributes")
+def test_write_result_atomic_refuses_when_parent_dir_is_symlink(tmp_path):
+    real_dir = tmp_path / "real_run_dir"
+    real_dir.mkdir()
+    link_dir = tmp_path / "run_dir_link"
+    link_dir.symlink_to(real_dir)
+
+    with pytest.raises(elevation.ReparseGuardError):
+        elevation.write_result_atomic(link_dir / "result.json", {"status": "serving"})
+
+    assert list(real_dir.iterdir()) == []
+
+
+def test_write_result_atomic_check_reparse_false_bypasses_guard(tmp_path):
+    """`check_reparse=False` — сознательный опт-аут (не задействован в GAP-311
+    boundary-коде, но контракт параметра сам по себе должен работать)."""
+    path = tmp_path / "result.json"
+    elevation.write_result_atomic(path, {"status": "serving"}, check_reparse=False)
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "serving"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-симлинк; на Windows защищает st_file_attributes")
+def test_read_handoff_refuses_when_target_is_symlink_without_touching_file(tmp_path):
+    real_target = tmp_path / "elsewhere.json"
+    real_target.write_text(
+        json.dumps({"session_token": "secret", "created_at": time.time()}), encoding="utf-8"
+    )
+    link_path = tmp_path / "handoff.json"
+    link_path.symlink_to(real_target)
+
+    result = elevation.read_handoff(link_path)
+
+    assert result is None
+    assert real_target.exists()  # файл-цель НЕ тронут (не удалён, не прочитан как валидный)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-симлинк; на Windows защищает st_file_attributes")
+def test_read_handoff_refuses_when_parent_dir_is_symlink(tmp_path):
+    real_dir = tmp_path / "real_run_dir"
+    real_dir.mkdir()
+    (real_dir / "handoff.json").write_text(
+        json.dumps({"session_token": "secret", "created_at": time.time()}), encoding="utf-8"
+    )
+    link_dir = tmp_path / "run_dir_link"
+    link_dir.symlink_to(real_dir)
+
+    result = elevation.read_handoff(link_dir / "handoff.json")
+
+    assert result is None
+
+
+def test_ensure_not_reparse_allows_plain_nonexistent_path(tmp_path):
+    """Путь, которого ещё нет — штатная запись, а не подмена: не должен
+    отказываться (см. docstring `_is_reparse_or_symlink`)."""
+    elevation.ensure_not_reparse(tmp_path / "not-yet-created.json")  # не бросает
+
+
+# --- M15: build_relaunch_params — --host только для нестандартного хоста, пути resolve()'нуты ---
+
+
+def test_build_relaunch_params_omits_host_for_default_loopback(tmp_path):
+    params = elevation.build_relaunch_params(
+        port=8770,
+        host="127.0.0.1",
+        handoff=tmp_path / "h.json",
+        config_path=tmp_path / "c.json",
+        desktop=False,
+    )
+    assert "--host" not in params
+
+
+def test_build_relaunch_params_includes_host_when_non_default(tmp_path):
+    params = elevation.build_relaunch_params(
+        port=8770,
+        host="0.0.0.0",
+        handoff=tmp_path / "h.json",
+        config_path=tmp_path / "c.json",
+        desktop=False,
+    )
+    assert "--host" in params
+    assert params[params.index("--host") + 1] == "0.0.0.0"
+
+
+def test_build_relaunch_params_resolves_paths_to_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "sub").mkdir()
+    relative_config = Path("sub") / "c.json"
+
+    params = elevation.build_relaunch_params(
+        port=8770,
+        host="127.0.0.1",
+        handoff=Path("h.json"),
+        config_path=relative_config,
+        desktop=False,
+    )
+
+    config_value = params[params.index("--config") + 1]
+    assert Path(config_value).is_absolute()
+    assert Path(config_value) == relative_config.resolve()
+
+
 # --- запрос повышения прав ---
 
 
