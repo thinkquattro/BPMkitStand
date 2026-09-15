@@ -339,6 +339,18 @@ body {
   opacity: 0.7;
 }
 
+/* Компактный режим — та же экономия места, что у остальных подписей шапки
+   (см. [data-view="compact"] #view-toggle-btn выше): значок остаётся, текст
+   подписи прячется, кнопка становится обычным квадратным topbar-btn. */
+[data-view="compact"] .elevation-btn-label {
+  display: none;
+}
+
+[data-view="compact"] .elevation-btn {
+  padding: 4px 8px;
+  gap: 0;
+}
+
 /* --- индикатор связи с хабом (точка + подпись, НЕ похож на меню) --- */
 
 .conn-status {
@@ -796,6 +808,108 @@ body.hub-offline .stands-table-wrap {
 .action-status.action-status-error {
   border-color: var(--bpmkit-down);
   color: var(--bpmkit-down);
+}
+
+/* --- ошибка стенда «нет прав администратора» (GAP-311) ---------------------
+ * В отличие от #action-status (тост, гаснет сам) этот блок лежит в потоке
+ * над таблицей и не закрывается, пока пользователь не нажал крестик или одну
+ * из двух кнопок: «отказ по правам» — не мимолётная ошибка, а тупик, который
+ * требует явного решения (перезапустить диспетчер целиком или поднять права
+ * только на одну операцию). */
+.stand-elevation-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--bpmkit-down);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bpmkit-down) 12%, transparent);
+  color: var(--bpmkit-text);
+  font-size: 13px;
+}
+
+.stand-elevation-error[hidden] {
+  display: none;
+}
+
+#stand-elevation-error-text {
+  flex: 1 1 240px;
+}
+
+.stand-elevation-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.stand-elevation-error-close {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  min-width: 0;
+  line-height: 1.2;
+  font-size: 18px;
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+}
+
+.stand-elevation-error-close:hover {
+  opacity: 1;
+  background: none;
+}
+
+/* --- «О программе»: строка прав диспетчера и однократная операция --------- */
+
+.about-elevation-user {
+  margin-left: 6px;
+  color: var(--bpmkit-muted);
+  font-size: 12px;
+}
+
+.about-elevation-actions {
+  margin: -4px 0 14px;
+}
+
+.about-elevation-actions:empty,
+.about-elevation-actions button[hidden] {
+  display: none;
+}
+
+.about-elevated-once {
+  margin: 0 0 16px;
+  padding: 8px 12px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+}
+
+.about-elevated-once summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--bpmkit-muted);
+}
+
+.about-elevated-once[hidden] {
+  display: none;
+}
+
+.about-elevated-once-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.about-elevated-once-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--bpmkit-muted);
 }
 
 /* Обёртка таблицы: на узком окне даёт горизонтальную прокрутку вместо того,
