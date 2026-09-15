@@ -569,6 +569,91 @@ def test_restart_elevated_parallel_requests_only_one_proceeds(tmp_path, monkeypa
         _shutdown(httpd)
 
 
+def test_restart_elevated_rolls_back_requesting_on_unexpected_error(tmp_path, monkeypatch):
+    """GAP-311 M3: `_load_config` бросает что-то НЕПРЕДВИДЕННОЕ (не одну из
+    уже явно обработанных веток) ПОСЛЕ того, как ``requesting`` уже
+    выставлен под локом — `finally` обязан откатить его обратно в ``None``,
+    иначе ВСЕ последующие запросы навсегда получали бы 409 "дождитесь окна
+    Windows", которого уже не будет."""
+    registry_path = tmp_path / "projects.json"
+    registry_path.write_text('{"projects": {}}', encoding="utf-8")
+    config_path = _config_with_registry(tmp_path, registry_path)
+    token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=token, poll=False)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    _wait_for_port(port)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        monkeypatch.setattr(elevation, "elevation_supported", lambda: True)
+        monkeypatch.setattr(elevation, "is_elevated", lambda: False)
+
+        import standkit_hub.server as server_module
+
+        original_load_config = server_module._load_config
+
+        def _boom(path):
+            raise RuntimeError("конфиг повреждён неожиданным образом")
+
+        monkeypatch.setattr(server_module, "_load_config", _boom)
+
+        try:
+            _request(f"{base}/api/hub/restart-elevated", token=token, method="POST", origin=base)
+        except Exception:
+            pass  # соединение может закрыться без ответа — важен не ответ, а state ниже
+
+        assert httpd.restart_state is None
+
+        # Откат реально сработал: следующий (нормальный) запрос НЕ получает
+        # 409 "дождитесь окна Windows" — он проходит проверку "не идёт ли
+        # уже запрос" заново.
+        monkeypatch.setattr(server_module, "_load_config", original_load_config)
+        monkeypatch.setattr(elevation, "relaunch_elevated", lambda *a, **kw: (_ for _ in ()).throw(
+            elevation.ElevationCancelled("отклонено (тест)")
+        ))
+        status, data = _request(f"{base}/api/hub/restart-elevated", token=token, method="POST", origin=base)
+        assert status == 409
+        assert data.get("cancelled") is True  # НЕ "уже запрошен" — значит requesting не застрял
+    finally:
+        _shutdown(httpd)
+
+
+def test_elevated_op_rolls_back_stand_lock_on_unexpected_error(tmp_path, monkeypatch):
+    """Аналог предыдущего теста для одноразовой операции (GAP-311 М3):
+    непредвиденная ошибка ПОСЛЕ ``elevated_op_stands.add(name)`` не должна
+    оставлять стенд навсегда заблокированным."""
+    registry_path = _registry_with_iis_stand(tmp_path)
+    config_path = _config_with_registry(tmp_path, registry_path)
+    token = generate_session_token()
+    httpd = create_hub_server("127.0.0.1", 0, config_path=config_path, session_token=token, poll=False)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    _wait_for_port(port)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        monkeypatch.setattr(elevation, "elevation_supported", lambda: True)
+
+        def _boom(*a, **kw):
+            raise RuntimeError("неожиданная ошибка сборки параметров")
+
+        monkeypatch.setattr(elevation, "build_elevated_op_params", _boom)
+
+        try:
+            _request(
+                f"{base}/api/hub/elevated-op",
+                token=token,
+                method="POST",
+                origin=base,
+                body={"stand": "iis1", "action": "restart"},
+            )
+        except Exception:
+            pass
+
+        assert "iis1" not in httpd.elevated_op_stands  # откат сработал, стенд не заблокирован
+    finally:
+        _shutdown(httpd)
+
+
 def test_elevated_op_parallel_requests_same_stand_only_one_proceeds(tmp_path, monkeypatch):
     """Аналог предыдущего теста для одноразовой операции (GAP-311 В3): два
     параллельных запроса на ОДИН И ТОТ ЖЕ стенд — второй обязан получить 409

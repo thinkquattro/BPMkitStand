@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import argparse
+import errno as _errno
 import os
 import sys
 import threading
@@ -113,44 +114,54 @@ def _describe_elevation(value) -> str:
 
 def _takeover_running_instance(
     exc: HubAlreadyRunning, state_file: Path, run_dir: Path, *, explicit: bool, our_sid: Optional[str]
-) -> bool:
+) -> "tuple[bool, str]":
     """
     Отобрать ли порт у уже работающего диспетчера — и, если да, попросить его
     остановиться штатно (файл-запрос остановки, GAP-311 Б1: НЕ убивает дерево
     процессов — живые kestrel-стенды и локальный агент остаются работать) и
     дождаться освобождения порта.
 
-    Возвращает True, только если порт реально свободен и повторный bind имеет
-    смысл. Правила решения — в ``standkit_hub.instance.should_takeover``
-    (коротко: явный ``--takeover`` либо «мы elevated, а он нет», за
-    исключением случая, когда работающий экземпляр принадлежит ДРУГОЙ
-    учётной записи — тогда автоматический перехват не делаем, см. GAP-311 п.4).
+    Возвращает ``(ok, reason)`` (GAP-311 M4) — ``ok=True`` только если порт
+    реально свободен и повторный bind имеет смысл; ``reason`` пуст в этом
+    случае, иначе — человекочитаемая причина отказа (уходит в
+    ``result_file`` вызывающего, а не заменяется обобщённым текстом). Правила
+    решения — в ``standkit_hub.instance.should_takeover`` (коротко: явный
+    ``--takeover`` либо «мы elevated, а он нет», за исключением случая, когда
+    работающий экземпляр принадлежит ДРУГОЙ учётной записи — тогда
+    автоматический перехват не делаем, см. GAP-311 п.4).
     """
     state = _instance.read_state(state_file)
     if not _instance.should_takeover(state, we_elevated=is_elevated(), explicit=explicit, our_sid=our_sid):
-        return False
+        return False, ""
 
     if state is None:
-        # --takeover без файла состояния: кого гасить — неизвестно, но уходящий
-        # экземпляр мог уже начать самозавершение (так делает кнопка на
-        # дашборде), поэтому просто ждём порт.
-        print(f"[standkit-hub] жду освобождения порта {exc.port} (файла состояния нет)")
-    else:
-        print(
-            f"[standkit-hub] перехватываю порт {exc.port} у работающего диспетчера "
-            f"(pid {state.pid}, права администратора: {_describe_elevation(state.elevated)})"
-        )
-        if not _instance.stop_running_instance(state, run_dir=run_dir, requester_pid=os.getpid()):
-            print(
-                f"[standkit-hub] не удалось остановить процесс {state.pid} — перехват отменён",
-                file=sys.stderr,
-            )
-            return False
+        # GAP-311 M8: стоп-запрос (Б1) адресуется ПО PID из файла состояния —
+        # без него штатная остановка невозможна ВООБЩЕ (кнопка дашборда
+        # больше НЕ завершает старый процесс сама, только через тот же
+        # адресованный файл-запрос). Раньше здесь ждали освобождения порта до
+        # 20с в надежде, что уходящий экземпляр как-то завершится сам —
+        # надежда была обоснована ТОЛЬКО пока кнопка звала shutdown()
+        # напрямую; сейчас это просто впустую потраченное время пользователя.
+        # Отказ немедленно, без ожидания.
+        reason = "файл состояния работающего диспетчера не найден — закройте его вручную и запустите снова"
+        print(f"[standkit-hub] {reason}", file=sys.stderr)
+        return False, reason
+
+    print(
+        f"[standkit-hub] перехватываю порт {exc.port} у работающего диспетчера "
+        f"(pid {state.pid}, права администратора: {_describe_elevation(state.elevated)})"
+    )
+    ok, reason = _instance.stop_running_instance(state, run_dir=run_dir, requester_pid=os.getpid())
+    if not ok:
+        message = reason or f"не удалось остановить процесс {state.pid}"
+        print(f"[standkit-hub] {message} — перехват отменён", file=sys.stderr)
+        return False, message
 
     if not _instance.wait_port_released(exc.host, exc.port):
-        print(f"[standkit-hub] порт {exc.port} так и не освободился — перехват отменён", file=sys.stderr)
-        return False
-    return True
+        reason = f"порт {exc.port} так и не освободился — перехват отменён"
+        print(f"[standkit-hub] {reason}", file=sys.stderr)
+        return False, reason
+    return True, ""
 
 
 def _warn_if_run_dir_outside_profile(run_dir: Path) -> None:
@@ -366,6 +377,15 @@ def main(argv: list[str] | None = None) -> int:
     if not session_token:
         session_token = generate_session_token()
 
+    # GAP-311 Н2: намерение перехвата — явный --takeover ЛИБО факт, что нас
+    # подняли специально ЗАМЕНИТЬ работающий экземпляр (--result-file,
+    # кнопка дашборда/перезапуск с правами). В обоих случаях ПЕРВЫЙ bind
+    # тоже обязан быть строгим (без отката на эфемерный порт): если порт
+    # занят НЕ нашим хабом (иначе был бы HubAlreadyRunning, а не OSError),
+    # тихий откат на случайный порт означал бы, что перехвата не будет
+    # вовсе, а пользователь всё равно увидит "успех" — на чужом порту.
+    takeover_intent = bool(args.takeover or args.result_file)
+
     def _report_port_busy(requested: int, exc: OSError) -> None:
         # Печатаем ДО повторного bind'а: пользователь должен понимать, почему
         # адрес в консоли/закладке вдруг отличается от привычного.
@@ -378,8 +398,9 @@ def main(argv: list[str] | None = None) -> int:
             config_path=config_path,
             session_token=session_token,
             insecure=args.insecure,
-            on_fallback=_report_port_busy,
+            on_fallback=None if takeover_intent else _report_port_busy,
             desktop_mode=args.desktop,
+            strict_port=takeover_intent,
         )
 
     def _bind_strict():
@@ -406,7 +427,10 @@ def main(argv: list[str] | None = None) -> int:
         # такой запуск молча открывал браузер на СТАРОМ, неэлевированном
         # экземпляре — пользователь видел ту же ошибку прав, будучи уверен, что
         # всё сделал правильно.
-        if _takeover_running_instance(exc, state_file, run_dir, explicit=args.takeover, our_sid=our_sid):
+        takeover_ok, takeover_reason = _takeover_running_instance(
+            exc, state_file, run_dir, explicit=args.takeover, our_sid=our_sid
+        )
+        if takeover_ok:
             # Порт мог освободиться формально (сокет закрыт), но ОС не всегда
             # готова тут же отдать его повторно — поэтому bind СТРОГО на тот
             # же порт делается С ПОВТОРАМИ до таймаута (GAP-311 В4/В6), а не
@@ -425,7 +449,10 @@ def main(argv: list[str] | None = None) -> int:
             # перехвата (standkit_hub.instance.should_takeover) не выполнены
             # — молча открыть браузер на старом здесь НЕЛЬЗЯ: старый процесс
             # ждёт понятного исхода в result-файле, а не тишины (В4/В5).
-            message = "перехват порта не выполнен: работающий экземпляр перехвату не подлежит"
+            # GAP-311 M4: реальная причина отказа (SID не подтверждён,
+            # не удалось остановить и т.п.), если она есть, — а не
+            # обобщённый текст.
+            message = takeover_reason or "перехват порта не выполнен: работающий экземпляр перехвату не подлежит"
             print(f"[standkit-hub] {message}", file=sys.stderr)
             _write_relaunch_result(args.result_file, status="failed", message=message)
             return 1
@@ -437,9 +464,15 @@ def main(argv: list[str] | None = None) -> int:
             _write_relaunch_result(args.result_file, status="failed", message=str(exc))
         return 1
     except OSError as exc:
-        # Порт не занят, но bind всё равно не удался (нет прав, недоступный
+        # Порт не занят НАШИМ хабом (иначе был бы HubAlreadyRunning), но bind
+        # всё равно не удался: либо порт занят ЧУЖИМ приложением (GAP-311 Н2
+        # — при takeover_intent сюда попадаем именно в этом случае, отклик
+        # строгий, без отката), либо иная причина (нет прав, недоступный
         # адрес) — честный отказ с понятным текстом вместо трейсбека.
-        message = f"не удалось занять {args.host}:{args.port} — {exc}"
+        if takeover_intent and exc.errno in (_errno.EADDRINUSE, _errno.EACCES):
+            message = f"порт {args.port} занят другим приложением"
+        else:
+            message = f"не удалось занять {args.host}:{args.port} — {exc}"
         print(f"[standkit-hub] {message}", file=sys.stderr)
         if args.result_file:
             _write_relaunch_result(args.result_file, status="failed", message=message)
@@ -463,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
             state_file,
             _instance.current_state(args.host, actual_port, elevated=elevated, user_sid=our_sid),
         )
-    except OSError as exc:
+    except (OSError, ReparseGuardError) as exc:
         print(f"[standkit-hub] не удалось записать файл состояния: {exc}", file=sys.stderr)
 
     if args.result_file:
@@ -518,6 +551,35 @@ def _serve(httpd, *, args, url: str, state_file: Path) -> int:
         _instance.clear_state(state_file, pid=os.getpid())
 
 
+def _make_desktop_stop_callback(httpd, webview_module):
+    """
+    Колбэк для ``httpd.on_stop_request`` в desktop-режиме (GAP-311 Н3).
+
+    Вызывается из ФОНОВОГО потока наблюдателя (``standkit_hub.server.
+    _StopRequestWatcher``), НЕ из главного потока, в котором блокирует
+    ``webview.start()`` — закрытие окон (``w.destroy()``) из чужого потока —
+    штатный способ управления pywebview именно для такого случая (окно само
+    вызывает закрытие обработчиком событий из любого потока). После закрытия
+    ВСЕХ окон ``webview.start()`` в главном потоке возвращает управление, и
+    ``_serve_inner`` доходит до своего ``finally`` (``httpd.shutdown()`` +
+    ``server_close()``) как при обычном закрытии окна руками.
+
+    Список окон копируется (``list(...)``) перед обходом: `destroy()` меняет
+    сам ``webview.windows`` изнутри цикла — итерация по оригиналу словила бы
+    ``RuntimeError: list changed size during iteration``.
+    """
+
+    def _stop() -> None:
+        for window in list(getattr(webview_module, "windows", [])):
+            try:
+                window.destroy()
+            except Exception:
+                pass  # окно уже закрывалось/недоступно — не мешаем остальным
+        httpd.shutdown()
+
+    return _stop
+
+
 def _serve_inner(httpd, *, args, url: str) -> int:
     if args.desktop:
         try:
@@ -530,6 +592,14 @@ def _serve_inner(httpd, *, args, url: str) -> int:
             if not args.no_browser:
                 webbrowser.open(url)
         else:
+            # GAP-311 Н3: файл-запрос остановки (Б1) по умолчанию делает
+            # только httpd.shutdown() — этого хватает браузерному режиму
+            # (выход из serve_forever), но НЕ desktop-режиму: webview.start()
+            # в ЭТОМ (главном) потоке продолжал бы блокировать процесс сколь
+            # угодно долго, ожидая, что пользователь САМ закроет окно. Колбэк
+            # обязан закрыть окна ЯВНО, чтобы webview.start() вернул
+            # управление и функция могла дойти до своего finally/return.
+            httpd.on_stop_request = _make_desktop_stop_callback(httpd, webview)
             thread = threading.Thread(target=httpd.serve_forever, daemon=True)
             thread.start()
             try:

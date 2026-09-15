@@ -271,7 +271,7 @@ def test_takeover_calls_stop_running_instance_not_platform_stop_directly(tmp_pat
 
     def fake_stop_running_instance(state, *, run_dir, requester_pid=None, **kw):
         calls.append({"pid": state.pid, "requester_pid": requester_pid})
-        return True
+        return True, ""
 
     monkeypatch.setattr(_instance, "stop_running_instance", fake_stop_running_instance)
     monkeypatch.setattr(_instance, "wait_port_released", lambda host, port, **kw: True)
@@ -279,11 +279,12 @@ def test_takeover_calls_stop_running_instance_not_platform_stop_directly(tmp_pat
     monkeypatch.setattr(_instance, "is_alive", lambda pid: True)
 
     exc = HubAlreadyRunning("127.0.0.1", 8770)
-    result = hub_main._takeover_running_instance(
+    ok, reason = hub_main._takeover_running_instance(
         exc, state_file, run_dir, explicit=True, our_sid=None
     )
 
-    assert result is True
+    assert ok is True
+    assert reason == ""
     assert len(calls) == 1
     assert calls[0]["pid"] == 4242
     import os as _os
@@ -296,7 +297,7 @@ def test_takeover_fails_when_stop_running_instance_fails(tmp_path, monkeypatch):
     _write_running_state(run_dir)
     state_file = _instance.state_path(run_dir)
 
-    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: False)
+    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: (False, "причина отказа"))
     wait_called = []
     monkeypatch.setattr(
         _instance, "wait_port_released", lambda *a, **kw: wait_called.append(1) or True
@@ -305,11 +306,12 @@ def test_takeover_fails_when_stop_running_instance_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(_instance, "is_alive", lambda pid: True)
 
     exc = HubAlreadyRunning("127.0.0.1", 8770)
-    result = hub_main._takeover_running_instance(
+    ok, reason = hub_main._takeover_running_instance(
         exc, state_file, run_dir, explicit=True, our_sid=None
     )
 
-    assert result is False
+    assert ok is False
+    assert reason == "причина отказа"  # M4: реальная причина, не обобщённый текст
     assert wait_called == []  # не ждём порт, если остановить не удалось
 
 
@@ -322,37 +324,42 @@ def test_takeover_returns_false_when_should_not_takeover(tmp_path, monkeypatch):
     state_file = _instance.state_path(run_dir)
 
     called = []
-    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: called.append(1) or True)
+    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: called.append(1) or (True, ""))
     monkeypatch.setattr(hub_main, "is_elevated", lambda: False)
 
     exc = HubAlreadyRunning("127.0.0.1", 8770)
-    result = hub_main._takeover_running_instance(
+    ok, reason = hub_main._takeover_running_instance(
         exc, state_file, run_dir, explicit=False, our_sid=None
     )
 
-    assert result is False
+    assert ok is False
     assert called == []
 
 
-def test_takeover_waits_for_port_without_stopping_when_no_state_file(tmp_path, monkeypatch):
-    """`--takeover` без файла состояния — кого гасить неизвестно, просто
-    ждём освобождения порта, не зовя stop_running_instance вовсе."""
+def test_takeover_fails_immediately_without_waiting_when_no_state_file(tmp_path, monkeypatch):
+    """GAP-311 M8: `--takeover` без файла состояния — стоп-запрос адресуется
+    ПО PID из state, без него штатная остановка невозможна вовсе (кнопка
+    больше не завершает старый процесс сама) — немедленный отказ, БЕЗ
+    ожидания освобождения порта (раньше ждали до 20с)."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     state_file = _instance.state_path(run_dir)  # не создаём файл
 
-    called = []
-    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: called.append(1) or True)
-    monkeypatch.setattr(_instance, "wait_port_released", lambda *a, **kw: True)
+    stop_called = []
+    wait_called = []
+    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: stop_called.append(1) or (True, ""))
+    monkeypatch.setattr(_instance, "wait_port_released", lambda *a, **kw: wait_called.append(1) or True)
     monkeypatch.setattr(hub_main, "is_elevated", lambda: True)
 
     exc = HubAlreadyRunning("127.0.0.1", 8770)
-    result = hub_main._takeover_running_instance(
+    ok, reason = hub_main._takeover_running_instance(
         exc, state_file, run_dir, explicit=True, our_sid=None
     )
 
-    assert result is True
-    assert called == []
+    assert ok is False
+    assert "файл состояния" in reason
+    assert stop_called == []
+    assert wait_called == []  # НЕ ждём порт вовсе
 
 
 def test_takeover_fails_when_port_never_released(tmp_path, monkeypatch):
@@ -361,17 +368,18 @@ def test_takeover_fails_when_port_never_released(tmp_path, monkeypatch):
     _write_running_state(run_dir)
     state_file = _instance.state_path(run_dir)
 
-    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: True)
+    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: (True, ""))
     monkeypatch.setattr(_instance, "wait_port_released", lambda *a, **kw: False)
     monkeypatch.setattr(hub_main, "is_elevated", lambda: True)
     monkeypatch.setattr(_instance, "is_alive", lambda pid: True)
 
     exc = HubAlreadyRunning("127.0.0.1", 8770)
-    result = hub_main._takeover_running_instance(
+    ok, reason = hub_main._takeover_running_instance(
         exc, state_file, run_dir, explicit=True, our_sid=None
     )
 
-    assert result is False
+    assert ok is False
+    assert "порт" in reason
 
 
 # --- полный путь main(): serving/failed в result-file через реальный перехват --
@@ -404,7 +412,7 @@ def test_main_writes_serving_result_after_successful_takeover_and_bind(tmp_path,
     monkeypatch.setattr(hub_main.HubConfig, "load", staticmethod(lambda p: _FakeConfig()))
     monkeypatch.setattr(hub_main, "current_user_sid", lambda: "S-1-5-21-AAA")
     monkeypatch.setattr(hub_main, "acquire_hub_mutex", lambda: True)
-    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: True)
+    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: (True, ""))
     monkeypatch.setattr(_instance, "wait_port_released", lambda *a, **kw: True)
     monkeypatch.setattr(hub_main, "is_elevated", lambda: True)
     monkeypatch.setattr(_instance, "is_alive", lambda pid: True)
@@ -454,6 +462,109 @@ def test_warn_if_run_dir_outside_profile_warns_when_outside_home(tmp_path, monke
     captured = capsys.readouterr()
     assert "ВНИМАНИЕ" in captured.err
     assert str(outside.resolve()) in captured.err
+
+
+def test_make_desktop_stop_callback_destroys_windows_and_shuts_down_server():
+    destroyed = []
+
+    class _FakeWindow:
+        def destroy(self):
+            destroyed.append(self)
+
+    class _FakeHttpd:
+        def __init__(self):
+            self.shutdown_called = False
+
+        def shutdown(self):
+            self.shutdown_called = True
+
+    class _FakeWebviewModule:
+        windows = [_FakeWindow(), _FakeWindow()]
+
+    httpd = _FakeHttpd()
+    callback = hub_main._make_desktop_stop_callback(httpd, _FakeWebviewModule())
+    callback()
+
+    assert len(destroyed) == 2
+    assert httpd.shutdown_called is True
+
+
+def test_make_desktop_stop_callback_survives_window_destroy_errors():
+    class _FailingWindow:
+        def destroy(self):
+            raise RuntimeError("окно уже закрыто")
+
+    class _FakeHttpd:
+        def __init__(self):
+            self.shutdown_called = False
+
+        def shutdown(self):
+            self.shutdown_called = True
+
+    class _FakeWebviewModule:
+        windows = [_FailingWindow()]
+
+    httpd = _FakeHttpd()
+    callback = hub_main._make_desktop_stop_callback(httpd, _FakeWebviewModule())
+    callback()  # не бросает, несмотря на исключение в destroy()
+
+    assert httpd.shutdown_called is True
+
+
+def test_serve_inner_desktop_mode_registers_on_stop_request_before_blocking(monkeypatch):
+    """Н3 сквозной сценарий: desktop-режим, стоп-запрос "приходит" в момент,
+    когда webview.start() блокирует главный поток — колбэк уже установлен и
+    закрывает окна, из-за чего start() (в заглушке) возвращает управление, а
+    _serve_inner доходит до shutdown()/server_close()."""
+    destroyed = []
+
+    class _FakeWindow:
+        def destroy(self):
+            destroyed.append(self)
+
+    class _FakeHttpd:
+        def __init__(self):
+            self.on_stop_request = None
+            self.shutdown_called = False
+            self.server_close_called = False
+
+        def serve_forever(self):
+            pass
+
+        def shutdown(self):
+            self.shutdown_called = True
+
+        def server_close(self):
+            self.server_close_called = True
+
+    httpd = _FakeHttpd()
+
+    class _FakeWebviewModule:
+        windows = [_FakeWindow()]
+
+        @staticmethod
+        def create_window(title, url):
+            pass
+
+        @staticmethod
+        def start():
+            # Симулируем стоп-запрос, "пришедший" пока start() блокирует.
+            assert httpd.on_stop_request is not None
+            httpd.on_stop_request()
+
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "webview", _FakeWebviewModule)
+
+    class _FakeArgs:
+        desktop = True
+        no_browser = True
+
+    rc = hub_main._serve_inner(httpd, args=_FakeArgs(), url="http://127.0.0.1:8770/?token=x")
+
+    assert rc == 0
+    assert destroyed
+    assert httpd.shutdown_called is True
+    assert httpd.server_close_called is True
 
 
 def test_warn_if_run_dir_outside_profile_silent_when_inside_home(tmp_path, monkeypatch, capsys):

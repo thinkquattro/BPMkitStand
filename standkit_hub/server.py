@@ -981,6 +981,7 @@ def make_handler(
     max_body_bytes: int = _security.DEFAULT_MAX_BODY_BYTES,
     max_logs_n: int = _security.DEFAULT_MAX_LOGS_N,
     desktop_mode: bool = False,
+    insecure_mode: bool = False,
 ) -> type:
     """
     Фабрика класса-обработчика запросов хаба с "захваченными" зависимостями
@@ -1958,68 +1959,77 @@ def make_handler(
                     return
                 server.restart_state = {"status": "requesting", "at": time.time()}
 
-            can_restart, reason = _elevation.can_restart_elevated()
-            if not can_restart:
-                with server.restart_lock:
-                    server.restart_state = None
-                self._send_json(400, {"error": reason})
-                return
-
-            config = _load_config(config_path)
-            run_dir = config.resolve_run_dir()
-            handoff = _elevation.handoff_path(run_dir)
+            # GAP-311 M3: ``committed`` — единственный флаг, решающий, нужно ли
+            # откатывать ``requesting`` обратно в ``None`` в ``finally``. Без
+            # него ЛЮБОЕ непредвиденное исключение между установкой
+            # ``requesting`` и явным успехом/явной обработанной ошибкой (напр.
+            # ``_load_config`` бросает что-то, кроме уже учтённых веток, —
+            # битый JSON конфига, ``OSError`` при чтении) навсегда застревало
+            # бы в ``requesting`` — ВСЕ дальнейшие ``POST`` получали бы 409
+            # «дождитесь окна Windows», которого уже никогда не будет.
+            committed = False
+            handoff: Optional[Path] = None
             try:
-                _elevation.write_handoff(handoff, session_token)
-            except OSError as exc:
-                with server.restart_lock:
-                    server.restart_state = None
-                self._send_json(500, {"error": f"Не удалось подготовить передачу сессии: {exc}"})
-                return
+                can_restart, reason = _elevation.can_restart_elevated()
+                if not can_restart:
+                    self._send_json(400, {"error": reason})
+                    return
 
-            result_file = run_dir / _RESTART_RESULT_FILE_NAME
-            # Остаток от прошлой (отменённой/протухшей) попытки не должен
-            # быть прочитан наблюдателем как исход ЭТОЙ попытки.
-            try:
-                result_file.unlink()
-            except OSError:
-                pass
+                config = _load_config(config_path)
+                run_dir = config.resolve_run_dir()
+                handoff = _elevation.handoff_path(run_dir)
+                try:
+                    _elevation.write_handoff(handoff, session_token)
+                except OSError as exc:
+                    self._send_json(500, {"error": f"Не удалось подготовить передачу сессии: {exc}"})
+                    return
 
-            params = _elevation.build_relaunch_params(
-                port=self._hub_port(),
-                host=self._hub_host(),
-                handoff=handoff,
-                config_path=config_path,
-                desktop=desktop_mode,
-                initiator_sid=_platform.current_user_sid(),
-                result_file=result_file,
-            )
-            try:
-                _elevation.relaunch_elevated(params)
-            except _elevation.ElevationCancelled as exc:
-                # Отдельно от прочих ElevationError: пользователь осознанно
-                # нажал «Нет» в окне UAC — фронт должен показать это иначе,
-                # чем сбой запроса (``cancelled``, не просто текст ошибки).
-                _elevation.discard_handoff(handoff)
-                with server.restart_lock:
-                    server.restart_state = None
-                self._send_json(409, {"error": str(exc), "cancelled": True})
-                return
-            except _elevation.ElevationError as exc:
-                _elevation.discard_handoff(handoff)
-                with server.restart_lock:
-                    server.restart_state = None
-                self._send_json(400, {"error": str(exc)})
-                return
+                result_file = run_dir / _RESTART_RESULT_FILE_NAME
+                # Остаток от прошлой (отменённой/протухшей) попытки не должен
+                # быть прочитан наблюдателем как исход ЭТОЙ попытки.
+                try:
+                    result_file.unlink()
+                except OSError:
+                    pass
 
-            with server.restart_lock:
-                server.restart_state = {"status": "pending", "at": time.time()}
-            self._send_json(202, {"ok": True, "restarting": True})
-            threading.Thread(
-                target=_watch_restart_result,
-                args=(server, result_file, handoff),
-                name="standkit-hub-restart-watch",
-                daemon=True,
-            ).start()
+                params = _elevation.build_relaunch_params(
+                    port=self._hub_port(),
+                    host=self._hub_host(),
+                    handoff=handoff,
+                    config_path=config_path,
+                    desktop=desktop_mode,
+                    initiator_sid=_platform.current_user_sid(),
+                    result_file=result_file,
+                    insecure=insecure_mode,
+                )
+                try:
+                    _elevation.relaunch_elevated(params)
+                except _elevation.ElevationCancelled as exc:
+                    # Отдельно от прочих ElevationError: пользователь осознанно
+                    # нажал «Нет» в окне UAC — фронт должен показать это иначе,
+                    # чем сбой запроса (``cancelled``, не просто текст ошибки).
+                    _elevation.discard_handoff(handoff)
+                    self._send_json(409, {"error": str(exc), "cancelled": True})
+                    return
+                except _elevation.ElevationError as exc:
+                    _elevation.discard_handoff(handoff)
+                    self._send_json(400, {"error": str(exc)})
+                    return
+
+                with server.restart_lock:
+                    server.restart_state = {"status": "pending", "at": time.time()}
+                committed = True
+                self._send_json(202, {"ok": True, "restarting": True})
+                threading.Thread(
+                    target=_watch_restart_result,
+                    args=(server, result_file, handoff),
+                    name="standkit-hub-restart-watch",
+                    daemon=True,
+                ).start()
+            finally:
+                if not committed:
+                    with server.restart_lock:
+                        server.restart_state = None
 
         # --- API: одноразовая операция с правами над стендом IIS (GAP-311 п.6) ---
 
@@ -2081,38 +2091,48 @@ def make_handler(
                     return
                 server.elevated_op_stands.add(name)
 
-            op_id = secrets.token_hex(16)
-            result_file = config.resolve_run_dir() / f"standkit-hub-elevated-op-{op_id}.json"
-            params = _elevation.build_elevated_op_params(
-                stand=name,
-                action=action,
-                result_file=result_file,
-                config_path=config_path,
-                initiator_sid=_platform.current_user_sid(),
-            )
+            # GAP-311 M3: тот же приём, что у ``_api_hub_restart_elevated`` —
+            # ``committed`` решает, откатывать ли занятость стенда обратно в
+            # ``finally``. Без него ЛЮБОЕ непредвиденное исключение между
+            # ``add(name)`` и явным успехом/явной обработанной ошибкой
+            # (напр. ``build_elevated_op_params``/``resolve_run_dir`` бросят
+            # что-то неожиданное) навсегда заблокировало бы этот стенд —
+            # ``elevated_op_stands`` никто больше не очистит.
+            committed = False
             try:
-                _elevation.relaunch_elevated(params)
-            except _elevation.ElevationCancelled as exc:
-                with server.elevated_op_lock:
-                    server.elevated_op_stands.discard(name)
-                self._send_json(409, {"error": str(exc), "cancelled": True})
-                return
-            except _elevation.ElevationError as exc:
-                with server.elevated_op_lock:
-                    server.elevated_op_stands.discard(name)
-                self._send_json(400, {"error": str(exc)})
-                return
+                op_id = secrets.token_hex(16)
+                result_file = config.resolve_run_dir() / f"standkit-hub-elevated-op-{op_id}.json"
+                params = _elevation.build_elevated_op_params(
+                    stand=name,
+                    action=action,
+                    result_file=result_file,
+                    config_path=config_path,
+                    initiator_sid=_platform.current_user_sid(),
+                )
+                try:
+                    _elevation.relaunch_elevated(params)
+                except _elevation.ElevationCancelled as exc:
+                    self._send_json(409, {"error": str(exc), "cancelled": True})
+                    return
+                except _elevation.ElevationError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
 
-            with server.elevated_op_lock:
-                # M16: храним путь к result-файлу вместе с меткой времени —
-                # хендлер статуса не должен ПЕРЕСОБИРАТЬ путь из op_id заново
-                # (единственный источник правды — здесь).
-                server.elevated_ops[op_id] = {
-                    "started_at": time.monotonic(),
-                    "result_file": result_file,
-                    "stand": name,
-                }
-            self._send_json(202, {"ok": True, "op_id": op_id})
+                with server.elevated_op_lock:
+                    # M16: храним путь к result-файлу вместе с меткой времени —
+                    # хендлер статуса не должен ПЕРЕСОБИРАТЬ путь из op_id заново
+                    # (единственный источник правды — здесь).
+                    server.elevated_ops[op_id] = {
+                        "started_at": time.monotonic(),
+                        "result_file": result_file,
+                        "stand": name,
+                    }
+                committed = True
+                self._send_json(202, {"ok": True, "op_id": op_id})
+            finally:
+                if not committed:
+                    with server.elevated_op_lock:
+                        server.elevated_op_stands.discard(name)
 
         def _api_hub_elevated_op_status(self, op_id: str) -> None:
             """
@@ -2874,6 +2894,12 @@ def _schedule_shutdown(server, *, delay: float = _SHUTDOWN_DELAY_SEC) -> threadi
 # нагружает диск/CPU фонового потока.
 _STOP_REQUEST_POLL_INTERVAL_SEC = 0.5
 
+# Старше скольких секунд файл-запрос остановки игнорируется как протухший
+# (M7) — с запасом покрывает stop_request_timeout (по умолчанию 5с в
+# standkit_hub.instance) плюс сетевые/дисковые задержки, но не настолько
+# большой, чтобы законный медленный запрос отбросить как чужой.
+_STOP_REQUEST_MAX_AGE_SEC = 60.0
+
 
 class _StopRequestWatcher:
     """
@@ -2890,11 +2916,20 @@ class _StopRequestWatcher:
     убийства, но БЕЗ дерева (``platform.stop(..., tree=False)``).
 
     Этот наблюдатель — сторона ПОЛУЧАТЕЛЯ запроса: увидев файл с
-    ``target_pid == os.getpid()``, удаляет его и планирует ШТАТНОЕ
-    завершение (``_schedule_shutdown`` — тот же путь, что и у кнопки
-    «Перезапустить с правами администратора»): сервер закрывает СВОЙ сокет и
-    выходит из ``serve_forever``, дети остаются жить (их усыновляет
-    init/system, либо они просто продолжают слушать свой порт).
+    ``target_pid == os.getpid()``, удаляет его и запускает завершение —
+    ``server.on_stop_request()``, если задан (GAP-311 Н3: desktop-режим
+    подставляет туда закрытие окон pywebview ПЛЮС ``shutdown()`` — одного
+    ``shutdown()`` недостаточно, ``webview.start()`` в главном потоке
+    продолжал бы блокировать процесс), иначе прежний путь —
+    ``_schedule_shutdown`` (сервер закрывает СВОЙ сокет и выходит из
+    ``serve_forever``, дети остаются жить: их усыновляет init/system, либо
+    они просто продолжают слушать свой порт).
+
+    ``at`` СТАРШЕ ``_STOP_REQUEST_MAX_AGE_SEC`` (M7) — запрос игнорируется и
+    удаляется, а не исполняется: файл, залежавшийся дольше разумного (напр.
+    переиспользованный pid унаследовал файл-запрос от давно закончившегося
+    перехвата, адресованный СЛУЧАЙНО тому же числу) не должен гасить только
+    что запущенный, ни в чём не виноватый процесс.
     """
 
     def __init__(self, server: "HubHTTPServer", run_dir: Path, *, poll_interval: float = _STOP_REQUEST_POLL_INTERVAL_SEC):
@@ -2918,10 +2953,34 @@ class _StopRequestWatcher:
         while not self._stop_event.is_set():
             request = _instance.read_stop_request(self._path)
             if request is not None and request.get("target_pid") == os.getpid():
+                age = time.time() - float(request.get("at") or 0.0)
                 _instance.discard_stop_request(self._path)
-                _schedule_shutdown(self._server, delay=0.0)
+                if age > _STOP_REQUEST_MAX_AGE_SEC:
+                    self._stop_event.wait(self._poll_interval)
+                    continue
+                self._trigger_stop()
                 return
             self._stop_event.wait(self._poll_interval)
+
+    def _trigger_stop(self) -> None:
+        # M7: не дёргать shutdown() ДО того, как serve_forever реально
+        # начал работать — иначе BaseServer.shutdown() ждёт Event, который
+        # выставляется только по ЗАВЕРШЕНИИ serve_forever, а сам
+        # serve_forever, увидев shutdown_request=True ДО первой итерации,
+        # выходит почти мгновенно, так и не начав обслуживать запросы.
+        # Ждём ограниченно — если serve_forever так и не стартовал (процесс
+        # падает раньше), лучше дёрнуть shutdown() всё равно, чем зависнуть.
+        started = getattr(self._server, "_serve_forever_started", None)
+        if started is not None:
+            started.wait(timeout=5.0)
+        callback = getattr(self._server, "on_stop_request", None)
+        if callback is not None:
+            try:
+                callback()
+                return
+            except Exception:
+                pass  # упавший колбэк не должен оставить процесс висящим без shutdown()
+        _schedule_shutdown(self._server, delay=0.0)
 
 
 def poll_interval_of(config_path: Path) -> float:
@@ -2983,6 +3042,21 @@ class HubHTTPServer(ThreadingHTTPServer):
         # операция на стенд одновременно, повторный POST для того же стенда
         # получает понятный 409, а не второе окно UAC.
         self.elevated_op_stands: set = set()
+        # Колбэк на стоп-запрос (GAP-311 Н3) — по умолчанию None, тогда
+        # _StopRequestWatcher планирует обычный `_schedule_shutdown` (закрыть
+        # сокет, выйти из serve_forever). Desktop-режим (pywebview) переопределяет
+        # его в __main__._serve_inner: одного `shutdown()` там недостаточно —
+        # `webview.start()` в главном потоке продолжал бы блокировать процесс
+        # даже после закрытия HTTP-сокета, колбэк обязан ЕЩЁ и закрыть окна.
+        self.on_stop_request: Optional[Callable[[], None]] = None
+        # Флаг «serve_forever реально стартовал» (GAP-311 M7) — защита от
+        # вызова shutdown() ДО входа в цикл обслуживания: BaseServer.shutdown()
+        # ждёт internal Event, который serve_forever выставляет только по
+        # ЗАВЕРШЕНИИ цикла — если стоп-запрос (маловероятно, но теоретически:
+        # переиспользованный pid с оставшимся файлом-запросом от прошлого
+        # процесса) подоспел раньше самого первого входа в serve_forever,
+        # наблюдатель ждёт этот флаг, а не бросается в shutdown() немедленно.
+        self._serve_forever_started = threading.Event()
         # Наблюдатель за файлом-запросом остановки (GAP-311 Б1) — см.
         # _StopRequestWatcher. Работает ВСЕГДА (не только при poll=True):
         # именно он гасит хаб штатно при перехвате порта, независимо от того,
@@ -3027,6 +3101,13 @@ class HubHTTPServer(ThreadingHTTPServer):
                 interval=lambda: poll_interval_of(config_path),
             )
             self.status_poller.start()
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        # GAP-311 M7: выставляем ФЛАГ первым делом, до того, как реально
+        # войти в цикл `socketserver.BaseServer.serve_forever` — см.
+        # `_serve_forever_started` в `__init__` и `_StopRequestWatcher`.
+        self._serve_forever_started.set()
+        super().serve_forever(poll_interval)
 
     def server_close(self) -> None:
         # Сначала гасим фоновые потоки, потом закрываем сокет: иначе поллер мог
@@ -3079,7 +3160,11 @@ def create_hub_server(
     """
     _security.validate_bind_security(host, tls_enabled=False, insecure=insecure)
     handler_cls = make_handler(
-        config_path=config_path, session_token=session_token, web_dir=web_dir, desktop_mode=desktop_mode
+        config_path=config_path,
+        session_token=session_token,
+        web_dir=web_dir,
+        desktop_mode=desktop_mode,
+        insecure_mode=insecure,
     )
     return HubHTTPServer((host, port), handler_cls, config_path=config_path, poll=poll)
 

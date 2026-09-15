@@ -494,9 +494,18 @@ def _is_wow64_process() -> bool:
         return False
     try:
         import ctypes
+        from ctypes import wintypes
 
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        is_wow64 = ctypes.c_long(0)
+        # Приватный WinDLL, не глобальный ctypes.windll.kernel32 (GAP-311
+        # M6) — та же причина, что у standkit.platform.current_user_sid:
+        # явные argtypes на общем хендле затронули бы других вызывающих.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.IsWow64Process.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+        kernel32.IsWow64Process.restype = wintypes.BOOL
+
+        is_wow64 = wintypes.BOOL(0)
         if not kernel32.IsWow64Process(kernel32.GetCurrentProcess(), ctypes.byref(is_wow64)):
             return False
         return bool(is_wow64.value)

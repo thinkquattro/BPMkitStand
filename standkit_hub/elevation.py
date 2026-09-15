@@ -326,6 +326,7 @@ def build_relaunch_params(
     desktop: bool = False,
     initiator_sid: Optional[str] = None,
     result_file: Optional[Path] = None,
+    insecure: bool = False,
 ) -> list[str]:
     """
     Аргументы (ХВОСТ, без имени модуля/исполняемого файла — тот добавляет
@@ -362,6 +363,15 @@ def build_relaunch_params(
     АБСОЛЮТНОМУ (``resolve()``) — новый процесс стартует с ДРУГИМ рабочим
     каталогом (``cwd`` у ``ShellExecuteW`` — домашняя папка пользователя, см.
     ``relaunch_elevated``), и относительный путь там означал бы другой файл.
+
+    ``insecure`` (M1) — в каком режиме bind'а работал СТАРЫЙ процесс (см.
+    параметр ``insecure`` у ``bind_hub_server``/``create_hub_server``): если
+    он был поднят с ``--insecure`` (non-loopback bind БЕЗ TLS, осознанный
+    отказ от fail-closed защиты), новый процесс, унаследовавший ТОТ ЖЕ
+    ``host``, обязан унаследовать и ЭТО решение — иначе строгий bind (В6) на
+    non-loopback host упал бы в ``InsecureBindError`` вместо честного
+    перехвата, хотя пользователь уже осознанно согласился на такой режим
+    раньше.
     """
     params = ["--port", str(port), "--takeover"]
     params.append("--desktop" if desktop else "--no-browser")
@@ -375,6 +385,8 @@ def build_relaunch_params(
         params += ["--initiator-sid", str(initiator_sid)]
     if result_file is not None:
         params += ["--result-file", str(Path(result_file).resolve())]
+    if insecure:
+        params.append("--insecure")
     return params
 
 

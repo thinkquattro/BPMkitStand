@@ -248,8 +248,15 @@ def current_user_sid() -> Optional[str]:
         import ctypes
         from ctypes import wintypes
 
-        advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        # ПРИВАТНЫЙ WinDLL (не глобальный ctypes.windll.*, GAP-311 M6):
+        # `_configure_sid_winapi` мутирует `argtypes`/`restype` функций на
+        # объекте DLL — на глобальном `ctypes.windll.advapi32`/`kernel32`
+        # это меняло бы поведение ЛЮБОГО другого кода пакета, который зовёт
+        # те же функции (напр. `LocalFree`/`CloseHandle`) с другими
+        # ожиданиями относительно типов аргументов. Свой хендл — своя,
+        # изолированная настройка (тот же приём, что в `standkit_hub.mutex`).
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         _configure_sid_winapi(advapi32, kernel32)
 
         TOKEN_QUERY = 0x0008
@@ -298,6 +305,141 @@ def current_user_name() -> Optional[str]:
         import getpass
 
         return getpass.getuser()
+    except Exception:
+        return None
+
+
+def _configure_process_time_winapi(kernel32) -> None:
+    """
+    ``argtypes``/``restype`` для ``OpenProcess``/``GetProcessTimes``/
+    ``CloseHandle`` (GAP-311 Н1) — вынесена отдельно для тестируемости на
+    Linux заглушками, тем же приёмом, что ``_configure_sid_winapi``.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+
+# Разница (в 100-наносекундных интервалах FILETIME) между эпохой Windows
+# (1601-01-01) и эпохой Unix (1970-01-01) — константа, не вычисление.
+_FILETIME_UNIX_EPOCH_DELTA_100NS = 116444736000000000
+
+
+def _filetime_to_unix(filetime) -> float:
+    """``FILETIME`` (100-наносекундные интервалы с 1601-01-01) → Unix epoch секунды."""
+    value = (filetime.dwHighDateTime << 32) | filetime.dwLowDateTime
+    return (value - _FILETIME_UNIX_EPOCH_DELTA_100NS) / 10_000_000.0
+
+
+def _windows_process_create_time(kernel32, pid: int) -> Optional[float]:
+    """
+    Читает время СОЗДАНИЯ процесса через ``OpenProcess`` (только
+    ``PROCESS_QUERY_LIMITED_INFORMATION`` — минимум прав, достаточный даже
+    для чужой учётки/сервиса) + ``GetProcessTimes`` (GAP-311 Н1). Вынесена
+    отдельно от ``process_create_time``, чтобы принимать готовый ``kernel32``
+    в тестах (заглушка вместо реального ``ctypes.WinDLL``).
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    _configure_process_time_winapi(kernel32)
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        creation = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        ok = kernel32.GetProcessTimes(
+            handle, ctypes.byref(creation), ctypes.byref(exit_time),
+            ctypes.byref(kernel_time), ctypes.byref(user_time),
+        )
+        if not ok:
+            return None
+        return _filetime_to_unix(creation)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _linux_process_create_time(pid: int, *, proc_root: Optional[Path] = None) -> Optional[float]:
+    """
+    Время СОЗДАНИЯ процесса из ``/proc/<pid>/stat`` (поле 22, ``starttime`` —
+    в тиках с момента загрузки системы) + ``btime`` из ``/proc/stat`` (момент
+    загрузки, Unix epoch) — GAP-311 Н1. ``proc_root`` — точка подмены для
+    тестов (реальный ``/proc`` на CI недетерминирован).
+    """
+    root = Path(proc_root) if proc_root else Path("/proc")
+    try:
+        stat_text = (root / str(pid) / "stat").read_text()
+        # ``comm`` (имя процесса) — в круглых скобках и МОЖЕТ содержать
+        # пробелы/скобки само по себе, поэтому режем по ПОСЛЕДНЕЙ ")" в
+        # строке, а не по первому пробелу.
+        rparen = stat_text.rindex(")")
+        fields_after_comm = stat_text[rparen + 2:].split()
+        starttime_ticks = int(fields_after_comm[19])  # 20-е поле после comm — starttime
+
+        btime = None
+        for line in (root / "stat").read_text().splitlines():
+            if line.startswith("btime "):
+                btime = int(line.split()[1])
+                break
+        if btime is None:
+            return None
+
+        try:
+            clk_tck = os.sysconf("SC_CLK_TCK")
+        except (ValueError, AttributeError, OSError):
+            clk_tck = 100
+        return float(btime) + starttime_ticks / float(clk_tck)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def process_create_time(pid: int) -> Optional[float]:
+    """
+    Unix epoch секунд, когда процесс ``pid`` был СОЗДАН ОС — не когда мы его
+    впервые увидели (GAP-311 Н1).
+
+    ЗАЧЕМ. Единственный надёжный признак «это тот же самый процесс между
+    двумя проверками», устойчивый к переиспользованию pid: сверка «файл
+    состояния сам с собой» (см. ``standkit_hub.instance._same_process_as_recorded``,
+    исходный баг ревью — старый хаб завершился, ОС отдала его pid левому
+    ``sleep 600``, а сверка "текущий файл состояния всё ещё описывает этот
+    pid" тривиально совпадала САМА С СОБОЙ и подтверждала подмену). Время
+    создания процесса читается заново из ОС при каждой проверке, а не из
+    файла, который сам процесс не переписывает после переиспользования pid.
+
+    ``None`` — платформа не поддерживается (macOS и прочее не-Windows/не-Linux)
+    либо ЛЮБОЙ сбой (WinAPI недоступен, ``/proc`` недоступен, permission
+    denied, процесс уже завершился между вызовами) — вызывающий код честно
+    трактует это как «не подтверждено», а НЕ как «подтверждено, что тот же».
+    """
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            return _windows_process_create_time(kernel32, pid)
+        if sys.platform.startswith("linux"):
+            return _linux_process_create_time(pid)
+        return None
     except Exception:
         return None
 
