@@ -73,6 +73,7 @@ from standkit.lifecycle import AdoptionRequired, AdoptionUnavailable, LifecycleE
 from standkit.models import HostKind, Stand, Transport
 from standkit.registry import Registry, RegistryError, default_registry_path
 from standkit.secrets import SecretError, delete_secret, has_secret, set_secret
+from standkit_hub import consent_api
 from standkit_hub import license_api
 from standkit_hub import logs_browser
 from standkit_hub import pick_dialog
@@ -2293,6 +2294,74 @@ def make_handler(
             payload["ok"] = True
             self._send_json(200, payload)
 
+        # --- API: согласия MCP («Данные и телеметрия», GAP-332) ---
+        #
+        # Хаб — тот же тонкий прокси к CLI, что у лицензии выше (см.
+        # standkit_hub/consent_api.py): своей логики согласий у диспетчера нет.
+        # Отличие от лицензии — раздел виден ВСЕГДА, в т.ч. без CLI: там где
+        # лицензия отвечала 503 на отсутствие CLI, согласия отвечают 200 со
+        # сводкой `available: false` — раздел обязан показать причину текстом
+        # (см. docstring consent_api._unavailable_snapshot).
+
+        def _consent_settings(self):
+            """Секция ``companion`` свежего конфига — тот же путь к CLI, что и
+            у лицензии (poле ``mcp_cli``), второго не заводим."""
+            return _load_config(config_path).companion
+
+        def _api_consent_get(self) -> None:
+            self._send_json(200, consent_api.consent_info(self._consent_settings()))
+
+        def _api_consent_post(self) -> None:
+            """Изменить одно или несколько согласий одним вызовом CLI.
+
+            Принимаются ТОЛЬКО четыре известных флага (см.
+            ``consent_api.CONSENT_FLAGS``) — любое другое поле в теле — 400, а
+            не тихий игнор: раздел про приватность обязан явно отказать на
+            непонятный ввод, а не угадывать намерение. Значение каждого флага
+            обязано быть булевым — строка `"true"` тут не булево значение,
+            даже если выглядит похоже.
+            """
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            unknown = sorted(set(body.keys()) - set(consent_api.CONSENT_FLAGS.keys()))
+            if unknown:
+                self._send_json(400, {
+                    "ok": False,
+                    "error": f"неизвестное поле в теле запроса: {unknown[0]}",
+                    "detail": f"допустимые поля: {', '.join(sorted(consent_api.CONSENT_FLAGS.keys()))}",
+                })
+                return
+            flags: dict = {}
+            for name in consent_api.CONSENT_FLAGS:
+                if name not in body:
+                    continue
+                value = body[name]
+                if not isinstance(value, bool):
+                    self._send_json(400, {
+                        "ok": False,
+                        "error": f"поле '{name}' обязано быть булевым значением (true/false)",
+                        "detail": "",
+                    })
+                    return
+                flags[name] = value
+            try:
+                # `consent_set` само уже не бросает `ConsentCliError` (см. его
+                # docstring, ревью Opus Б3) — try/except здесь defense-in-depth,
+                # тот же контур, что у мутаций лицензии: неожиданное исключение
+                # из consent_api не имеет права оборвать соединение молча.
+                snapshot = consent_api.consent_set(self._consent_settings(), flags)
+            except consent_api.ConsentCliError as exc:
+                self._send_json(200, {
+                    "ok": True,
+                    "available": False,
+                    "reason": exc.detail or exc.error,
+                    "cli": None,
+                    "cli_source": None,
+                })
+                return
+            self._send_json(200, snapshot)
+
         # --- API: нативный выбор файла/каталога ---
 
         def _api_pick(self) -> None:
@@ -2521,6 +2590,14 @@ def make_handler(
                 self._api_license_get()
                 return
 
+            if path == "/api/consent":
+                # Сводка согласий (GAP-332) — обычное чтение, доступна и без
+                # лицензии, и без CLI (см. _api_consent_get / consent_api).
+                if not self._authorize_read():
+                    return
+                self._api_consent_get()
+                return
+
             if path == "/api/companion/status":
                 # Чтение статуса канала — обычный GET /api/*: токен из cookie
                 # ИЛИ заголовка. Отвечает и при выключенном канале (см.
@@ -2633,6 +2710,15 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_license_file()
+                return
+
+            if path == "/api/consent":
+                # Мутация согласий (GAP-332) — тот же double-submit + локальный
+                # Origin, что у прочих мутаций; послаблений «это же локально»
+                # нет и здесь.
+                if not self._authorize_mutation():
+                    return
+                self._api_consent_post()
                 return
 
             if path == "/api/pick":

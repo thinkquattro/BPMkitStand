@@ -2787,6 +2787,188 @@
     bindOverlayDismiss(byId("license-crit-overlay"), closeLicenseCritModal);
   }
 
+  // --- «Данные и телеметрия» (согласия MCP, GAP-332) ---
+  //
+  // Хаб — тонкий прокси к CLI (см. standkit_hub/consent_api.py): своей логики
+  // согласий здесь нет. Раздел показывается ВСЕГДА, в т.ч. в свободной
+  // редакции и без CLI рядом — там вместо переключателей #consent-unavailable
+  // (тот же приём, что #license-unavailable).
+
+  // Период опроса СОГЛАСОВАН с TTL кэша сводки на хабе (`consent_api.
+  // CACHE_TTL_SEC` = 60 с, ревью Opus М9): опрашивать чаще бессмысленно —
+  // ответ всё равно придёт из того же кэша, опрашивать заметно реже означало
+  // бы, что переключённое из другой вкладки/CLI согласие видно с большой
+  // задержкой. 60 секунд — ровно TTL, не быстрее и не медленнее его.
+  const CONSENT_POLL_MS = 60000;
+
+  const CONSENT_FIELDS = [
+    ["analytics", "consent-analytics"],
+    ["attach_logs", "consent-attach-logs"],
+    ["pattern_submission", "consent-pattern-submission"],
+    ["candidate_submission", "consent-candidate-submission"],
+  ];
+
+  let lastConsent = null;
+
+  /** Ставит переключатели формы по ответу CLI. Каждое поле — объект
+   * `{value, decided, decided_at}` (контракт `consent-info --json`); здесь
+   * нужно только `value`, `decided`/`decided_at` идут в текст ниже. */
+  function applyConsentToggles(snapshot) {
+    CONSENT_FIELDS.forEach(([field, elementId]) => {
+      const input = byId(elementId);
+      if (!input) return;
+      const entry = snapshot[field] || {};
+      input.checked = Boolean(entry.value);
+    });
+  }
+
+  /** Есть ли неотправленные накопленные данные телеметрии. CLI-контракт
+   * переезжает с `pending_days` (число суток — по факту недостижимое, глубже
+   * периода истории у CLI нет) на `has_pending` (bool); на время
+   * рассинхронизации веток принимаются ОБА варианта, иначе ветки блокируют
+   * друг друга (ревью Opus В5): `has_pending`, если он есть, иначе истинность
+   * `pending_days`. */
+  function consentHasPending(telemetry) {
+    if (Object.prototype.hasOwnProperty.call(telemetry, "has_pending")) {
+      return Boolean(telemetry.has_pending);
+    }
+    return Boolean(Number(telemetry.pending_days));
+  }
+
+  /** Строка состояния: «последняя отправка: … · накоплено: … · приёмник: …
+   * · установка …<хвост>». Приёмник — ТОЛЬКО хост (см. contract
+   * telemetry.backend_host), без схемы и пути — иначе строка выглядит как
+   * кликабельный адрес, которым не является. */
+  function renderConsentTelemetryStatus(snapshot) {
+    const el = byId("consent-telemetry-status");
+    if (!el) return;
+    const telemetry = snapshot.telemetry || {};
+    const lastSent = telemetry.last_sent_at ? formatDate(telemetry.last_sent_at) : "не было";
+    const pendingText = consentHasPending(telemetry)
+      ? "есть неотправленные данные"
+      : "нет неотправленных данных";
+    const backendHost = telemetry.backend_host || "—";
+    const tail = snapshot.install_id_tail ? `…${snapshot.install_id_tail}` : "—";
+    el.textContent =
+      `последняя отправка: ${lastSent} · накоплено: ${pendingText} · ` +
+      `приёмник: ${backendHost} · установка ${tail}`;
+  }
+
+  function renderConsentEulaStatus(snapshot) {
+    const el = byId("consent-eula-status");
+    if (!el) return;
+    el.textContent = snapshot.eula_accepted_at
+      ? `Соглашение принято: ${formatDate(snapshot.eula_accepted_at)}`
+      : "Соглашение не принято";
+  }
+
+  /** Предупреждение о повреждённом файле согласий (ревью Opus В4): CLI при
+   * `consent_file_corrupted: true` отдаёт умолчания, но САМ файл не
+   * перезаписывает — первое же переключение здесь запишет его заново.
+   * Раздел обязан сказать это ДО клика, иначе выглядит как «настоящие»
+   * значения, которых на диске нет вовсе. */
+  function renderConsentCorruptedWarning(snapshot) {
+    const el = byId("consent-corrupted-warning");
+    if (!el) return;
+    if (!snapshot.consent_file_corrupted) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    el.hidden = false;
+    el.textContent =
+      "Файл согласий повреждён — показаны умолчания. Изменение любого " +
+      "переключателя перезапишет файл." +
+      (snapshot.detail ? ` (${snapshot.detail})` : "");
+  }
+
+  function renderConsentPane(snapshot) {
+    const unavailable = byId("consent-unavailable");
+    const content = byId("consent-content");
+    if (!snapshot.available) {
+      content.hidden = true;
+      unavailable.hidden = false;
+      unavailable.textContent =
+        `Проверить согласия не удалось: ${snapshot.reason || "CLI BPMkit недоступен"}. ` +
+        "Укажите путь к CLI в «Настройки → Основные», поле «CLI BPMkit».";
+      return;
+    }
+    unavailable.hidden = true;
+    content.hidden = false;
+    applyConsentToggles(snapshot);
+    renderConsentTelemetryStatus(snapshot);
+    renderConsentEulaStatus(snapshot);
+    renderConsentCorruptedWarning(snapshot);
+  }
+
+  function applyConsent(snapshot) {
+    lastConsent = snapshot;
+    renderConsentPane(snapshot);
+  }
+
+  async function refreshConsent() {
+    try {
+      const data = await apiGet("/api/consent");
+      applyConsent(data);
+      byId("consent-error").textContent = "";
+    } catch (e) {
+      byId("consent-error").textContent = describeApiError(e);
+    }
+  }
+
+  /** Один переключатель → один POST с ровно одним изменённым флагом.
+   * Отдельные запросы, а не «собрать все четыре и отправить одним» — так
+   * промах в одном чекбоксе откатывается сам собой (ответ несёт свежий
+   * снимок), не трогая остальные три. */
+  async function sendConsentFlag(field, value) {
+    const statusEl = byId("consent-status");
+    const errorEl = byId("consent-error");
+    statusEl.textContent = "Сохранение…";
+    try {
+      const data = await apiSend("POST", "/api/consent", { [field]: value });
+      applyConsent(data);
+      statusEl.textContent = "Сохранено";
+      errorEl.textContent = "";
+    } catch (e) {
+      // Откат чекбокса на предыдущее значение — иначе UI показывает состояние,
+      // которого сервер не подтвердил.
+      if (lastConsent) applyConsentToggles(lastConsent);
+      statusEl.textContent = "";
+      errorEl.textContent = describeApiError(e);
+    }
+  }
+
+  function openConsentPreview() {
+    const overlay = byId("consent-preview-overlay");
+    if (!overlay) return;
+    const text = (lastConsent && lastConsent.preview) || "Предпросмотр недоступен.";
+    // textContent, НЕ innerHTML: preview — текст от CLI, доверять ему как
+    // разметке нельзя (см. комментарий у самой модалки в index.html).
+    byId("consent-preview-text").textContent = text;
+    overlay.hidden = false;
+  }
+
+  function closeConsentPreview() {
+    const overlay = byId("consent-preview-overlay");
+    if (overlay) overlay.hidden = true;
+  }
+
+  function setupConsentPane() {
+    CONSENT_FIELDS.forEach(([field, elementId]) => {
+      const input = byId(elementId);
+      if (!input) return;
+      input.addEventListener("change", () => sendConsentFlag(field, input.checked));
+    });
+    const previewBtn = byId("consent-preview-btn");
+    if (previewBtn) previewBtn.addEventListener("click", openConsentPreview);
+    const closeBtn = byId("consent-preview-close-btn");
+    if (closeBtn) closeBtn.addEventListener("click", closeConsentPreview);
+    const closeFooterBtn = byId("consent-preview-close-footer-btn");
+    if (closeFooterBtn) closeFooterBtn.addEventListener("click", closeConsentPreview);
+    const overlay = byId("consent-preview-overlay");
+    if (overlay) bindOverlayDismiss(overlay, closeConsentPreview);
+  }
+
   // --- нативный выбор файла/каталога (POST /api/pick) ---
   //
   // Браузерный <input type="file"> отдаёт содержимое файла, но не путь, а полям
@@ -3371,6 +3553,7 @@
     setupAgentTab();
     setupUpdatesDialog();
     setupLicensePane();
+    setupConsentPane();
     setupPickButtons();
     setupSettingsForm();
     setupStatePanel();
@@ -3391,6 +3574,10 @@
     // того, как человек что-то нажмёт, а не после захода в настройки.
     refreshLicense();
     setInterval(refreshLicense, LICENSE_POLL_MS);
+    // Согласия — раздел независимый от лицензии (виден и без неё). Интервал —
+    // CONSENT_POLL_MS, согласованный с TTL кэша сводки на хабе (60 с).
+    refreshConsent();
+    setInterval(refreshConsent, CONSENT_POLL_MS);
     refreshElevation();
     loadSettings().catch((e) => {
       document.getElementById("settings-status").textContent = `Ошибка загрузки настроек: ${describeApiError(e)}`;
