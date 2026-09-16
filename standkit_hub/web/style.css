@@ -326,6 +326,16 @@ body {
   cursor: pointer;
 }
 
+/* .topbar-btn задаёт квадрат 34×34 — у щита есть подпись, и в квадрате она
+   переносилась в две строки поверх рамки (живьём 16.09.2026). Ширина по
+   содержимому, подпись в одну строку. */
+.topbar-btn.elevation-btn {
+  width: auto;
+  height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
 .elevation-btn:hover {
   background: color-mix(in srgb, var(--bpmkit-down) 22%, transparent);
 }
@@ -346,8 +356,9 @@ body {
   display: none;
 }
 
-[data-view="compact"] .elevation-btn {
-  padding: 4px 8px;
+[data-view="compact"] .topbar-btn.elevation-btn {
+  width: 34px;
+  padding: 0;
   gap: 0;
 }
 

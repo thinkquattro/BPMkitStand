@@ -242,9 +242,10 @@ _WAS_DOWN_MARKERS = (
 )
 
 WAS_DOWN_HINT = (
-    "\n\nПохоже, остановлена служба IIS: appcmd не может обратиться к службе "
-    "активации Windows (WAS). Запустите службы WAS и W3SVC (`sc start WAS`, "
-    "`sc start W3SVC`, либо `iisreset /start`) и повторите операцию."
+    "\n\nПохоже, остановлена служба IIS (WAS или W3SVC — «Служба веб-публикаций»): "
+    "сайт не запустится, пока она не работает. Запустите службы от имени "
+    "администратора (`sc start WAS`, `sc start W3SVC` либо `iisreset /start`) и "
+    "повторите операцию."
 )
 
 # Транзиентный сбой канала управления IIS: RPC до WAS отвалился (служба
@@ -388,12 +389,24 @@ def _appcmd_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> sub
 
     assert last is not None
     text = str(last)
-    if _looks_like_transient_rpc(text):
-        raise HostingError(text + TRANSIENT_RPC_HINT) from last
     if _looks_like_elevation_error(text):
         raise IisElevationError(text + ELEVATION_HINT) from last
+    # Без прав администратора appcmd не работает в принципе, и Windows
+    # формулирует отказ как угодно — в том числе как «подключение разорвано»
+    # (0x80010006). Поэтому проверка прав идёт РАНЬШЕ классификации сбоя RPC.
     if _process_is_elevated() is False:
         raise IisElevationError(text + ELEVATION_HINT) from last
+    if _looks_like_transient_rpc(text):
+        # Живьём 16.09.2026 (iis19, диспетчер с правами): `appcmd start site`
+        # при ОСТАНОВЛЕННОЙ службе W3SVC отвечает тем же 0x80010006, что и
+        # транзиентный обрыв. Подсказка «повторите» там бесполезна — сначала
+        # сверяемся с состоянием служб.
+        down = _iis_services_down()
+        if down:
+            raise IisServiceUnavailableError(
+                text + WAS_DOWN_HINT + " Сейчас остановлены: %s." % ", ".join(down)
+            ) from last
+        raise HostingError(text + TRANSIENT_RPC_HINT) from last
     if _looks_like_was_down(text):
         down = _iis_services_down()
         suffix = WAS_DOWN_HINT
