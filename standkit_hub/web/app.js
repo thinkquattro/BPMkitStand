@@ -3166,9 +3166,16 @@
       // Пустое поле означает «взять дефолт» — показываем, какой именно, чтобы
       // пользователю не приходилось гадать или лезть в --help.
       const fallback = defaults[field];
+      // Сервер для run_dir/log_dir отдаёт пустой дефолт (резолв каталога идёт
+      // позже), а «не задано» читалось как «диспетчер работает без каталога».
+      // Показываем фактический каталог по умолчанию (приёмка 16.09.2026).
+      const KNOWN_DEFAULTS = {
+        run_dir: "по умолчанию: ~\\.standkit\\run",
+        log_dir: "по умолчанию: ~\\.standkit\\logs",
+      };
       input.placeholder =
         fallback === undefined || fallback === null || fallback === ""
-          ? "не задано"
+          ? (KNOWN_DEFAULTS[field] || "не задано")
           : String(fallback);
     });
     form.elements.namedItem("insecure").checked = !!data.insecure;

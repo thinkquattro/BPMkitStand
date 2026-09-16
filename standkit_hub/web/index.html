@@ -518,31 +518,63 @@
           <div class="settings-pane active" data-pane="general">
             <h2>Основные</h2>
             <label>Реестр стендов
+              <span class="field-help" tabindex="0" role="img"
+                    aria-label="Файл со списком стендов — общий с MCP-сервером BPMkit. Пример: C:\Users\Имя\AppData\Roaming\BPMkit\projects.json"
+                    data-tip="Файл со списком стендов — общий с MCP-сервером BPMkit. Пример: C:\Users\Имя\AppData\Roaming\BPMkit\projects.json">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+                  <circle cx="10" cy="10" r="8.5" stroke="currentColor" stroke-width="1.4" />
+                  <path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .8-1 1.5" stroke="currentColor"
+                        stroke-width="1.4" stroke-linecap="round" fill="none" />
+                  <circle cx="10" cy="14.2" r="0.9" fill="currentColor" />
+                </svg>
+              </span>
               <span class="path-row">
                 <input type="text" name="registry_path" />
                 <button type="button" class="pick-btn" data-pick="file" data-pick-for="registry_path"
                         title="Выбрать файл">…</button>
               </span>
-              <small class="field-hint">Файл <code>projects.json</code>, общий с BPMkit.</small>
             </label>
             <!-- CLI BPMkit — раньше жило только в «Настройки → Обновления», а тот
                  раздел виден лишь при действующей лицензии (см. rail-updates выше):
                  в свободной редакции путь к CLI поправить было НЕЧЕМ, хотя сам CLI
                  (проверка лицензии, версия MCP) нужен независимо от неё. Поле
                  (name="companion_mcp_cli") — то же самое, форма одна на все вкладки;
-                 переехало сюда, а не задублировалось. -->
+                 переехало сюда, а не задублировалось.
+
+                 Длинная серая подсказка под полем (решение владельца 16.09.2026)
+                 переехала в иконку field-help рядом с подписью; под полем остаётся
+                 ТОЛЬКО короткая строка статуса "Сейчас используется: …" / "Сейчас:
+                 CLI не найден" — её рендерит renderCliHint (app.js), id
+                 cli-current-hint трогать нельзя. -->
             <label>CLI BPMkit
+              <span class="field-help" tabindex="0" role="img"
+                    aria-label="Команда запуска MCP-сервера BPMkit — по ней диспетчер проверяет лицензию и узнаёт версию MCP. Пусто — ищется рядом с установкой BPMkit. Пример: C:\Program Files\BPMkit\server\BPMkit.exe или &quot;python.exe&quot; &quot;C:\…\BPMkit\server\main.py&quot;"
+                    data-tip="Команда запуска MCP-сервера BPMkit — по ней диспетчер проверяет лицензию и узнаёт версию MCP. Пусто — ищется рядом с установкой BPMkit. Пример: C:\Program Files\BPMkit\server\BPMkit.exe или &quot;python.exe&quot; &quot;C:\…\BPMkit\server\main.py&quot;">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+                  <circle cx="10" cy="10" r="8.5" stroke="currentColor" stroke-width="1.4" />
+                  <path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .8-1 1.5" stroke="currentColor"
+                        stroke-width="1.4" stroke-linecap="round" fill="none" />
+                  <circle cx="10" cy="14.2" r="0.9" fill="currentColor" />
+                </svg>
+              </span>
               <span class="path-row">
                 <input type="text" name="companion_mcp_cli" />
                 <button type="button" class="pick-btn" data-pick="file" data-pick-for="companion_mcp_cli"
                         title="Выбрать файл">…</button>
               </span>
-              <small class="field-hint">Нужен для проверки лицензии и версии MCP. Пусто — автопоиск рядом
-                с установкой BPMkit. Можно указать исполняемый файл или команду: <code>"python.exe"
-                "…\BPMkit\server\main.py"</code>.</small>
               <small class="field-hint" id="cli-current-hint">Сейчас: —</small>
             </label>
             <label>Каталог pid-файлов
+              <span class="field-help" tabindex="0" role="img"
+                    aria-label="Куда диспетчер записывает номера процессов запущенных им стендов, чтобы находить и останавливать их после перезапуска. Пусто — каталог по умолчанию ~\.standkit\run. Пример: D:\BPMkit\run"
+                    data-tip="Куда диспетчер записывает номера процессов запущенных им стендов, чтобы находить и останавливать их после перезапуска. Пусто — каталог по умолчанию ~\.standkit\run. Пример: D:\BPMkit\run">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+                  <circle cx="10" cy="10" r="8.5" stroke="currentColor" stroke-width="1.4" />
+                  <path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .8-1 1.5" stroke="currentColor"
+                        stroke-width="1.4" stroke-linecap="round" fill="none" />
+                  <circle cx="10" cy="14.2" r="0.9" fill="currentColor" />
+                </svg>
+              </span>
               <span class="path-row">
                 <input type="text" name="run_dir" />
                 <button type="button" class="pick-btn" data-pick="dir" data-pick-for="run_dir"
@@ -550,14 +582,33 @@
               </span>
             </label>
             <label>Каталог логов
+              <span class="field-help" tabindex="0" role="img"
+                    aria-label="Куда пишется вывод стендов, запущенных диспетчером (stdout/stderr). Пусто — каталог по умолчанию ~\.standkit\logs. Пример: D:\BPMkit\logs"
+                    data-tip="Куда пишется вывод стендов, запущенных диспетчером (stdout/stderr). Пусто — каталог по умолчанию ~\.standkit\logs. Пример: D:\BPMkit\logs">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+                  <circle cx="10" cy="10" r="8.5" stroke="currentColor" stroke-width="1.4" />
+                  <path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .8-1 1.5" stroke="currentColor"
+                        stroke-width="1.4" stroke-linecap="round" fill="none" />
+                  <circle cx="10" cy="14.2" r="0.9" fill="currentColor" />
+                </svg>
+              </span>
               <span class="path-row">
                 <input type="text" name="log_dir" />
                 <button type="button" class="pick-btn" data-pick="dir" data-pick-for="log_dir"
                         title="Выбрать папку">…</button>
               </span>
-              <small class="field-hint">Сюда пишется вывод стендов, запущенных диспетчером.</small>
             </label>
             <label>Опрашивать стенды каждые, сек
+              <span class="field-help" tabindex="0" role="img"
+                    aria-label="Как часто проверять состояние стендов (порт, HTTP, БД, Redis). Меньше — быстрее видны изменения, но больше нагрузка. Минимум и значение по умолчанию — как в поле. Пример: 10"
+                    data-tip="Как часто проверять состояние стендов (порт, HTTP, БД, Redis). Меньше — быстрее видны изменения, но больше нагрузка. Минимум и значение по умолчанию — как в поле. Пример: 10">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+                  <circle cx="10" cy="10" r="8.5" stroke="currentColor" stroke-width="1.4" />
+                  <path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .8-1 1.5" stroke="currentColor"
+                        stroke-width="1.4" stroke-linecap="round" fill="none" />
+                  <circle cx="10" cy="14.2" r="0.9" fill="currentColor" />
+                </svg>
+              </span>
               <input type="number" name="refresh_interval_sec" min="1" max="3600" />
             </label>
             <div class="panel-toolbar pane-actions">
