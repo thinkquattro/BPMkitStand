@@ -1581,17 +1581,48 @@
   // операции, чтобы не дублировать запрос на каждый из трёх потребителей.
   let lastElevationData = null;
 
+  // Состояние → (data-elev-state, title/aria-label кнопки-щита). Решение
+  // владельца 16.09.2026: на Windows щит виден ВСЕГДА, а не только без прав
+  // (пересматривает решение 15.09.2026) — цвет и подпись несут сам статус.
+  function elevationButtonPresentation(data) {
+    if (data.elevated === true) {
+      return {
+        state: "ok",
+        title: "Диспетчер работает с правами администратора",
+        label: "Есть права администратора",
+      };
+    }
+    if (data.elevated === false) {
+      return {
+        state: "bad",
+        title: "Нет прав администратора — управление стендами IIS недоступно. "
+          + "Нажмите, чтобы перезапустить диспетчер с правами администратора.",
+        label: "Нет прав администратора — перезапустить с правами",
+      };
+    }
+    return {
+      state: "unknown",
+      title: "Не удалось определить права администратора",
+      label: "Права администратора не определены",
+    };
+  }
+
   async function refreshElevation() {
     const btn = document.getElementById("elevation-btn");
     try {
       const data = await apiGet("/api/hub/elevation");
       lastElevationData = data;
-      // Щит в шапке виден РОВНО в одном случае: ОС умеет повышать права
-      // (supported), их сейчас точно нет (elevated === false — не null,
-      // "неизвестно" щита не показывает) и перезапуск возможен (can_restart).
-      // На Linux/macOS и когда прав уже достаточно — щита нет вовсе (решение
-      // владельца 15.09.2026).
-      if (btn) btn.hidden = !(data && data.supported && data.elevated === false && data.can_restart);
+      // supported=false (не Windows) — щита нет вовсе: повышать нечего.
+      // На Windows щит виден при любом elevated (true/false/null).
+      if (btn) {
+        btn.hidden = !(data && data.supported);
+        if (data && data.supported) {
+          const presentation = elevationButtonPresentation(data);
+          btn.dataset.elevState = presentation.state;
+          btn.title = presentation.title;
+          btn.setAttribute("aria-label", presentation.label);
+        }
+      }
       updateAboutElevation(data);
     } catch (e) {
       if (btn) btn.hidden = true;
@@ -1947,7 +1978,21 @@
 
   function setupElevation() {
     const btn = document.getElementById("elevation-btn");
-    if (btn) btn.addEventListener("click", () => restartElevatedFlow(btn));
+    // Клик — только когда прав правда нет (перезапуск с правами через UAC).
+    // При elevated=true щит просто показывает «всё в порядке» и ведёт в
+    // «О программе», ничего не перезапуская; при elevated=null (не
+    // определили) кликать нечем — оставляем клик тем же переходом.
+    if (btn) {
+      btn.addEventListener("click", () => {
+        if (lastElevationData && lastElevationData.elevated === false) {
+          restartElevatedFlow(btn);
+          return;
+        }
+        // elevated === true (всё в порядке) или null (не определили) —
+        // перезапускать нечего, ведём в «О программе».
+        openSettings("about");
+      });
+    }
     const restartOverlayCloseBtn = document.getElementById("restart-overlay-close-btn");
     if (restartOverlayCloseBtn) restartOverlayCloseBtn.addEventListener("click", hideRestartOverlay);
     const elevatedOpOverlayCloseBtn = document.getElementById("elevated-op-overlay-close-btn");
@@ -2189,16 +2234,10 @@
         : ", чтобы начала работать новая версия: перезагрузка плагина MCP-сервер заново не поднимает.";
     }
 
-    const mcpVersionEl = byId("about-mcp-version");
-    if (mcpVersionEl) mcpVersionEl.textContent = current || "как в поставке";
-    // Строка состояния внизу: версия MCP известна только каналу обновлений;
-    // пока её нет — сегмент скрыт, а не показывает прочерк.
-    const slMcp = byId("sl-mcp");
-    const slMcpVersion = byId("sl-mcp-version");
-    if (slMcp && slMcpVersion) {
-      slMcpVersion.textContent = current || "—";
-      slMcp.hidden = !current;
-    }
+    // Фактическая версия MCP — единая функция-источник правды (см.
+    // renderMcpVersion): current из канала — один из двух источников, вызов
+    // после его обновления актуализирует и «О программе», и статус-строку.
+    renderMcpVersion();
   }
 
   function renderCompanionStatus(status) {
@@ -2503,7 +2542,7 @@
       unavailable.hidden = false;
       unavailable.textContent =
         `Проверить лицензию не удалось: ${snapshot.detail || "CLI BPMkit недоступен"}. ` +
-        "Укажите путь к CLI в разделе «Обновления».";
+        "Укажите путь к CLI в «Настройки → Основные».";
     } else {
       unavailable.hidden = true;
     }
@@ -2534,6 +2573,52 @@
       LICENSE_SOURCE_LABELS[snapshot.source] || snapshot.source || "—";
   }
 
+  // «Сейчас используется: <команда>» / «Сейчас: CLI не найден» под полем «CLI
+  // BPMkit» (Настройки → Основные). ``cli`` — итоговая команда строкой
+  // (subprocess.list2cmdline на хабе) или null, если резолв ничего не нашёл.
+  function renderCliHint(snapshot) {
+    const hint = byId("cli-current-hint");
+    if (!hint) return;
+    hint.textContent = snapshot && snapshot.cli
+      ? `Сейчас используется: ${snapshot.cli}`
+      : "Сейчас: CLI не найден";
+  }
+
+  // Единственный источник правды для фактической версии MCP — читают и экран
+  // лицензии (renderMcpRow не звонит до первого ответа канала обновлений, а
+  // /api/license отвечает и в свободной редакции), и статус канала. Приоритет
+  // (GAP-311/CLI-версия): (а) license.mcp_version — CLI сказал явно; (б)
+  // current_version канала обновлений (тот же MCP, но по данным канала); (в)
+  // иначе честно «неизвестна», с уточнением, если известно, что CLI вовсе не
+  // найден (снимок лицензии cli === null).
+  function renderMcpVersion() {
+    const lic = lastLicense || {};
+    const rel = releasesBlock(lastCompanionStatus);
+    const version = String(lic.mcp_version || rel.current_version || "").trim();
+
+    const mcpVersionEl = byId("about-mcp-version");
+    if (mcpVersionEl) {
+      mcpVersionEl.textContent = version
+        || (lic.cli === null ? "неизвестна — не найден CLI BPMkit" : "неизвестна");
+    }
+
+    // Строка состояния внизу: сегмент не прячем даже без версии — «MCP
+    // неизвестна» видно всегда, а подсказка (title) ведёт чинить это в
+    // «Настройки → Основные», поле «CLI BPMkit».
+    const slMcp = byId("sl-mcp");
+    const slMcpVersion = byId("sl-mcp-version");
+    if (slMcp && slMcpVersion) {
+      slMcp.hidden = false;
+      if (version) {
+        slMcpVersion.textContent = version;
+        slMcp.removeAttribute("title");
+      } else {
+        slMcpVersion.textContent = "неизвестна";
+        slMcp.title = "Версия MCP неизвестна — укажите CLI BPMkit в «Настройки → Основные»";
+      }
+    }
+  }
+
   function applyLicense(snapshot) {
     lastLicense = snapshot;
     // «Есть лицензия» = действующая (в т.ч. истекающая). Истёкшая/отозванная —
@@ -2550,6 +2635,8 @@
     renderLicensePane(snapshot);
     renderLicenseBanners(snapshot);
     renderLicenseStatusline(snapshot);
+    renderCliHint(snapshot);
+    renderMcpVersion();
     maybeShowLicenseCritModal(snapshot);
   }
 

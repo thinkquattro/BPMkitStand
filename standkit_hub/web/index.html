@@ -71,16 +71,26 @@
        rel="noopener" title="Справка — кукбук BPMkitStand" aria-label="Справка">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5V14"/><circle cx="12" cy="17" r=".7" fill="currentColor" stroke="none"/></svg>
     </a>
-    <!-- Индикатор «без прав администратора» (GAP-311). Виден ТОЛЬКО когда
-         диспетчер работает без прав на Windows (GET /api/hub/elevation): без
-         них любая IIS-операция обречена — appcmd.exe не читает даже собственную
-         конфигурацию. Это кнопка, а не значок: по клику — перезапуск через UAC.
-         С правами щита нет вовсе (решение владельца 15.09.2026). -->
-    <button id="elevation-btn" class="topbar-btn elevation-btn" type="button" hidden
-            title="Диспетчер работает без прав администратора — управление стендами IIS недоступно. Нажмите, чтобы перезапустить его с правами администратора."
-            aria-label="Без прав администратора — перезапустить с правами">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 9.5C8 19.3 5 15.5 5 11V6z"/><path d="M12 8v4"/><circle cx="12" cy="15.5" r=".7" fill="currentColor" stroke="none"/></svg>
-      <span class="elevation-btn-label">без прав администратора</span>
+    <!-- Индикатор прав администратора (GAP-311). На Windows виден ВСЕГДА
+         (supported=true у GET /api/hub/elevation) — только иконка, без
+         подписи: без прав любая IIS-операция обречена (appcmd.exe не читает
+         даже собственную конфигурацию), а С правами полезно видеть это тоже,
+         не только их отсутствие (решение владельца 16.09.2026, пересматривает
+         решение от 15.09.2026 — щит был виден только без прав). Цвет и path
+         внутри щита переключает refreshElevation через data-elev-state:
+         bad (нет прав, красный, клик — перезапуск с правами через UAC),
+         ok (есть права, зелёный, клик открывает «О программе», ничего не
+         перезапускает), unknown (не определили, серый). supported=false
+         (не Windows) — кнопка скрыта совсем. -->
+    <button id="elevation-btn" class="topbar-btn elevation-btn" type="button" hidden data-elev-state="unknown"
+            title="Не удалось определить права администратора"
+            aria-label="Права администратора не определены">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3l7 3v5c0 4.5-3 8.3-7 9.5C8 19.3 5 15.5 5 11V6z"/>
+        <path class="elevation-icon-bad" d="M12 8v4"/>
+        <circle class="elevation-icon-bad" cx="12" cy="15.5" r=".7" fill="currentColor" stroke="none"/>
+        <path class="elevation-icon-ok" d="M8.5 12.3l2.4 2.4 4.6-5"/>
+      </svg>
     </button>
     <!-- «О программе» — не модалка, а раздел настроек: то же содержимое, но
          его можно открыть рядом с версией MCP и путём к CLI, не теряя экран. -->
@@ -515,6 +525,23 @@
               </span>
               <small class="field-hint">Файл <code>projects.json</code>, общий с BPMkit.</small>
             </label>
+            <!-- CLI BPMkit — раньше жило только в «Настройки → Обновления», а тот
+                 раздел виден лишь при действующей лицензии (см. rail-updates выше):
+                 в свободной редакции путь к CLI поправить было НЕЧЕМ, хотя сам CLI
+                 (проверка лицензии, версия MCP) нужен независимо от неё. Поле
+                 (name="companion_mcp_cli") — то же самое, форма одна на все вкладки;
+                 переехало сюда, а не задублировалось. -->
+            <label>CLI BPMkit
+              <span class="path-row">
+                <input type="text" name="companion_mcp_cli" />
+                <button type="button" class="pick-btn" data-pick="file" data-pick-for="companion_mcp_cli"
+                        title="Выбрать файл">…</button>
+              </span>
+              <small class="field-hint">Нужен для проверки лицензии и версии MCP. Пусто — автопоиск рядом
+                с установкой BPMkit. Можно указать исполняемый файл или команду: <code>"python.exe"
+                "…\BPMkit\server\main.py"</code>.</small>
+              <small class="field-hint" id="cli-current-hint">Сейчас: —</small>
+            </label>
             <label>Каталог pid-файлов
               <span class="path-row">
                 <input type="text" name="run_dir" />
@@ -612,14 +639,6 @@
             <label class="checkbox-label">
               <input type="checkbox" name="companion_auto_stage_release" />
               Скачивать новую версию MCP заранее, установку подтверждаю сам
-            </label>
-            <label>CLI BPMkit
-              <span class="path-row">
-                <input type="text" name="companion_mcp_cli" />
-                <button type="button" class="pick-btn" data-pick="file" data-pick-for="companion_mcp_cli"
-                        title="Выбрать файл">…</button>
-              </span>
-              <small class="field-hint">Найден автоматически; менять нужно только при нестандартной установке.</small>
             </label>
             <div class="panel-toolbar pane-actions">
               <button type="submit">Сохранить</button>

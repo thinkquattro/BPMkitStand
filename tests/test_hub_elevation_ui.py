@@ -79,26 +79,84 @@ def test_elevation_button_markup_hidden_by_default_and_topbar_style():
     # topbar-btn — общий класс всей шапки после редизайна GAP-241; elevation-btn
     # — модификатор поверх него, а не отдельная кнопка со своим стилем с нуля.
     assert 'class="topbar-btn elevation-btn"' in html
-    # Скрыт статически: до первого ответа /api/hub/elevation щит не мигает.
+    # Скрыт статически до первого ответа /api/hub/elevation (не мигает), но
+    # решение владельца 16.09.2026: на Windows виден ВСЕГДА (не только без
+    # прав) — видимость решает refreshElevation по supported, а не по
+    # elevated.
     assert '<button id="elevation-btn" class="topbar-btn elevation-btn" type="button" hidden' in html
     # Инлайн-SVG, не эмодзи/глиф.
     assert "<svg" in html.split('id="elevation-btn"')[1].split("</button>")[0]
 
 
-def test_elevation_button_hidden_in_compact_view():
+def test_elevation_button_has_no_text_label():
+    """Решение владельца 16.09.2026: щит — только иконка, подписи в шапке нет
+    (виден он теперь всегда на Windows, а не только в редком случае "нет
+    прав", и текстовая подпись рядом с постоянно видимой кнопкой была бы
+    шумом на каждый день)."""
+    html = _read("index.html")
     css = _read("style.css")
 
-    assert '[data-view="compact"] .elevation-btn-label' in css
-    assert '[data-view="compact"] .elevation-btn' in css
+    button_html = html.split('id="elevation-btn"')[1].split("</button>")[0]
+    assert "elevation-btn-label" not in button_html
+    assert "elevation-btn-label" not in css
+    assert "без прав администратора</span>" not in button_html
+
+
+def test_elevation_button_icon_has_both_ok_and_bad_variants():
+    """Внутри щита — две альтернативные фигуры (галочка/восклицательный
+    знак), переключаемые CSS по data-elev-state, а не подмена path из JS."""
+    html = _read("index.html")
+    css = _read("style.css")
+
+    button_html = html.split('id="elevation-btn"')[1].split("</button>")[0]
+    assert "elevation-icon-ok" in button_html
+    assert "elevation-icon-bad" in button_html
+    assert '[data-elev-state="ok"] .elevation-icon-ok' in css
+    assert '[data-elev-state="bad"]' in css or '"bad"' in css
+
+
+def test_elevation_button_is_plain_square_topbar_btn_no_pill_styling():
+    """Решение владельца 16.09.2026: щит — обычный квадрат 34×34 (как у
+    остальных кнопок шапки), без своей рамки/фона-пилюли и без правила
+    ``.topbar-btn.elevation-btn`` с шириной "по содержимому" — только цвет
+    иконки несёт состояние."""
+    css = _read("style.css")
+
+    assert ".topbar-btn.elevation-btn {" not in css
 
 
 def test_elevation_button_visibility_condition_matches_contract():
     js = _read("app.js")
     body = _extract_function(js, "refreshElevation")
 
-    # Щит виден только когда ОС умеет повышать права, их СЕЙЧАС нет
-    # (elevated === false — не null/"неизвестно") и restart возможен.
-    assert "data.supported && data.elevated === false && data.can_restart" in body
+    # Видимость (supported=false — не Windows — скрывает щит совсем) НЕ
+    # зависит от elevated: на Windows щит виден и с правами, и без них.
+    assert "btn.hidden = !(data && data.supported)" in body
+    assert "data.elevated === false && data.can_restart" not in body
+
+
+def test_elevation_button_presentation_covers_all_three_states():
+    js = _read("app.js")
+    body = _extract_function(js, "elevationButtonPresentation")
+
+    assert 'state: "ok"' in body
+    assert 'state: "bad"' in body
+    assert 'state: "unknown"' in body
+    assert "Диспетчер работает с правами администратора" in body
+    assert "Нет прав администратора" in body
+    assert "Не удалось определить права администратора" in body
+
+
+def test_elevation_button_click_does_not_restart_when_already_elevated():
+    js = _read("app.js")
+    body = _extract_function(js, "setupElevation")
+
+    idx = body.index('lastElevationData.elevated === false')
+    restart_idx = body.index("restartElevatedFlow(btn)")
+    open_settings_idx = body.index('openSettings("about")')
+    # restartElevatedFlow вызывается ТОЛЬКО в ветке elevated===false; ветка
+    # "иначе" (true/null) ведёт в настройки, не трогая перезапуск.
+    assert idx < restart_idx < open_settings_idx
 
 
 # --------------------------------------------------------------------------
@@ -578,11 +636,10 @@ def test_run_elevated_op_generic_409_reenables_button_and_shows_server_text_via_
     assert g["lastStatus"]["isError"] is True
 
 
-def test_shield_is_not_squeezed_into_square_topbar_button():
+def test_shield_has_no_label_to_squeeze_into_square_topbar_button():
     """Живьём 16.09.2026: подпись щита переносилась в две строки внутри
-    квадратного .topbar-btn 34×34."""
+    квадратного .topbar-btn 34×34 — решение владельца от того же дня убрало
+    подпись целиком, а не расширило кнопку: теперь щит — обычный квадрат,
+    как все прочие кнопки шапки, без отдельного правила ширины."""
     css = (Path(__file__).resolve().parents[1] / "standkit_hub" / "web" / "style.css").read_text(encoding="utf-8")
-    start = css.index(".topbar-btn.elevation-btn {")
-    block = css[start:css.index("}", start)]
-    assert "width: auto" in block
-    assert "white-space: nowrap" in block
+    assert ".topbar-btn.elevation-btn {" not in css
