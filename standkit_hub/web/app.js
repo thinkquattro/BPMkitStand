@@ -1720,12 +1720,31 @@
     // elevated, экземпляром — контракт GAP-311), переключаемся на ожидание
     // нового по /api/version — это и есть исходное поведение перезапуска.
     let oldHubGone = false;
+    let sawPending = false;
     while (Date.now() < deadline) {
       await sleep(RESTART_POLL_MS);
       if (!oldHubGone) {
         try {
           const data = await apiGet("/api/hub/elevation");
           const restart = data && data.restart;
+          // Новый процесс может занять порт МЕЖДУ двумя опросами (старый
+          // остановился, новый поднялся быстрее интервала опроса), и обрыва
+          // связи вкладка так и не увидит — отвечать ей будет уже НОВЫЙ хаб
+          // с той же сессией. Живьём 16.09.2026: оверлей не закрывался, щит
+          // оставался красным, хотя диспетчер уже работал с правами. Признаки
+          // нового процесса: права уже есть (перезапуск предлагается только
+          // без них) либо исчезло состояние перезапуска, которое старый хаб
+          // держал «в ожидании».
+          if (data && data.elevated === true) {
+            window.location.reload();
+            return;
+          }
+          if (restart && (restart.status === "pending" || restart.status === "requesting")) {
+            sawPending = true;
+          } else if (sawPending && !restart) {
+            window.location.reload();
+            return;
+          }
           if (restart && restart.status === "refused") {
             setElevationButtonBusy(triggerBtn, false);
             showRestartOverlay(
