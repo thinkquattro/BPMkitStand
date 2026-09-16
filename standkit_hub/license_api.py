@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -137,15 +138,15 @@ def _candidate_roots(extra_roots: Optional[Sequence] = None) -> list:
     return _shared_candidate_roots(__file__, extra_roots=extra_roots)
 
 
-def find_cli(settings, *, extra_roots: Optional[Sequence] = None) -> Optional[list]:
-    """argv-префикс запуска CLI BPMkit или `None`, если рядом его нет.
+def _resolve_cli(settings, *, extra_roots: Optional[Sequence] = None) -> tuple:
+    """(argv, source) — единая точка резолва CLI для этого модуля: `find_cli` и
+    вычисление `cli`/`cli_source` для `GET /api/license` читают ОДНУ и ту же
+    функцию, а не повторяют ветки резолва по отдельности (расхождение здесь —
+    ровно тот же риск, что и до выделения `standkit.cli_resolve`, GAP-273).
 
-    `settings` — секция `companion` конфига хаба (нужно единственное поле
-    `mcp_cli`): у экрана лицензии и у канала обновлений ОДИН путь к MCP, второго
-    поля в настройках не заводим.
-
-    Порядок резолва (GAP-273; сильнее — выше) — дословно тот же, что у
-    `standkit_companion.context.find_cli` (общий хелпер `standkit.cli_resolve`):
+    `source` — `"settings"`, `"env"`, `"auto"` или `None` (CLI не найден).
+    Порядок (сильнее — выше) — дословно тот же, что у
+    `standkit_companion.context.find_cli`:
 
     1. Явная настройка `companion.mcp_cli`.
     2. Переменная окружения `BPMKIT_CLI` (тот же формат).
@@ -155,13 +156,30 @@ def find_cli(settings, *, extra_roots: Optional[Sequence] = None) -> Optional[li
     """
     configured = str(getattr(settings, "mcp_cli", "") or "").strip()
     if configured:
-        return resolve_command_string(configured)
+        return resolve_command_string(configured), "settings"
 
     from_env = str(os.environ.get(CLI_ENV_VAR, "") or "").strip()
     if from_env:
-        return resolve_command_string(from_env)
+        return resolve_command_string(from_env), "env"
 
-    return search_roots(_candidate_roots(extra_roots))
+    found = search_roots(_candidate_roots(extra_roots))
+    if found:
+        return found, "auto"
+    return None, None
+
+
+def find_cli(settings, *, extra_roots: Optional[Sequence] = None) -> Optional[list]:
+    """argv-префикс запуска CLI BPMkit или `None`, если рядом его нет.
+
+    `settings` — секция `companion` конфига хаба (нужно единственное поле
+    `mcp_cli`): у экрана лицензии и у канала обновлений ОДИН путь к MCP, второго
+    поля в настройках не заводим.
+
+    Тонкая обёртка над `_resolve_cli` — источник (`settings`/`env`/`auto`) здесь
+    не нужен, его использует только сводка лицензии (`license_info`).
+    """
+    argv, _source = _resolve_cli(settings, extra_roots=extra_roots)
+    return argv
 
 
 # ------------------------------------------------------------------------------------
@@ -207,9 +225,8 @@ def _cli_or_raise(settings) -> list:
     cli = find_cli(settings)
     if not cli:
         raise LicenseCliError(
-            "Рядом не найден CLI BPMkit — укажите путь к нему в настройках "
-            f"(раздел «Канал обновлений», поле «Путь к CLI BPMkit») либо переменной "
-            f"окружения {CLI_ENV_VAR}",
+            "Рядом не найден CLI BPMkit — укажите путь к нему в «Настройки → "
+            f"Основные», поле «CLI BPMkit», либо переменной окружения {CLI_ENV_VAR}",
             detail=describe_search_targets(_candidate_roots()),
             status=503,
         )
@@ -249,14 +266,27 @@ def _run_json(settings, tail: Sequence[str], *, run: Optional[Callable] = None,
 # ------------------------------------------------------------------------------------
 # Сводка (GET /api/license)
 # ------------------------------------------------------------------------------------
-def _free_snapshot(detail: str) -> dict:
-    """Ответ, когда CLI рядом нет: свободная редакция и честная причина.
+def _free_snapshot(detail: str, *, cli: Optional[list] = None,
+                    cli_source: Optional[str] = None) -> dict:
+    """Ответ, когда CLI рядом нет (или отказал): свободная редакция и честная причина.
 
     Это НЕ ошибка: диспетчер без MCP — штатная (и самая частая на новой машине)
     ситуация, экран лицензии обязан показать её текстом, а не пустотой.
     """
     return {"ok": True, "edition": EDITION_FREE, "status": "unavailable",
-            "detail": _clip(detail)}
+            "detail": _clip(detail), "cli": _cli_display(cli), "cli_source": cli_source}
+
+
+def _cli_display(cli: Optional[list]) -> Optional[str]:
+    """argv → команда одной строкой для UI (поле «Сейчас используется…»).
+
+    `subprocess.list2cmdline`, а не `" ".join`: аргументы с пробелами (путь
+    внутри `Program Files`, интерпретатор + скрипт) обязаны быть в кавычках,
+    иначе строка выглядит как один путь, которого нет на диске.
+    """
+    if not cli:
+        return None
+    return subprocess.list2cmdline(list(cli))
 
 
 def license_info(settings, *, run: Optional[Callable] = None,
@@ -264,9 +294,12 @@ def license_info(settings, *, run: Optional[Callable] = None,
     """Сводка лицензии для `GET /api/license` (с кэшем на `cache_ttl` секунд).
 
     Конверт сюда не попадает: `setup license-info --json` отдаёт БЕЗОПАСНУЮ сводку
-    (статус, лицензиат, тариф, хвост идентификатора, срок), а не сам ключ.
+    (статус, лицензиат, тариф, хвост идентификатора, срок), а не сам ключ. Поля
+    `cli`/`cli_source` вычисляются резолвом (без запуска CLI) — экрану настроек
+    нужно показать «сейчас используется» и источник, не тратя на это лишний
+    процесс сверх того, что уже понадобился бы для самой сводки.
     """
-    cli = find_cli(settings)
+    cli, source = _resolve_cli(settings)
     if not cli:
         return _free_snapshot(describe_search_targets(_candidate_roots()))
 
@@ -281,12 +314,14 @@ def license_info(settings, *, run: Optional[Callable] = None,
     except LicenseCliError as exc:
         # Сводка обязана отвечать всегда: отказавший CLI — это «сведений нет», а не
         # 500 на экране лицензии. Такой ответ НЕ кэшируется — починка (правка пути,
-        # установка MCP) должна быть видна сразу.
-        return {"ok": True, "edition": EDITION_FREE, "status": "unavailable",
-                "detail": exc.detail or exc.error}
+        # установка MCP) должна быть видна сразу. CLI всё же НАЙДЕН (просто не
+        # ответил) — поля cli/cli_source отдаём как есть, а не null.
+        return _free_snapshot(exc.detail or exc.error, cli=cli, cli_source=source)
 
     snapshot = dict(payload)
     snapshot["edition"] = EDITION_COMPANION
+    snapshot["cli"] = _cli_display(cli)
+    snapshot["cli_source"] = source
     _cache_put(key, snapshot, cache_ttl)
     return snapshot
 

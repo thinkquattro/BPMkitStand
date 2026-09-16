@@ -310,35 +310,13 @@ body {
   margin-left: auto;
 }
 
-/* --- индикатор прав администратора (кнопка-предупреждение в шапке) --- */
-
-.elevation-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border: 1px solid var(--bpmkit-down);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--bpmkit-down) 12%, transparent);
-  color: var(--bpmkit-down);
-  font-size: 12px;
-  line-height: 1.2;
-  cursor: pointer;
-}
-
-/* .topbar-btn задаёт квадрат 34×34 — у щита есть подпись, и в квадрате она
-   переносилась в две строки поверх рамки (живьём 16.09.2026). Ширина по
-   содержимому, подпись в одну строку. */
-.topbar-btn.elevation-btn {
-  width: auto;
-  height: 34px;
-  padding: 0 10px;
-  white-space: nowrap;
-}
-
-.elevation-btn:hover {
-  background: color-mix(in srgb, var(--bpmkit-down) 22%, transparent);
-}
+/* --- индикатор прав администратора (значок-статус в шапке, GAP-311) ---
+   Обычный .topbar-btn 34×34 без подписи и без своей рамки/фона — решение
+   владельца 16.09.2026: щит виден на Windows ВСЕГДА (не только без прав),
+   и подпись-«без прав администратора» в квадратной кнопке переносилась в
+   две строки поверх рамки (живьём 16.09.2026, ADR прежнего варианта). Цвет
+   несёт state через data-elev-state (та же палитра, что у точки статуса
+   стенда: ok/down/skipped), а не отдельная рамка-пилюля. */
 
 .elevation-btn[hidden] {
   display: none;
@@ -349,17 +327,37 @@ body {
   opacity: 0.7;
 }
 
-/* Компактный режим — та же экономия места, что у остальных подписей шапки
-   (см. [data-view="compact"] #view-toggle-btn выше): значок остаётся, текст
-   подписи прячется, кнопка становится обычным квадратным topbar-btn. */
-[data-view="compact"] .elevation-btn-label {
+.elevation-btn[data-elev-state="bad"] {
+  color: var(--bpmkit-down);
+}
+
+.elevation-btn[data-elev-state="ok"] {
+  color: var(--bpmkit-ok);
+}
+
+.elevation-btn[data-elev-state="unknown"] {
+  color: var(--bpmkit-skipped);
+}
+
+/* Внутри щита два альтернативных штриха — «нет прав» (восклицательный знак)
+   и «есть права» (галочка); refreshElevation переключает их видимость через
+   data-elev-state, а не подменяет path целиком, — так разметка остаётся
+   статически читаемой (оба варианта разом видны в исходнике, не только в JS). */
+.elevation-btn .elevation-icon-ok {
   display: none;
 }
 
-[data-view="compact"] .topbar-btn.elevation-btn {
-  width: 34px;
-  padding: 0;
-  gap: 0;
+.elevation-btn[data-elev-state="bad"] .elevation-icon-ok,
+.elevation-btn[data-elev-state="unknown"] .elevation-icon-bad {
+  display: none;
+}
+
+.elevation-btn[data-elev-state="ok"] .elevation-icon-bad {
+  display: none;
+}
+
+.elevation-btn[data-elev-state="ok"] .elevation-icon-ok {
+  display: inline;
 }
 
 /* --- индикатор связи с хабом (точка + подпись, НЕ похож на меню) --- */

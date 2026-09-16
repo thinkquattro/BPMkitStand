@@ -251,9 +251,8 @@ def resolve(settings, *, run: Optional[Callable] = None,
     cli = find_cli(settings)
     if not cli:
         raise ContextUnavailable(
-            "Рядом не найден CLI BPMkit — укажите путь к нему в настройках хаба "
-            f"(раздел «Канал обновлений», поле companion.mcp_cli) либо переменной "
-            f"окружения {CLI_ENV_VAR}",
+            "Рядом не найден CLI BPMkit — укажите путь в «Настройки → Основные», "
+            f"поле «CLI BPMkit», либо переменной окружения {CLI_ENV_VAR}",
             kind="context_unavailable",
             detail=describe_search_targets(_candidate_roots()),
         )

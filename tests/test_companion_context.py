@@ -363,7 +363,7 @@ def test_resolve_without_cli_says_what_to_fix(tmp_path, monkeypatch):
     err = info.value
     assert err.kind == "context_unavailable"
     assert err.retriable is True
-    assert "mcp_cli" in str(err), "сообщение не называет, что именно чинить"
+    assert "CLI BPMkit" in str(err), "сообщение не называет, что именно чинить"
     assert runner.calls == [], "процесс запущен, хотя запускать нечего"
 
 
@@ -379,10 +379,10 @@ def test_resolve_without_cli_mentions_env_var_and_lists_search_targets(tmp_path,
         resolve(CompanionSettings(mcp_cli=""), run=_ok_runner(), cache_ttl=0)
 
     err = info.value
-    assert "companion.mcp_cli" in str(err)
+    assert "CLI BPMkit" in str(err)
     assert CLI_ENV_VAR in str(err)
     assert str(empty_root) in err.detail, "detail не называет проверенный корень"
-    assert "companion.mcp_cli" in err.detail
+    assert "CLI BPMkit" in err.detail
     assert CLI_ENV_VAR in err.detail
 
 

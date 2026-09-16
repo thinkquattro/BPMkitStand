@@ -180,7 +180,7 @@ def test_missing_cli_message_lists_settings(tmp_path, monkeypatch):
         license_api.license_deactivate(CompanionSettings())
 
     err = exc.value
-    assert "companion.mcp_cli" not in err.error and "Путь к CLI BPMkit" in err.error
+    assert "companion.mcp_cli" not in err.error and "CLI BPMkit" in err.error
     assert CLI_ENV_VAR in err.error
     assert str(tmp_path) in err.detail
     assert CLI_ENV_VAR in err.detail
@@ -201,6 +201,30 @@ def test_license_info_returns_companion_edition_snapshot(cli_path):
     assert payload["licensee"] == "ООО Ромашка"
     assert payload["license_id_tail"] == "7f3a"
     assert runs.calls[0] == [str(cli_path), "setup", "license-info", "--json"]
+    # cli/cli_source — итоговая команда строкой и источник резолва (GAP-311/
+    # CLI-версия): экран настроек показывает «сейчас используется: …» без
+    # отдельного запроса.
+    assert payload["cli"] == str(cli_path)
+    assert payload["cli_source"] == "settings"
+
+
+def test_license_info_cli_source_is_env_or_auto(tmp_path, monkeypatch):
+    """Источник резолва различает настройку, переменную окружения и автодетект —
+    это тот же порядок, что у `find_cli`, вычисленный БЕЗ повторного запуска CLI."""
+    bin_path = tmp_path / "server" / "bpmkit.exe"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(license_api, "_candidate_roots", lambda extra_roots=None: [tmp_path])
+
+    payload = license_api.license_info(CompanionSettings(), cache_ttl=0,
+                                       run=_Runs((0, json.dumps(INFO_OK), "")))
+    assert payload["cli_source"] == "auto"
+    assert payload["cli"] == str(bin_path)
+
+    monkeypatch.setenv(CLI_ENV_VAR, str(bin_path))
+    payload = license_api.license_info(CompanionSettings(), cache_ttl=0,
+                                       run=_Runs((0, json.dumps(INFO_OK), "")))
+    assert payload["cli_source"] == "env"
 
 
 def test_license_info_without_cli_is_free_edition(tmp_path, monkeypatch):
@@ -212,6 +236,9 @@ def test_license_info_without_cli_is_free_edition(tmp_path, monkeypatch):
     assert payload["edition"] == "free"
     assert payload["status"] == "unavailable"
     assert payload["detail"]
+    # CLI не найден вовсе — оба поля пустые (не строка "None").
+    assert payload["cli"] is None
+    assert payload["cli_source"] is None
 
 
 def test_license_info_survives_broken_cli_output(cli_path):
@@ -222,6 +249,9 @@ def test_license_info_survives_broken_cli_output(cli_path):
     assert payload["edition"] == "free"
     assert payload["status"] == "unavailable"
     assert "boom" in payload["detail"]
+    # CLI НАЙДЕН (просто не ответил) — cli/cli_source не превращаются в null.
+    assert payload["cli"] == str(cli_path)
+    assert payload["cli_source"] == "settings"
 
 
 def test_license_info_tolerates_banner_around_json(cli_path):
@@ -628,6 +658,67 @@ def test_license_banners_and_statusline_exist():
     # Модальное окно про истёкшую/отозванную лицензию показывается ОДИН раз за
     # сессию вкладки: повтор на каждом опросе — травля, а не информирование.
     assert "sessionStorage" in js and "LICENSE_CRIT_SEEN_KEY" in js
+
+
+def test_cli_field_lives_in_general_pane_not_updates():
+    """Поле «CLI BPMkit» переехало в «Настройки → Основные» — в свободной
+    редакции раздел «Обновления» скрыт целиком (rail-updates hidden), и путь
+    к CLI там было нечем поправить, хотя сам CLI (проверка лицензии, версия
+    MCP) нужен независимо от лицензии."""
+    html = _web("index.html")
+
+    general_pane = html.split('data-pane="general">', 1)[1].split('data-pane="updates"', 1)[0]
+    assert 'name="companion_mcp_cli"' in general_pane
+    assert "CLI BPMkit" in general_pane
+    assert 'id="cli-current-hint"' in general_pane
+
+    updates_pane = html.split('id="settings-companion"', 1)[1].split("</div>\n\n          <!-- ── Удалённые", 1)[0]
+    assert 'name="companion_mcp_cli"' not in updates_pane
+
+
+def test_cli_hint_rendered_from_license_snapshot():
+    """«Сейчас используется: <команда>» / «Сейчас: CLI не найден» — один узел,
+    одна функция-источник, вызываемая из applyLicense (см. renderCliHint)."""
+    js = _web("app.js")
+    body = _extract_function(js, "renderCliHint")
+
+    assert 'byId("cli-current-hint")' in body
+    assert "Сейчас используется:" in body
+    assert "Сейчас: CLI не найден" in body
+    apply_license = _extract_function(js, "applyLicense")
+    assert "renderCliHint(snapshot)" in apply_license
+
+
+def _extract_function(js: str, name: str) -> str:
+    for prefix in (f"async function {name}(", f"function {name}("):
+        idx = js.find(prefix)
+        if idx != -1:
+            break
+    else:
+        raise AssertionError(f"функция {name} не найдена в app.js")
+    brace_start = js.index("{", idx)
+    depth = 0
+    for i in range(brace_start, len(js)):
+        if js[i] == "{":
+            depth += 1
+        elif js[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[idx : i + 1]
+    raise AssertionError(f"не нашли конец функции {name} (незакрытая скобка)")
+
+
+def test_mcp_version_has_single_source_of_truth_function():
+    """renderMcpVersion — единая функция, вызываемая и из статуса канала
+    обновлений, и из применения лицензии (не два расходящихся расчёта)."""
+    js = _web("app.js")
+    body = _extract_function(js, "renderMcpVersion")
+
+    assert "lic.mcp_version" in body
+    assert "rel.current_version" in body
+    assert "как в поставке" not in js
+    assert "renderMcpVersion()" in _extract_function(js, "renderMcpRow")
+    assert "renderMcpVersion()" in _extract_function(js, "applyLicense")
 
 
 def test_topbar_has_no_text_glyph_icons():

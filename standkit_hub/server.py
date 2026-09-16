@@ -102,9 +102,11 @@ from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_sh
 # ``SyntaxError``/``AttributeError`` на уровне модуля.
 try:
     import standkit_companion as _companion
+    from standkit_companion import context as _companion_context
     from standkit_companion import runner as _companion_runner
 except Exception:  # noqa: BLE001 - см. комментарий выше: битая платная редакция
     _companion = None
+    _companion_context = None
     _companion_runner = None
 
 # Порт хаба по умолчанию. ФИКСИРОВАННЫЙ осознанно: раньше хаб стартовал на
@@ -1813,6 +1815,16 @@ def make_handler(
             # Путь к CLI BPMkit мог измениться — сводка лицензии, снятая по старому
             # пути, стала неверной ровно в этот момент.
             license_api.invalidate_cache()
+            # Тот же смысл для лицензионного контекста канала обновлений
+            # (standkit_companion.context) — второй кэш поверх ТОГО ЖЕ CLI, отдельный
+            # от license_api по историческим причинам (разные потребители, разные TTL).
+            # Без сброса версия MCP/лицензия в UI обновились бы только когда протухнет
+            # его собственный TTL (до 5 минут) — «путь поправил, а не помогло».
+            if _companion_context is not None:
+                try:
+                    _companion_context.invalidate_cache()
+                except Exception:  # noqa: BLE001 - канал не роняет сохранение настроек
+                    pass
             # Тот же смысл для канала: человек только что включил цикл и ждёт
             # первого прогона сейчас, а не через сутки (интервал релизов).
             # poke() заодно снимает блокировку не-retriable отказа — правка

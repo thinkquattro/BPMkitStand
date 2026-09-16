@@ -194,5 +194,5 @@ def describe_search_targets(roots: Sequence[Path]) -> str:
     shown = ", ".join(str(r) for r in root_list[:3])
     more = f" и ещё {len(root_list) - 3}" if len(root_list) > 3 else ""
     return (f"искали bpmkit(.exe) и server/main.py рядом с: {shown}{more}; "
-            f"задайте companion.mcp_cli в настройках хаба или переменную окружения "
-            f"{CLI_ENV_VAR}")
+            f"укажите путь в «Настройки → Основные», поле «CLI BPMkit», либо "
+            f"переменной окружения {CLI_ENV_VAR}")
