@@ -578,10 +578,13 @@
   // --- стилизованное подтверждение (замена window.confirm), Promise-обёртка ---
   //
   // Переиспользует разметку/классы модалки "О программе" (единый стиль сайта).
-  // Используется для Стоп/Рестарт/Очистить Redis — код действий остаётся
-  // линейным (await styledConfirm(...)) вместо колбэков.
+  // Используется для Стоп/Рестарт/Очистить Redis, а также для перезапуска
+  // диспетчера с правами администратора (GAP-311) — код действий остаётся
+  // линейным (await styledConfirm(...)) вместо колбэков. okLabel по умолчанию
+  // "Подтвердить" (как было раньше у Стоп/Рестарт/Redis) — GAP-311 передаёт
+  // своё ("Перезапустить"), не меняя остальные вызовы.
 
-  function styledConfirm(title, text) {
+  function styledConfirm(title, text, okLabel) {
     return new Promise((resolve) => {
       const overlay = document.getElementById("confirm-modal-overlay");
       const okBtn = document.getElementById("confirm-modal-ok-btn");
@@ -590,6 +593,7 @@
 
       document.getElementById("confirm-modal-title").textContent = title;
       document.getElementById("confirm-modal-text").textContent = text;
+      okBtn.textContent = okLabel || "Подтвердить";
       overlay.hidden = false;
       okBtn.focus();
 
@@ -1002,6 +1006,10 @@
     updateAgentBlockVisibility(lastStandsData);
     updateSnapshotAge(data);
     updateStatuslineStands(lastStandsData);
+    // Список стендов для однократной операции с правами администратора
+    // (GAP-311) должен обновляться тем же путём — стенды могут появиться,
+    // пропасть или сменить host_kind без переоткрытия «О программе».
+    populateElevatedOnceStandSelect();
   }
 
   // Возвращает true, если данные реально обновились (нужно вызывающему,
@@ -1215,6 +1223,13 @@
       await refreshStands();
       if (name === selectedStand) refreshState();
     } catch (e) {
+      // Нехватка прав администратора (GAP-311) — не рядовая ошибка: обычный
+      // тост/errorEl тут ни при чём, нужен отдельный незакрывающийся блок с
+      // выбором «перезапустить диспетчер» / «поднять права на одну операцию».
+      if (e && e.data && e.data.elevation_required) {
+        showStandElevationError(name, action, describeApiError(e));
+        return;
+      }
       const label = _ACTION_LABELS[action] || action;
       showActionStatus(`Ошибка (${label} стенда ${name}): ${describeApiError(e)}`, true);
       errorEl.textContent = `Ошибка (${name}/${action}): ${describeApiError(e)}`;
@@ -1530,6 +1545,433 @@
       source.close();
       sseHealthy = false;
     });
+  }
+
+  // --- права администратора ---
+  //
+  // Управление стендами IIS идёт через appcmd.exe, а он без прав
+  // администратора не работает В ПРИНЦИПЕ (не читает даже собственную
+  // конфигурацию). Раньше пользователь узнавал об этом из ошибки после клика
+  // «Старт», а совет «запустите диспетчер от имени администратора» было не
+  // так просто выполнить: повторный запуск ярлыка видел уже работающий
+  // экземпляр на том же порту и просто открывал браузер на нём.
+
+  // Клиентский дедлайн ожидания ≥ серверного TTL заявки на elevation (180с,
+  // см. контракт GAP-311) — иначе клиент сдаётся раньше, чем сервер сам
+  // признал заявку истёкшей, и показывает "не дождались" при живом ожидании.
+  const RESTART_WAIT_MS = 200000;
+  const RESTART_POLL_MS = 1000;
+  const ELEVATED_OP_WAIT_MS = 200000;
+  const ELEVATED_OP_POLL_MS = 1000;
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  // Общий помост «кнопка занята запросом»: блокирует её на время запроса и
+  // возвращает управление в любом терминальном исходе (успех, отказ, ошибка,
+  // дедлайн) — без этого повторный клик во время ожидания UAC/операции мог
+  // бы отправить второй такой же запрос.
+  function setElevationButtonBusy(btn, busy) {
+    if (btn) btn.disabled = !!busy;
+  }
+
+  // Последний ответ GET /api/hub/elevation — используется и шапкой (щит), и
+  // разделом настроек «О программе», и выбором стендов для однократной
+  // операции, чтобы не дублировать запрос на каждый из трёх потребителей.
+  let lastElevationData = null;
+
+  async function refreshElevation() {
+    const btn = document.getElementById("elevation-btn");
+    try {
+      const data = await apiGet("/api/hub/elevation");
+      lastElevationData = data;
+      // Щит в шапке виден РОВНО в одном случае: ОС умеет повышать права
+      // (supported), их сейчас точно нет (elevated === false — не null,
+      // "неизвестно" щита не показывает) и перезапуск возможен (can_restart).
+      // На Linux/macOS и когда прав уже достаточно — щита нет вовсе (решение
+      // владельца 15.09.2026).
+      if (btn) btn.hidden = !(data && data.supported && data.elevated === false && data.can_restart);
+      updateAboutElevation(data);
+    } catch (e) {
+      if (btn) btn.hidden = true;
+      updateAboutElevation(null);
+    }
+  }
+
+  // --- раздел настроек «О программе»: строка «Права диспетчера» + однократная операция ---
+
+  function updateAboutElevation(data) {
+    const stateEl = document.getElementById("about-elevation-state");
+    const userEl = document.getElementById("about-elevation-user");
+    const restartBtn = document.getElementById("about-elevation-restart-btn");
+    const onceBlock = document.getElementById("about-elevated-once");
+    if (!stateEl) return;
+    if (!data) {
+      stateEl.textContent = "неизвестно";
+      if (userEl) userEl.textContent = "";
+      if (restartBtn) restartBtn.hidden = true;
+      if (onceBlock) onceBlock.hidden = true;
+      return;
+    }
+    // elevated: true|false|null — null ("неизвестно") приходит, когда ОС не
+    // распознана надёжно или запрос к системе сам не выяснил ответ; это НЕ
+    // то же самое, что "нет", поэтому не сворачиваем в false.
+    stateEl.textContent = data.elevated === true ? "есть" : data.elevated === false ? "нет" : "неизвестно";
+    if (userEl) userEl.textContent = data.user ? `(${data.user})` : "";
+    if (restartBtn) restartBtn.hidden = !data.can_restart;
+    // Однократная операция доступна только там, где вообще есть UAC — на
+    // POSIX элевировать пока нечем (elevated-помощник — Windows-механизм).
+    if (onceBlock) onceBlock.hidden = !data.supported;
+  }
+
+  // Список стендов IIS для селекта однократной операции. Вызывается и из
+  // refreshElevation (появление/исчезание блока), и из applyStandsPayload
+  // (список стендов может поменяться без переоткрытия «О программе»).
+  function populateElevatedOnceStandSelect() {
+    const sel = document.getElementById("about-elevated-once-stand");
+    const runBtn = document.getElementById("about-elevated-once-run-btn");
+    if (!sel) return;
+    const iisStands = lastStandsData.filter((s) => s && s.host_kind === "iis");
+    sel.innerHTML = iisStands
+      .map((s) => `<option value="${escapeAttr(s.name)}">${escapeHtml(s.name)}</option>`)
+      .join("");
+    sel.disabled = iisStands.length === 0;
+    if (runBtn) runBtn.disabled = iisStands.length === 0;
+  }
+
+  function showRestartOverlay(text, hint, closable) {
+    const overlay = document.getElementById("restart-overlay");
+    document.getElementById("restart-overlay-text").textContent = text;
+    const hintEl = document.getElementById("restart-overlay-hint");
+    hintEl.textContent = hint || "";
+    hintEl.hidden = !hint;
+    const footer = document.getElementById("restart-overlay-footer");
+    if (footer) footer.hidden = !closable;
+    overlay.hidden = false;
+  }
+
+  function hideRestartOverlay() {
+    document.getElementById("restart-overlay").hidden = true;
+  }
+
+  function showElevatedOpOverlay(text, closable) {
+    const overlay = document.getElementById("elevated-op-overlay");
+    document.getElementById("elevated-op-overlay-text").textContent = text;
+    const footer = document.getElementById("elevated-op-overlay-footer");
+    if (footer) footer.hidden = !closable;
+    overlay.hidden = false;
+  }
+
+  function hideElevatedOpOverlay() {
+    document.getElementById("elevated-op-overlay").hidden = true;
+  }
+
+  // Общее сообщение «хаб уже отвечает, но не под нашей сессией» — терминальный
+  // исход, который на первой фазе (старый хаб отвечает 401) и на второй (уже
+  // отвечает НОВЫЙ хаб, но 401) означает одно и то же: файл передачи сессии
+  // протух, либо elevated-процесс поднят под другой учётной записью.
+  function showSessionNotMovedOverlay() {
+    showRestartOverlay(
+      "Диспетчер перезапущен с правами администратора, но сессия не перенеслась.",
+      "Откройте дашборд заново — по ярлыку «BPMkit Диспетчер» на рабочем столе.",
+      true
+    );
+  }
+
+  async function waitForHubBack(triggerBtn) {
+    const deadline = Date.now() + RESTART_WAIT_MS;
+    // Пока СТАРЫЙ хаб отвечает, он же знает исход запроса UAC (отказ/провал
+    // относительно ТОГО restart-elevated, который мы только что отправили,
+    // см. GET /api/hub/elevation::restart) — спрашиваем его напрямую вместо
+    // того, чтобы гадать по одной лишь потере связи. Как только связь с ним
+    // обрывается (старый процесс завершается сам при захвате порта новым,
+    // elevated, экземпляром — контракт GAP-311), переключаемся на ожидание
+    // нового по /api/version — это и есть исходное поведение перезапуска.
+    let oldHubGone = false;
+    while (Date.now() < deadline) {
+      await sleep(RESTART_POLL_MS);
+      if (!oldHubGone) {
+        try {
+          const data = await apiGet("/api/hub/elevation");
+          const restart = data && data.restart;
+          if (restart && restart.status === "refused") {
+            setElevationButtonBusy(triggerBtn, false);
+            showRestartOverlay(
+              restart.message || "Повышение прав не подтверждено — диспетчер продолжает работать без них.",
+              "",
+              true
+            );
+            return;
+          }
+          if (restart && restart.status === "failed") {
+            setElevationButtonBusy(triggerBtn, false);
+            showRestartOverlay(
+              restart.message || "Перезапуск диспетчера с правами администратора не удался.",
+              "",
+              true
+            );
+            return;
+          }
+          // restart.status === "requesting" | "pending" (или сам ответ ещё
+          // не в курсе) — старый хаб всё ещё жив и ждёт вместе с нами.
+          continue;
+        } catch (e) {
+          if (e && e.status === 401) {
+            // Хаб уже отвечает (значит, это уже НОВЫЙ процесс), но сессия
+            // не переехала — молчаливый reload дал бы пустую страницу с
+            // ошибками, честнее сказать прямо.
+            setElevationButtonBusy(triggerBtn, false);
+            showSessionNotMovedOverlay();
+            return;
+          }
+          if (isNetworkError(e)) {
+            // Старый процесс погас — это ожидаемая фаза, переходим к ожиданию
+            // нового (по /api/version, без прежнего сессионного токена — на
+            // одном порту он либо тот же самый, либо новый ответит 401 выше).
+            oldHubGone = true;
+          }
+          // Иной статус (например 500) — хаб ещё жив, но не разобрался; не
+          // считаем это концом ожидания, пробуем на следующем витке.
+        }
+      } else {
+        try {
+          await apiGet("/api/version");
+          window.location.reload();
+          return;
+        } catch (e) {
+          if (e && e.status === 401) {
+            // Тот же тупик, что и выше, только увиденный уже НА второй фазе
+            // (отвечает новый процесс, сессия всё равно не перенеслась).
+            setElevationButtonBusy(triggerBtn, false);
+            showSessionNotMovedOverlay();
+            return;
+          }
+          // Обрыв связи продолжается — новый процесс ещё не поднялся, ждём дальше.
+        }
+      }
+    }
+    setElevationButtonBusy(triggerBtn, false);
+    showRestartOverlay(
+      "Не дождались перезапуска диспетчера.",
+      "Возможно, запрос UAC остался без ответа. Откройте дашборд заново по ярлыку.",
+      true
+    );
+  }
+
+  // Общий сценарий «перезапустить диспетчер с правами администратора»:
+  // используется и щитом в шапке, и кнопкой в «О программе», и кнопкой
+  // «Перезапустить с правами администратора» в ошибке elevation_required —
+  // везде одно и то же подтверждение, один и то же POST, один и тот же оверлей.
+  async function restartElevatedFlow(triggerBtn) {
+    // Кнопка уже занята предыдущим кликом (двойной клик до того, как она
+    // успела дизейблиться, или повторный вызов из другого места разметки,
+    // ссылающегося на ту же кнопку) — второй запрос не отправляем.
+    if (triggerBtn && triggerBtn.disabled) return;
+    setElevationButtonBusy(triggerBtn, true);
+    const confirmed = await styledConfirm(
+      "Перезапуск с правами администратора",
+      "Перезапустить диспетчер с правами администратора? Windows покажет окно с запросом прав — " +
+        "подтвердите его. Диспетчер поднимется на том же адресе, страница переподключится сама. " +
+        "Запущенные стенды не останавливаются.",
+      "Перезапустить"
+    );
+    if (!confirmed) {
+      setElevationButtonBusy(triggerBtn, false);
+      return;
+    }
+    try {
+      await apiSend("POST", "/api/hub/restart-elevated");
+    } catch (e) {
+      setElevationButtonBusy(triggerBtn, false);
+      if (e && e.status === 409 && e.data && e.data.cancelled) {
+        // Отказ в самом окне UAC — это не ошибка сервера, а явное решение
+        // пользователя в системном диалоге; оверлей ожидания тут не нужен,
+        // диспетчер и не пытался переехать.
+        showActionStatus(
+          "Повышение прав не подтверждено — диспетчер продолжает работать без них.",
+          true
+        );
+        return;
+      }
+      // 409 БЕЗ cancelled (перезапуск уже запрошен кем-то другим, ещё
+      // requesting/pending) — это настоящая ошибка, текст отдаёт сервер.
+      showActionStatus(
+        `Не удалось перезапустить диспетчер с правами администратора: ${describeApiError(e)}`,
+        true
+      );
+      return;
+    }
+    showRestartOverlay(
+      "Подтвердите запрос Windows (UAC), если он ещё открыт. Ждём, пока диспетчер поднимется заново…"
+    );
+    // Кнопка остаётся занятой на всё ожидание: если исход терминальный
+    // (refused/failed/таймаут/сессия не перенеслась), waitForHubBack сама
+    // её разблокирует; при успехе страница перезагрузится, и это неважно.
+    waitForHubBack(triggerBtn);
+  }
+
+  // Сценарий «только эта операция» (GAP-311, П2): без перезапуска диспетчера,
+  // одна операция стенда выполняется через elevated-помощника. Используется
+  // и из кнопки «Только эту операцию» в ошибке стенда, и из блока «Однократная
+  // операция с правами администратора» в «О программе».
+  async function runElevatedOp(stand, action, triggerBtn) {
+    if (triggerBtn && triggerBtn.disabled) return;
+    setElevationButtonBusy(triggerBtn, true);
+    let opId;
+    try {
+      const data = await apiSend("POST", "/api/hub/elevated-op", { stand, action });
+      opId = data && data.op_id;
+    } catch (e) {
+      setElevationButtonBusy(triggerBtn, false);
+      if (e && e.status === 409 && e.data && e.data.cancelled) {
+        showActionStatus(
+          "Повышение прав не подтверждено — диспетчер продолжает работать без них.",
+          true
+        );
+        return;
+      }
+      // 409 БЕЗ cancelled (та же операция уже запрошена и ждёт исхода) —
+      // настоящая ошибка, текст отдаёт сервер.
+      showActionStatus(
+        `Не удалось выполнить операцию с правами администратора: ${describeApiError(e)}`,
+        true
+      );
+      return;
+    }
+    showElevatedOpOverlay(
+      "Подтвердите запрос Windows (UAC), если он ещё открыт. Выполняем операцию с правами администратора…"
+    );
+    await pollElevatedOp(opId, stand, triggerBtn);
+  }
+
+  async function pollElevatedOp(opId, stand, triggerBtn) {
+    if (!opId) {
+      hideElevatedOpOverlay();
+      setElevationButtonBusy(triggerBtn, false);
+      showActionStatus("Диспетчер не вернул идентификатор операции.", true);
+      return;
+    }
+    // Клиентский дедлайн — тот же приём, что у waitForHubBack: без него сбой
+    // GET .../elevated-op/<id> (или бесконечный "pending") держал бы кнопку
+    // занятой и оверлей открытым вечно.
+    const deadline = Date.now() + ELEVATED_OP_WAIT_MS;
+    while (Date.now() < deadline) {
+      await sleep(ELEVATED_OP_POLL_MS);
+      let data;
+      try {
+        data = await apiGet(`/api/hub/elevated-op/${encodeURIComponent(opId)}`);
+      } catch (e) {
+        if (e && e.status === 404) {
+          // op_id неизвестен диспетчеру — например, диспетчер перезапускался
+          // (тот же процесс или другой) и потерял состояние операции. Ждать
+          // дальше бессмысленно: результат не восстановить, это терминальный исход.
+          setElevationButtonBusy(triggerBtn, false);
+          showElevatedOpOverlay(
+            "Диспетчер перезапустился, пока выполнялась операция — результат неизвестен.",
+            true
+          );
+          return;
+        }
+        if (e && e.status === 401) {
+          // Сессия не подтверждена — тоже верный признак, что диспетчер
+          // успел перезапуститься; дальше опрашивать нечего.
+          setElevationButtonBusy(triggerBtn, false);
+          showElevatedOpOverlay(
+            "Сессия дашборда не подтверждена — похоже, диспетчер перезапустился. Откройте дашборд заново.",
+            true
+          );
+          return;
+        }
+        // Сетевой сбой (или иной статус) — не сдаёмся до дедлайна, пробуем
+        // ещё раз на следующем витке, оверлей не трогаем.
+        continue;
+      }
+      if (!data || data.status === "pending") continue;
+      hideElevatedOpOverlay();
+      setElevationButtonBusy(triggerBtn, false);
+      if (data.status === "ok") {
+        showActionStatus(data.message || "Операция выполнена с правами администратора", false);
+        await refreshStands();
+        if (stand === selectedStand) refreshState();
+      } else {
+        // refused (отказ в UAC) / error / expired — во всех трёх случаях
+        // операция не выполнена, различие только в тексте от сервера.
+        showActionStatus(
+          data.message || "Операция с правами администратора не выполнена.",
+          true
+        );
+      }
+      return;
+    }
+    setElevationButtonBusy(triggerBtn, false);
+    showElevatedOpOverlay("Не дождались результата операции.", true);
+  }
+
+  // --- блок «нет прав» в ошибке действия со стендом (см. onStandAction) ---
+
+  // Контекст незакрытой ошибки elevation_required: какой стенд/действие
+  // предложить повторить кнопками «Перезапустить»/«Только эту операцию».
+  let pendingElevationOp = null;
+
+  function showStandElevationError(name, action, message) {
+    pendingElevationOp = { name, action };
+    const el = document.getElementById("stand-elevation-error");
+    if (!el) return;
+    document.getElementById("stand-elevation-error-text").textContent = message;
+    el.hidden = false;
+  }
+
+  function hideStandElevationError() {
+    const el = document.getElementById("stand-elevation-error");
+    if (el) el.hidden = true;
+    pendingElevationOp = null;
+  }
+
+  function setupStandElevationError() {
+    const el = document.getElementById("stand-elevation-error");
+    if (!el) return;
+    document.getElementById("stand-elevation-error-close").addEventListener("click", hideStandElevationError);
+    const restartBtn = document.getElementById("stand-elevation-error-restart-btn");
+    restartBtn.addEventListener("click", () => {
+      hideStandElevationError();
+      restartElevatedFlow(restartBtn);
+    });
+    const onceBtn = document.getElementById("stand-elevation-error-once-btn");
+    onceBtn.addEventListener("click", () => {
+      const op = pendingElevationOp;
+      hideStandElevationError();
+      if (op) runElevatedOp(op.name, op.action, onceBtn);
+    });
+  }
+
+  function setupElevation() {
+    const btn = document.getElementById("elevation-btn");
+    if (btn) btn.addEventListener("click", () => restartElevatedFlow(btn));
+    const restartOverlayCloseBtn = document.getElementById("restart-overlay-close-btn");
+    if (restartOverlayCloseBtn) restartOverlayCloseBtn.addEventListener("click", hideRestartOverlay);
+    const elevatedOpOverlayCloseBtn = document.getElementById("elevated-op-overlay-close-btn");
+    if (elevatedOpOverlayCloseBtn) elevatedOpOverlayCloseBtn.addEventListener("click", hideElevatedOpOverlay);
+    setupStandElevationError();
+    setupAboutElevation();
+  }
+
+  // --- «О программе»: кнопка перезапуска и однократная операция ---
+
+  function setupAboutElevation() {
+    const restartBtn = document.getElementById("about-elevation-restart-btn");
+    if (restartBtn) restartBtn.addEventListener("click", () => restartElevatedFlow(restartBtn));
+    const runBtn = document.getElementById("about-elevated-once-run-btn");
+    if (runBtn) {
+      runBtn.addEventListener("click", () => {
+        const standSel = document.getElementById("about-elevated-once-stand");
+        const actionSel = document.getElementById("about-elevated-once-action");
+        const stand = standSel && standSel.value;
+        const action = actionSel && actionSel.value;
+        if (!stand) return;
+        runElevatedOp(stand, action, runBtn);
+      });
+    }
   }
 
   // --- локальный агент ---
@@ -2811,6 +3253,7 @@
     setupTheme();
     setupViewToggle();
     setupScenes();
+    setupElevation();
     setupRegisterModal();
     setupAgentTab();
     setupUpdatesDialog();
@@ -2835,6 +3278,7 @@
     // того, как человек что-то нажмёт, а не после захода в настройки.
     refreshLicense();
     setInterval(refreshLicense, LICENSE_POLL_MS);
+    refreshElevation();
     loadSettings().catch((e) => {
       document.getElementById("settings-status").textContent = `Ошибка загрузки настроек: ${describeApiError(e)}`;
     });

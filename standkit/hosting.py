@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
+from standkit import platform as _platform
 from standkit.models import HostKind, Stand
 from standkit.platform import run_console
 
@@ -272,8 +273,10 @@ TRANSIENT_RPC_HINT = (
 # прав — одна формулировка на все места (start/stop/restart/list/wp).
 ELEVATION_HINT = (
     "\n\nПохоже, не хватает прав администратора: управление IIS через appcmd.exe "
-    "требует запуска диспетчера «от имени администратора» (elevated). Запустите "
-    "standkit-hub с правами администратора и повторите операцию."
+    "требует прав администратора. В диспетчере — «Перезапустить с правами "
+    "администратора» (щит «без прав администратора» в шапке) либо «Только эту "
+    "операцию» в сообщении об ошибке; в консоли — запуск standkit-hub от имени "
+    "администратора. После этого повторите операцию."
 )
 
 
@@ -302,15 +305,13 @@ def _process_is_elevated() -> Optional[bool]:
     неэлевированном процессе — про права, как бы Windows её ни сформулировала
     (живая приёмка 17.08.2026: неэлевированный ``list wp`` отвечает «Служба WAS
     недоступна», хотя служба работает).
-    """
-    if sys.platform != "win32":
-        return None
-    try:
-        import ctypes
 
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return None
+    Сама проверка живёт в ``standkit.platform.is_elevated`` — тот же OS-примитив
+    спрашивает и веб-хаб (индикатор «без прав администратора» и кнопка
+    перезапуска). Здесь остаётся тонкая обёртка: имя ``_process_is_elevated``
+    — точка подмены в тестах классификации ошибок appcmd.
+    """
+    return _platform.is_elevated()
 
 
 def _service_state(name: str) -> Optional[str]:
@@ -468,14 +469,79 @@ class KestrelBackend:
 # --------------------------------------------------------------------------
 
 
+def _is_wow64_process() -> bool:
+    """
+    Работает ли ТЕКУЩИЙ процесс в режиме WOW64 (32-битный процесс на
+    64-битной Windows).
+
+    ЗАЧЕМ. У 32-битного процесса Windows молча подменяет
+    ``%WINDIR%\\system32`` на ``%WINDIR%\\SysWOW64`` (File System Redirector):
+    путь к ``appcmd.exe``, собранный "напролом" через ``system32``, у такого
+    процесса ведёт не туда — 64-битного ``appcmd.exe`` в ``SysWOW64`` нет
+    (``inetsrv`` там не зеркалируется). Первый и дешёвый признак —
+    переменная окружения ``PROCESSOR_ARCHITEW6432``: Windows выставляет её
+    ИМЕННО 32-битным процессам, запущенным на 64-битной системе.
+    ``IsWow64Process`` — резервный путь, на случай, если переменную кто-то
+    стёр из окружения (redirection всё равно останется в силе).
+
+    Вынесена в отдельную маленькую функцию, а не инлайнена в
+    ``_resolve_appcmd``, чтобы подменяться в тестах на Linux (реальный ctypes
+    там недоступен, а ветку "мы WOW64" всё равно нужно проверить).
+    """
+    if os.environ.get("PROCESSOR_ARCHITEW6432"):
+        return True
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        # Приватный WinDLL, не глобальный ctypes.windll.kernel32 (GAP-311
+        # M6) — та же причина, что у standkit.platform.current_user_sid:
+        # явные argtypes на общем хендле затронули бы других вызывающих.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.IsWow64Process.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+        kernel32.IsWow64Process.restype = wintypes.BOOL
+
+        is_wow64 = wintypes.BOOL(0)
+        if not kernel32.IsWow64Process(kernel32.GetCurrentProcess(), ctypes.byref(is_wow64)):
+            return False
+        return bool(is_wow64.value)
+    except Exception:
+        return False
+
+
 def _resolve_appcmd() -> str:
-    """Резолвит путь к ``appcmd.exe``. Бросает ``HostingError`` вне Windows либо если файла нет."""
+    """
+    Резолвит путь к ``appcmd.exe``. Бросает ``HostingError`` вне Windows либо
+    если файла нет — про установку IIS Management Tools, а НЕ про права
+    администратора: отсутствие файла и нехватка elevation — разные диагнозы
+    (elevation классифицируется отдельно, по stderr самого appcmd, см.
+    ``IisElevationError`` ниже).
+
+    WOW64 (GAP-311 п.2): если текущий процесс 32-битный на 64-битной Windows
+    (``_is_wow64_process``) и существует ``%WINDIR%\\Sysnative\\inetsrv\\appcmd.exe``
+    — используем ЕГО. ``Sysnative`` — псевдо-каталог, который File System
+    Redirector НЕ трогает: путь через него всегда указывает на настоящий
+    64-битный ``system32``, даже из 32-битного процесса. Без этого 32-битный
+    ``standkit-hub`` (например, собранный PyInstaller-ом как x86-exe) молча
+    получал бы редирект в ``SysWOW64`` и там же честно не находил
+    ``appcmd.exe`` — с диагнозом "appcmd не найден", хотя IIS Management
+    Tools установлены.
+    """
     if sys.platform != "win32":
         raise HostingError(
             "host_kind=iis поддерживается только на Windows (нужен appcmd.exe) — "
             f"текущая платформа: {sys.platform!r}"
         )
-    appcmd = os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "system32", "inetsrv", "appcmd.exe")
+    windir = os.environ.get("WINDIR", "C:\\Windows")
+    if _is_wow64_process():
+        sysnative = os.path.join(windir, "Sysnative", "inetsrv", "appcmd.exe")
+        if os.path.isfile(sysnative):
+            return sysnative
+    appcmd = os.path.join(windir, "system32", "inetsrv", "appcmd.exe")
     if not os.path.isfile(appcmd):
         raise HostingError(
             f"appcmd.exe не найден: {appcmd} — убедитесь, что установлены IIS Management "

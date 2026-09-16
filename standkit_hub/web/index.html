@@ -71,6 +71,17 @@
        rel="noopener" title="Справка — кукбук BPMkitStand" aria-label="Справка">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5V14"/><circle cx="12" cy="17" r=".7" fill="currentColor" stroke="none"/></svg>
     </a>
+    <!-- Индикатор «без прав администратора» (GAP-311). Виден ТОЛЬКО когда
+         диспетчер работает без прав на Windows (GET /api/hub/elevation): без
+         них любая IIS-операция обречена — appcmd.exe не читает даже собственную
+         конфигурацию. Это кнопка, а не значок: по клику — перезапуск через UAC.
+         С правами щита нет вовсе (решение владельца 15.09.2026). -->
+    <button id="elevation-btn" class="topbar-btn elevation-btn" type="button" hidden
+            title="Диспетчер работает без прав администратора — управление стендами IIS недоступно. Нажмите, чтобы перезапустить его с правами администратора."
+            aria-label="Без прав администратора — перезапустить с правами">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 9.5C8 19.3 5 15.5 5 11V6z"/><path d="M12 8v4"/><circle cx="12" cy="15.5" r=".7" fill="currentColor" stroke="none"/></svg>
+      <span class="elevation-btn-label">без прав администратора</span>
+    </button>
     <!-- «О программе» — не модалка, а раздел настроек: то же содержимое, но
          его можно открыть рядом с версией MCP и путём к CLI, не теряя экран. -->
     <button id="about-btn" class="topbar-btn" type="button" title="О программе" aria-label="О программе">
@@ -104,6 +115,48 @@
   <div id="license-banner-crit" class="license-banner license-banner-crit" role="alert" hidden>
     <span><strong id="license-banner-crit-title">Срок лицензии истёк</strong><span id="license-banner-crit-text"></span></span>
     <button type="button" class="license-banner-open" data-open-license>Открыть лицензию</button>
+  </div>
+
+  <!-- Оверлей ожидания перезапуска с правами администратора: пока Windows
+       показывает запрос UAC, а старый процесс гаснет, вкладка ничего не может
+       — но и молчать ей нельзя, иначе перезапуск выглядит как зависание. -->
+  <div id="restart-overlay" class="modal-overlay" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="restart-overlay-title">
+      <div class="modal-header">
+        <h2 id="restart-overlay-title">Перезапуск с правами администратора</h2>
+      </div>
+      <div class="modal-body">
+        <p id="restart-overlay-text">Подтвердите запрос Windows (UAC). Страница переподключится сама.</p>
+        <p class="modal-note" id="restart-overlay-hint" hidden></p>
+      </div>
+      <!-- Кнопка «Закрыть» появляется только в терминальных исходах, о которых
+           СТАРЫЙ хаб успел сообщить (restart.status === refused|failed на GET
+           /api/hub/elevation, см. app.js::waitForHubBack) — пока перезапуск
+           ещё возможен (pending/обрыв связи), закрывать оверлей нечем: страница
+           сама перезагрузится, когда новый процесс поднимется. -->
+      <div class="modal-footer" id="restart-overlay-footer" hidden>
+        <button id="restart-overlay-close-btn" type="button" class="secondary">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Оверлей «однократной операции с правами администратора» (GAP-311, П2):
+       та же UAC-ситуация, что у restart-overlay, но БЕЗ перезапуска диспетчера
+       — только один appcmd-вызов через elevated-помощника. Отдельный оверлей,
+       а не переиспользование restart-overlay: у того статичный заголовок
+       «Перезапуск…», который здесь был бы неверным. -->
+  <div id="elevated-op-overlay" class="modal-overlay" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="elevated-op-overlay-title">
+      <div class="modal-header">
+        <h2 id="elevated-op-overlay-title">Операция с правами администратора</h2>
+      </div>
+      <div class="modal-body">
+        <p id="elevated-op-overlay-text">Подтвердите запрос Windows (UAC). Ждём выполнения…</p>
+      </div>
+      <div class="modal-footer" id="elevated-op-overlay-footer" hidden>
+        <button id="elevated-op-overlay-close-btn" type="button" class="secondary">Закрыть</button>
+      </div>
+    </div>
   </div>
 
   <!-- Модалка "Зарегистрировать стенд" — форма записи УЖЕ существующего
@@ -336,6 +389,25 @@
       <div id="action-status" class="action-status" role="status" aria-live="polite">
         <span id="action-status-text"></span>
         <button id="action-status-close" class="action-status-close" type="button" title="Закрыть (Esc)" aria-label="Закрыть">&times;</button>
+      </div>
+
+      <!-- Ошибка действия со стендом с elevation_required=true (GAP-311):
+           обычный тост #action-status гаснет сам через 20 секунд, а тут нужно
+           дать выбор — перезапустить диспетчер целиком или поднять права
+           только на одну операцию, — поэтому отдельный блок, который не
+           закрывается сам (см. app.js::showStandElevationError). -->
+      <div id="stand-elevation-error" class="stand-elevation-error" role="alert" hidden>
+        <span id="stand-elevation-error-text"></span>
+        <span class="stand-elevation-error-actions">
+          <button id="stand-elevation-error-restart-btn" type="button" class="secondary">
+            Перезапустить с правами администратора
+          </button>
+          <button id="stand-elevation-error-once-btn" type="button" class="secondary">
+            Только эту операцию
+          </button>
+        </span>
+        <button id="stand-elevation-error-close" class="stand-elevation-error-close" type="button"
+                title="Закрыть" aria-label="Закрыть">&times;</button>
       </div>
       <div class="stands-table-wrap">
         <table class="stands-table">
@@ -668,7 +740,49 @@
               <div><div class="lic-k">MCP-сервер BPMkit</div><div class="lic-v" id="about-mcp-version">—</div></div>
               <div><div class="lic-k">Адрес диспетчера</div><div class="lic-v" id="about-origin">—</div></div>
               <div><div class="lic-k">Редакция</div><div class="lic-v" id="about-edition">—</div></div>
+              <!-- Права диспетчера (GAP-311): значение приходит из того же
+                   GET /api/hub/elevation, что и щит в шапке (app.js::
+                   refreshElevation/updateAboutElevation) — здесь то же
+                   состояние, но без необходимости держать щит на виду. -->
+              <div>
+                <div class="lic-k">Права диспетчера</div>
+                <div class="lic-v">
+                  <span id="about-elevation-state">—</span>
+                  <span class="about-elevation-user" id="about-elevation-user"></span>
+                </div>
+              </div>
             </div>
+            <div class="about-elevation-actions">
+              <!-- Виден только когда можно поднять права (Windows, прав пока
+                   нет, elevation.can_restart) — тот же сценарий, что у щита
+                   в шапке (app.js::restartElevatedFlow). -->
+              <button id="about-elevation-restart-btn" type="button" class="secondary" hidden>
+                Перезапустить с правами администратора
+              </button>
+            </div>
+            <!-- Однократная операция без перезапуска диспетчера (GAP-311, П2):
+                 ненавязчиво свёрнута — нужна редко, только когда неудобно
+                 перезапускать диспетчер целиком (например, есть другие
+                 запущенные операции). Виден только когда data.supported —
+                 на POSIX повышать права нечем. -->
+            <details id="about-elevated-once" class="about-elevated-once" hidden>
+              <summary>Однократная операция с правами администратора</summary>
+              <div class="about-elevated-once-body">
+                <label class="about-elevated-once-field">
+                  Стенд (IIS)
+                  <select id="about-elevated-once-stand"></select>
+                </label>
+                <label class="about-elevated-once-field">
+                  Действие
+                  <select id="about-elevated-once-action">
+                    <option value="start">Запустить</option>
+                    <option value="stop">Остановить</option>
+                    <option value="restart">Перезапустить</option>
+                  </select>
+                </label>
+                <button id="about-elevated-once-run-btn" type="button" class="secondary">Выполнить</button>
+              </div>
+            </details>
             <p class="pane-lead">BPMkitStand — свободный диспетчер стендов BPMSoft (часть экосистемы BPMkit).</p>
             <p class="pane-lead">
               Справка — <a href="/static/cookbook.html" target="_blank" rel="noopener">кукбук BPMkit</a>:

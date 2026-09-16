@@ -281,6 +281,65 @@ def test_iis_backend_raises_when_appcmd_missing(monkeypatch, tmp_path):
         IisBackend().start(stand)
 
 
+# --- WOW64 / Sysnative (GAP-311 п.2) ---
+
+
+def test_resolve_appcmd_uses_sysnative_when_wow64_and_present(monkeypatch, tmp_path):
+    """
+    32-битный процесс (WOW64) на 64-битной Windows: %WINDIR%\\system32
+    молча редиректится в SysWOW64 — appcmd.exe там нет. Через Sysnative
+    (файловый редиректор его не трогает) должен найтись настоящий 64-битный.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("WINDIR", str(tmp_path))
+    monkeypatch.setattr(hosting, "_is_wow64_process", lambda: True)
+
+    sysnative = tmp_path / "Sysnative" / "inetsrv"
+    sysnative.mkdir(parents=True)
+    (sysnative / "appcmd.exe").write_text("stub", encoding="utf-8")
+
+    assert hosting._resolve_appcmd() == str(sysnative / "appcmd.exe")
+
+
+def test_resolve_appcmd_wow64_without_sysnative_falls_back_to_system32(monkeypatch, tmp_path):
+    """Sysnative-копии нет (не WOW64-редирект вовсе, либо кастомная сборка Windows)
+    — используем обычный system32-путь, как раньше."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("WINDIR", str(tmp_path))
+    monkeypatch.setattr(hosting, "_is_wow64_process", lambda: True)
+
+    system32 = tmp_path / "system32" / "inetsrv"
+    system32.mkdir(parents=True)
+    (system32 / "appcmd.exe").write_text("stub", encoding="utf-8")
+
+    assert hosting._resolve_appcmd() == str(system32 / "appcmd.exe")
+
+
+def test_resolve_appcmd_missing_file_is_plain_hosting_error_not_elevation(monkeypatch, tmp_path):
+    """Файла нет вообще ни там, ни там — диагноз "установите IIS Management Tools",
+    а НЕ ошибка прав администратора (elevation классифицируется отдельно, по
+    stderr самого appcmd, а не по факту "файла нет")."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("WINDIR", str(tmp_path))
+    monkeypatch.setattr(hosting, "_is_wow64_process", lambda: True)
+
+    with pytest.raises(HostingError) as exc:
+        hosting._resolve_appcmd()
+    assert not isinstance(exc.value, hosting.IisElevationError)
+    assert "IIS Management Tools" in str(exc.value)
+
+
+def test_is_wow64_process_detects_via_env_var(monkeypatch):
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "AMD64")
+    assert hosting._is_wow64_process() is True
+
+
+def test_is_wow64_process_false_off_windows_without_env_var(monkeypatch):
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert hosting._is_wow64_process() is False
+
+
 def _prep_iis_windows(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", "win32")
     inetsrv = tmp_path / "system32" / "inetsrv"

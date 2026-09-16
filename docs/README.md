@@ -38,7 +38,7 @@
 | Документ | О чём |
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Краткое зеркало архитектуры: что за что отвечает, границы модулей |
-| [adr/](adr/) | Архитектурные решения с разбором альтернатив — [0001 хостинг-бэкенды](adr/0001-hosting-backends.md) · [0002 k8s](adr/0002-k8s-backend.md) · [0003 логи удалённых стендов](adr/0003-remote-log-browsing.md) · [0004 IIS по Site](adr/0004-iis-site-scoped-lifecycle.md) · [0005 транспорт канала обновлений в MIT-ядре](adr/0005-companion-transport-in-mit-core.md) |
+| [adr/](adr/) | Архитектурные решения с разбором альтернатив — [0001 хостинг-бэкенды](adr/0001-hosting-backends.md) · [0002 k8s](adr/0002-k8s-backend.md) · [0003 логи удалённых стендов](adr/0003-remote-log-browsing.md) · [0004 IIS по Site](adr/0004-iis-site-scoped-lifecycle.md) · [0005 транспорт канала обновлений в MIT-ядре](adr/0005-companion-transport-in-mit-core.md) · [0006 права администратора для IIS](adr/0006-hub-elevated-restart.md) |
 | [CHANGELOG.md](CHANGELOG.md) | История изменений по версиям (Keep a Changelog + SemVer) |
 | [research/](research/) | Проработки без принятых решений — [companion v2: CI/CD через тонкого агента](research/companion-v2-cicd-thin-agent.md) |
 
