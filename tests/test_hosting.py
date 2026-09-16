@@ -651,6 +651,7 @@ def test_appcmd_transient_rpc_failure_is_retried_once_for_read(monkeypatch, tmp_
 def test_appcmd_transient_rpc_failure_on_mutation_is_not_retried_but_hinted(monkeypatch, tmp_path):
     appcmd = _prep_iis_windows(monkeypatch, tmp_path)
     monkeypatch.setattr(hosting, "_process_is_elevated", lambda: True)
+    monkeypatch.setattr(hosting, "_iis_services_down", lambda: [])
     calls = []
 
     def _fake_run(cmd, **kwargs):
@@ -663,6 +664,41 @@ def test_appcmd_transient_rpc_failure_on_mutation_is_not_retried_but_hinted(monk
     assert len(calls) == 1  # изменяющую команду автоматически не повторяем
     assert "канал управления IIS" in str(excinfo.value)
     assert not isinstance(excinfo.value, hosting.IisElevationError)
+
+
+def test_appcmd_rpc_error_with_w3svc_stopped_is_service_error(monkeypatch, tmp_path):
+    # Живьём 16.09.2026: `appcmd start site` при остановленной W3SVC отвечает
+    # 0x80010006 — тем же текстом, что транзиентный обрыв RPC.
+    appcmd = _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(hosting, "_process_is_elevated", lambda: True)
+    monkeypatch.setattr(hosting, "_iis_services_down", lambda: ["W3SVC"])
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: _completed(
+            cmd, returncode=2147549190, stdout="ERROR ( hresult:80010006, message:Подключение было разорвано )"
+        ),
+    )
+    with pytest.raises(hosting.IisServiceUnavailableError) as excinfo:
+        hosting._appcmd_checked([appcmd, "start", "site", "/site.name:site1"])
+    text = str(excinfo.value)
+    assert "Сейчас остановлены: W3SVC." in text
+    assert "sc start W3SVC" in text
+    assert "канал управления IIS" not in text
+
+
+def test_appcmd_rpc_error_in_non_elevated_process_is_elevation(monkeypatch, tmp_path):
+    appcmd = _prep_iis_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(hosting, "_process_is_elevated", lambda: False)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: _completed(
+            cmd, returncode=2147549190, stdout="ERROR ( hresult:80010006, message:Подключение было разорвано )"
+        ),
+    )
+    with pytest.raises(hosting.IisElevationError):
+        hosting._appcmd_checked([appcmd, "start", "site", "/site.name:site1"])
 
 
 def test_iis_lifecycle_commands_get_a_generous_timeout(monkeypatch, tmp_path):

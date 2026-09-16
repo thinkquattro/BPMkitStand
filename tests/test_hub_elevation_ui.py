@@ -25,6 +25,7 @@ import json
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -575,3 +576,13 @@ def test_run_elevated_op_generic_409_reenables_button_and_shows_server_text_via_
     assert g["btnDisabled"] is False
     assert "операция уже выполняется" in g["lastStatus"]["message"]
     assert g["lastStatus"]["isError"] is True
+
+
+def test_shield_is_not_squeezed_into_square_topbar_button():
+    """Живьём 16.09.2026: подпись щита переносилась в две строки внутри
+    квадратного .topbar-btn 34×34."""
+    css = (Path(__file__).resolve().parents[1] / "standkit_hub" / "web" / "style.css").read_text(encoding="utf-8")
+    start = css.index(".topbar-btn.elevation-btn {")
+    block = css[start:css.index("}", start)]
+    assert "width: auto" in block
+    assert "white-space: nowrap" in block
