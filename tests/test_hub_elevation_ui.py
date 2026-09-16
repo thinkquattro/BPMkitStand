@@ -643,3 +643,70 @@ def test_shield_has_no_label_to_squeeze_into_square_topbar_button():
     как все прочие кнопки шапки, без отдельного правила ширины."""
     css = (Path(__file__).resolve().parents[1] / "standkit_hub" / "web" / "style.css").read_text(encoding="utf-8")
     assert ".topbar-btn.elevation-btn {" not in css
+
+
+def _run_wait_for_hub_back(tmp_path, responses) -> dict:
+    """Выполняет РЕАЛЬНЫЙ waitForHubBack из app.js: ``responses`` — ответы
+    GET /api/hub/elevation по очереди (последний повторяется)."""
+    js = _read("app.js")
+    wait_fn = _extract_function(js, "waitForHubBack")
+    script = f"""
+'use strict';
+let fakeNow = 0;
+Date.now = () => fakeNow;
+function sleep(ms) {{ fakeNow += ms; return Promise.resolve(); }}
+const RESTART_WAIT_MS = 200000;
+const RESTART_POLL_MS = 1000;
+const responses = {json.dumps(responses)};
+let i = 0;
+const calls = {{ reload: 0, overlays: [], apiGet: [] }};
+const window = {{ location: {{ reload: () => {{ calls.reload += 1; }} }} }};
+function apiGet(path) {{
+  calls.apiGet.push(path);
+  const r = responses[Math.min(i, responses.length - 1)]; i += 1;
+  return Promise.resolve(r);
+}}
+function isNetworkError(e) {{ return false; }}
+function setElevationButtonBusy() {{}}
+function showRestartOverlay(text, hint, closable) {{ calls.overlays.push({{ text, closable }}); }}
+function showSessionNotMovedOverlay() {{ calls.overlays.push({{ text: "session" }}); }}
+{wait_fn}
+(async () => {{
+  await waitForHubBack({{ disabled: true }});
+  console.log(JSON.stringify({{ reload: calls.reload, polls: calls.apiGet.length, overlays: calls.overlays }}));
+}})().catch((e) => {{ console.error(e && e.stack || String(e)); process.exit(1); }});
+"""
+    path = tmp_path / "wait_for_hub_back.js"
+    path.write_text(script, encoding="utf-8")
+    proc = subprocess.run([NODE, str(path)], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.skipif(NODE is None, reason="node недоступен в этой среде")
+def test_wait_for_hub_back_reloads_when_new_elevated_hub_answers_without_gap_via_node(tmp_path):
+    """Живьём 16.09.2026: новый хаб занял порт между опросами, обрыва связи не
+    было — оверлей висел, щит оставался красным. Ответ elevated=true от того же
+    адреса — это уже новый процесс: перезагрузка страницы."""
+    out = _run_wait_for_hub_back(tmp_path, [
+        {"elevated": False, "restart": {"status": "pending"}},
+        {"elevated": True, "restart": None},
+    ])
+    assert out["reload"] == 1
+    assert out["polls"] == 2
+
+
+@pytest.mark.skipif(NODE is None, reason="node недоступен в этой среде")
+def test_wait_for_hub_back_reloads_when_pending_state_disappears_via_node(tmp_path):
+    out = _run_wait_for_hub_back(tmp_path, [
+        {"elevated": False, "restart": {"status": "pending"}},
+        {"elevated": None, "restart": None},
+    ])
+    assert out["reload"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node недоступен в этой среде")
+def test_wait_for_hub_back_keeps_waiting_while_pending_via_node(tmp_path):
+    out = _run_wait_for_hub_back(tmp_path, [{"elevated": False, "restart": {"status": "pending"}}])
+    assert out["reload"] == 0
+    assert out["polls"] >= 190  # до клиентского дедлайна, без ложной перезагрузки
