@@ -1806,6 +1806,81 @@ span.value-has-reason {
   white-space: normal;
 }
 
+/* Иконка-подсказка рядом с подписью поля (решение владельца 16.09.2026,
+   «Настройки → Основные»): длинные серые пояснения под полями путали больше,
+   чем помогали, а «Каталог pid-файлов»/«Каталог логов» вовсе не объясняли,
+   зачем они нужны, будучи пустыми. Вместо текста под полем — маленький «?»
+   рядом с подписью, подсказка — по наведению И по клавиатурному фокусу
+   (``tabindex="0"`` + ``:focus-visible``, а не только hover, иначе с
+   клавиатуры до подсказки не добраться). Текст подсказки — в ``data-tip``
+   (CSS ``content: attr(data-tip)``), а не в скрытом <span>: один источник
+   текста и для ::after, и для aria-label, без риска разъехаться.
+   Подсказка растёт ВВЕРХ и ВЛЕВО от иконки (``bottom``/``right``, не
+   ``top``/``left``): большинство полей — не последняя строка панели, а
+   иконка обычно ближе к левому краю панели настроек, чем к правому — так
+   текст не срезается ни нижним, ни правым краем ``.settings-layout``
+   (у него ``overflow: hidden`` — обрезает всё, что торчит за пределы
+   панели). */
+.field-help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 5px;
+  vertical-align: middle;
+  color: var(--bpmkit-muted);
+  cursor: help;
+  border-radius: 50%;
+}
+
+.field-help svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  stroke: currentColor;
+}
+
+.field-help:hover,
+.field-help:focus-visible {
+  color: var(--bpmkit-primary);
+}
+
+.field-help:focus-visible {
+  outline: 2px solid var(--bpmkit-primary);
+  outline-offset: 2px;
+}
+
+.field-help::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  z-index: 6;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 48px));
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: var(--bpmkit-text);
+  color: var(--bpmkit-bg);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.1s ease;
+  pointer-events: none;
+}
+
+.field-help:hover::after,
+.field-help:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+}
+
 /* --- Окно «Обновления» ----------------------------------------------------- */
 
 .modal-box-updates {
