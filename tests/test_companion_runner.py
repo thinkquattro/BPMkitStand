@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from standkit_companion import patterns, releases, revocations, runner
+from standkit_companion import cookbook, patterns, releases, revocations, runner
 from standkit_companion.errors import ChannelError, ContextUnavailable
 from standkit_companion.runner import (
     CompanionRunner,
@@ -185,8 +185,8 @@ def make_runner(tmp_path: Path, settings, *, clock=None, rng=None,
 
 
 def patch_cycles(monkeypatch, log, *, patterns_stub=None, releases_check=None,
-                 releases_stage=None, revocations_stub=None):
-    """Подмена всех трёх функций циклов сразу.
+                 releases_stage=None, revocations_stub=None, cookbook_stub=None):
+    """Подмена всех функций циклов сразу.
 
     Подменяются АТРИБУТЫ модулей (`patterns.sync` и т.д.), потому что раннер зовёт их
     именно так — через модуль, а не по сохранённой ссылке. Это же и проверяется: сохрани
@@ -198,11 +198,19 @@ def patch_cycles(monkeypatch, log, *, patterns_stub=None, releases_check=None,
             "releases", log, result={"available": False, "target": "latest"}),
         "releases_stage": releases_stage or Recorder("stage", log),
         "revocations_refresh": revocations_stub or Recorder("revocations", log),
+        # GAP-361: кукбук едет пассажиром на паттернах и на проверке релиза, поэтому
+        # его заглушка нужна ВЕЗДЕ, где подменяются циклы, — иначе раннер пошёл бы
+        # за документом настоящим клиентом, которого в этих тестах нет.
+        # В `log` НЕ пишет: порядок несущих циклов — предмет проверок ниже, и
+        # попутчик не должен его загромождать.
+        "cookbook_sync": cookbook_stub or Recorder(
+            "cookbook", [], result={"applied": False, "reason": "up_to_date"}),
     }
     monkeypatch.setattr(patterns, "sync", stubs["patterns_sync"])
     monkeypatch.setattr(releases, "check", stubs["releases_check"])
     monkeypatch.setattr(releases, "stage", stubs["releases_stage"])
     monkeypatch.setattr(revocations, "refresh", stubs["revocations_refresh"])
+    monkeypatch.setattr(cookbook, "sync", stubs["cookbook_sync"])
     return stubs
 
 
@@ -996,3 +1004,44 @@ def test_revocations_interval_follows_patterns(tmp_path):
     cycles = r.status()["cycles"]
 
     assert cycles["revocations"]["interval_sec"] == cycles["patterns"]["interval_sec"] == 21600
+
+# --------------------------------------------------------------------------------------
+# GAP-361: кукбук — попутчик обновлений
+# --------------------------------------------------------------------------------------
+def test_cookbook_rides_along_with_patterns_sync(tmp_path, monkeypatch):
+    """Требование владельца 17.09.2026: при ЛЮБОМ обновлении свежая инструкция
+    доставляется. Синхронизация паттернов — самый частый тик канала."""
+    log: list = []
+    stubs = patch_cycles(monkeypatch, log)
+    r = make_runner(tmp_path, settings_all_on())
+
+    result = r.run_action("sync_patterns")
+
+    assert stubs["cookbook_sync"].calls == 1
+    assert "cookbook" in result
+
+
+def test_cookbook_rides_along_with_check_update(tmp_path, monkeypatch):
+    log: list = []
+    stubs = patch_cycles(monkeypatch, log)
+    r = make_runner(tmp_path, settings_all_on())
+
+    result = r.run_action("check_update")
+
+    assert stubs["cookbook_sync"].calls == 1
+    assert "cookbook" in result
+
+
+def test_cookbook_failure_does_not_break_the_carrying_operation(tmp_path, monkeypatch):
+    """Не приехала инструкция — это НЕ повод объявить неудачей синхронизацию
+    паттернов, которая уже отработала. Исход оседает в состоянии."""
+    log: list = []
+    stubs = patch_cycles(monkeypatch, log, cookbook_stub=Recorder(
+        "cookbook", [], raises=[ChannelError("бэкенд недоступен", kind="http_error")]))
+    r = make_runner(tmp_path, settings_all_on())
+
+    result = r.run_action("sync_patterns")
+
+    assert stubs["cookbook_sync"].calls == 1
+    assert result["cookbook"]["reason"] == "error"
+    assert r._state.cookbook["last_status"] == "error"

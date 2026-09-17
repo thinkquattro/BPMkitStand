@@ -82,6 +82,18 @@ def _default_state() -> dict:
             "restart_required": False,
             "history": [],
         },
+        # GAP-361: узкий поток кукбука. Отдельная секция, а не поле внутри
+        # `releases`, — по той же причине, по которой отдельный модуль
+        # `cookbook.py`: у документа свой жизненный цикл, и он не должен ни
+        # занимать слот `staged` бинаря, ни участвовать в откате релизов.
+        "cookbook": {
+            "last_check_at": None,
+            "last_status": "never",
+            "last_detail": "",
+            "known_latest": None,
+            "last_sync_at": None,
+            "installed": None,
+        },
         "revocations": {
             "last_check_at": None,
             "last_status": "never",
@@ -173,6 +185,10 @@ class CompanionState:
     def revocations(self) -> dict:
         return self.data["revocations"]
 
+    @property
+    def cookbook(self) -> dict:
+        return self.data["cookbook"]
+
     def mark(self, section: str, status: str, detail: str = "") -> None:
         """Единая точка записи исхода тика. `status` — `ok`/`skipped`/`error`/`never`."""
         block = self.data[section]
@@ -203,6 +219,7 @@ class CompanionState:
         pat = self.patterns
         rel = self.releases
         rev = self.revocations
+        cb = self.cookbook
         staged = rel.get("staged") or {}
         current = rel.get("current") or {}
         applied = pat.get("applied") or []
@@ -231,6 +248,14 @@ class CompanionState:
                 "restart_required": bool(rel.get("restart_required")),
                 "rollback_available": bool(rel.get("history")),
                 "resume_bytes": (rel.get("partial") or {}).get("bytes"),
+            },
+            "cookbook": {
+                "last_check_at": cb.get("last_check_at"),
+                "status": cb.get("last_status"),
+                "detail": cb.get("last_detail"),
+                "known_latest": cb.get("known_latest"),
+                "installed_version": (cb.get("installed") or {}).get("version"),
+                "path": (cb.get("installed") or {}).get("path"),
             },
             "revocations": {
                 "last_check_at": rev.get("last_check_at"),
