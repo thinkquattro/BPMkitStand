@@ -1329,6 +1329,21 @@ span.value-has-reason {
   word-break: break-word;
 }
 
+/* Предпросмотр телеметрии/согласий (GAP-332) — тот же вид консоли, что у
+   #state-output: моноширинный текст ответа CLI, показанный как есть. */
+.consent-preview-pre {
+  max-height: 420px;
+  overflow: auto;
+  background: var(--bpmkit-console-bg);
+  color: var(--bpmkit-console-text);
+  padding: 10px;
+  border-radius: 6px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .settings-form fieldset {
   background: var(--bpmkit-panel-bg);
   border: 1px solid var(--bpmkit-border);
@@ -1649,6 +1664,14 @@ span.value-has-reason {
 
 .pane-note[hidden] {
   display: none;
+}
+
+/* Файл согласий повреждён (GAP-332, ревью Opus В4) — та же "жёлтая" тональность,
+   что у .license-banner-warn (var(--bpmkit-unknown)): предупреждение, не отказ. */
+.pane-note-warn {
+  background: color-mix(in srgb, var(--bpmkit-unknown) 16%, transparent);
+  color: var(--bpmkit-text);
+  border-color: var(--bpmkit-unknown);
 }
 
 .pane-actions {
