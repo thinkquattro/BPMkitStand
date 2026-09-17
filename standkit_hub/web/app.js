@@ -37,8 +37,31 @@
     window.history.replaceState({}, "", window.location.pathname);
   }
 
+  // Версия сборки ЭТОЙ статики (GAP-276 п.2) — из <meta name="standkit-build">,
+  // куда её подставляет сервер, читая файл пакета С ДИСКА (server.py::
+  // on_disk_standkit_version). Именно с диска: после `pip install` поверх
+  // работающего хаба эта страница уже новая, а код сервера в памяти — ещё
+  // старый, и расхождение двух чисел — единственный надёжный признак того,
+  // что диспетчер пора перезапустить.
+  //
+  // Плейсхолдер (файл открыли с диска мимо сервера) или пустая строка —
+  // сверка не делается вовсе: показать плашку «версии разошлись» там, где
+  // сравнивать не с чем, хуже, чем не показать её никогда.
+  const buildMetaEl = document.querySelector('meta[name="standkit-build"]');
+  const HUB_BUILD_VERSION_RAW = (buildMetaEl && buildMetaEl.content) || "";
+  const HUB_BUILD_VERSION =
+    HUB_BUILD_VERSION_RAW && HUB_BUILD_VERSION_RAW.indexOf("__") !== 0
+      ? HUB_BUILD_VERSION_RAW
+      : "";
+
   function apiHeaders(mutation) {
     const headers = { "Content-Type": "application/json" };
+    if (HUB_BUILD_VERSION) {
+      // Сервер использует его, чтобы 404 на неизвестный маршрут отличал
+      // «такой функции нет» от «сервер старее страницы» (server.py::
+      // _send_unknown_api_route).
+      headers["X-Standkit-Build"] = HUB_BUILD_VERSION;
+    }
     if (mutation && sessionToken) {
       headers["X-Standkit-Token"] = sessionToken;
     } else if (!mutation && sessionToken) {
@@ -355,9 +378,38 @@
         edition.textContent =
           data.edition === "companion" ? "с каналом обновлений" : "свободная";
       }
+      checkVersionSkew(hubVersion);
     } catch (e) {
       el.textContent = `ошибка: ${describeApiError(e)}`;
     }
+  }
+
+  // --- рассинхрон версий страницы и сервера (GAP-276 п.2) ---
+  //
+  // Статика читается с диска на каждый запрос, код сервера — из памяти
+  // процесса. `pip install` поверх работающего хаба даёт новую страницу на
+  // старом сервере: «О программе» показывает версию из ПАМЯТИ (то есть врёт
+  // относительно того, что лежит на диске), а новые разделы зовут маршруты,
+  // которых у старого сервера нет. Плашка ставит перед пользователем ровно
+  // тот вопрос, который он может решить — перезапустить диспетчер.
+
+  function showVersionSkewBanner(pageVersion, serverVersion) {
+    const banner = document.getElementById("version-skew-banner");
+    const text = document.getElementById("version-skew-text");
+    if (!banner || !text) return;
+    text.textContent =
+      `Диспетчер обновлён до ${pageVersion}, а сервер работает на ${serverVersion}. ` +
+      "Перезапустите диспетчер, чтобы страница и сервер снова совпали.";
+    banner.hidden = false;
+  }
+
+  function checkVersionSkew(serverVersion) {
+    // Плейсхолдер (запуск из исходников) — сверять нечего, см.
+    // HUB_BUILD_VERSION. Пустая версия сервера — тоже: это ошибка чтения
+    // /api/version, о ней уже сказано в «О программе».
+    if (!HUB_BUILD_VERSION || !serverVersion) return;
+    if (HUB_BUILD_VERSION === serverVersion) return;
+    showVersionSkewBanner(HUB_BUILD_VERSION, serverVersion);
   }
 
   // --- модалка "Зарегистрировать стенд" ---
@@ -1861,6 +1913,73 @@
     waitForHubBack(triggerBtn);
   }
 
+  // --- Выход из диспетчера (Д-3) ---
+  //
+  // Одна и та же функция за кнопкой в шапке и за пунктом в «О программе».
+  // Подтверждение обязательно и обязано СНИМАТЬ главный страх: человек видит
+  // в таблице живые стенды и справедливо боится погасить их вместе с
+  // диспетчером. Они переживут выход (сервер детей не трогает, см.
+  // HubHTTPServer.request_self_shutdown) — об этом прямо сказано в тексте.
+
+  async function exitHubFlow(triggerBtn) {
+    if (triggerBtn && triggerBtn.disabled) return;
+    const confirmed = await styledConfirm(
+      "Выход из диспетчера",
+      "Закрыть диспетчер стендов? Запущенные стенды продолжат работать — выход останавливает " +
+        "только сам диспетчер. Чтобы открыть его снова, запустите ярлык «Диспетчер стендов BPMkit».",
+      "Выйти"
+    );
+    if (!confirmed) return;
+    if (triggerBtn) triggerBtn.disabled = true;
+    try {
+      await apiSend("POST", "/api/hub/shutdown");
+    } catch (e) {
+      // Обрыв связи ТУТ — штатный исход, а не ошибка: сервер мог закрыть
+      // сокет раньше, чем ответ дошёл до вкладки. Раз просили выйти — считаем,
+      // что вышли, и показываем прощальный экран.
+      if (!isNetworkError(e)) {
+        if (triggerBtn) triggerBtn.disabled = false;
+        showActionStatus(`Не удалось закрыть диспетчер: ${describeApiError(e)}`, true);
+        return;
+      }
+    }
+    showRestartOverlay(
+      "Диспетчер закрыт. Запущенные стенды продолжают работать.",
+      "Чтобы открыть диспетчер снова, запустите ярлык «Диспетчер стендов BPMkit». Эту вкладку можно закрыть.",
+      false
+    );
+  }
+
+  // --- Перезапуск БЕЗ повышения прав (GAP-276 п.3) ---
+  //
+  // Отличается от restartElevatedFlow ровно одним: эндпоинтом (и, как
+  // следствие, отсутствием окна UAC). Ожидание возврата — та же waitForHubBack:
+  // она не знает и не обязана знать, каким путём поднялся новый процесс.
+
+  async function restartHubFlow(triggerBtn) {
+    if (triggerBtn && triggerBtn.disabled) return;
+    setElevationButtonBusy(triggerBtn, true);
+    const confirmed = await styledConfirm(
+      "Перезапуск диспетчера",
+      "Перезапустить диспетчер? Он поднимется на том же адресе, страница переподключится сама. " +
+        "Запущенные стенды не останавливаются. Права администратора при этом не запрашиваются.",
+      "Перезапустить"
+    );
+    if (!confirmed) {
+      setElevationButtonBusy(triggerBtn, false);
+      return;
+    }
+    try {
+      await apiSend("POST", "/api/hub/restart");
+    } catch (e) {
+      setElevationButtonBusy(triggerBtn, false);
+      showActionStatus(`Не удалось перезапустить диспетчер: ${describeApiError(e)}`, true);
+      return;
+    }
+    showRestartOverlay("Перезапускаем диспетчер. Ждём, пока он поднимется заново…");
+    waitForHubBack(triggerBtn);
+  }
+
   // Сценарий «только эта операция» (GAP-311, П2): без перезапуска диспетчера,
   // одна операция стенда выполняется через elevated-помощника. Используется
   // и из кнопки «Только эту операцию» в ошибке стенда, и из блока «Однократная
@@ -2012,6 +2131,10 @@
         openSettings("about");
       });
     }
+    const exitBtn = document.getElementById("exit-btn");
+    if (exitBtn) exitBtn.addEventListener("click", () => exitHubFlow(exitBtn));
+    const skewRestartBtn = document.getElementById("version-skew-restart-btn");
+    if (skewRestartBtn) skewRestartBtn.addEventListener("click", () => restartHubFlow(skewRestartBtn));
     const restartOverlayCloseBtn = document.getElementById("restart-overlay-close-btn");
     if (restartOverlayCloseBtn) restartOverlayCloseBtn.addEventListener("click", hideRestartOverlay);
     const elevatedOpOverlayCloseBtn = document.getElementById("elevated-op-overlay-close-btn");
@@ -2025,6 +2148,12 @@
   function setupAboutElevation() {
     const restartBtn = document.getElementById("about-elevation-restart-btn");
     if (restartBtn) restartBtn.addEventListener("click", () => restartElevatedFlow(restartBtn));
+    // Д-3 / GAP-276: перезапуск без прав и выход — те же сценарии, что у
+    // кнопок в шапке и у плашки рассинхрона версий.
+    const plainRestartBtn = document.getElementById("about-restart-btn");
+    if (plainRestartBtn) plainRestartBtn.addEventListener("click", () => restartHubFlow(plainRestartBtn));
+    const aboutExitBtn = document.getElementById("about-exit-btn");
+    if (aboutExitBtn) aboutExitBtn.addEventListener("click", () => exitHubFlow(aboutExitBtn));
     const runBtn = document.getElementById("about-elevated-once-run-btn");
     if (runBtn) {
       runBtn.addEventListener("click", () => {
@@ -3060,6 +3189,7 @@
     "run_dir",
     "log_dir",
     "refresh_interval_sec",
+    "idle_shutdown_min",
     "agent_host",
     "agent_port",
     "token_ref",

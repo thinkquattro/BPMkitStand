@@ -749,7 +749,8 @@ def _run_node_harness(tmp_path) -> dict:
     script = _build_node_harness(js)
     script_path = tmp_path / "consent_behavior.js"
     script_path.write_text(script, encoding="utf-8")
-    proc = subprocess.run([NODE, str(script_path)], capture_output=True, text=True, timeout=30)
+    proc = subprocess.run([NODE, str(script_path)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=30)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
 

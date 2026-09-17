@@ -399,9 +399,14 @@ def test_stop_running_instance_does_not_kill_a_real_unrelated_process(tmp_path):
     завершившегося хаба) указывает НА ЭТОТ ЖЕ pid, но с несовпадающим
     `started_at` и `process_create_time` — процесс НЕ убит."""
     import subprocess
+    import sys as _sys
     import time as _time
 
-    proc = subprocess.Popen(["sleep", "60"])
+    # Раньше здесь стоял ["sleep", "60"] — на Windows такой команды нет вовсе,
+    # и тест падал FileNotFoundError [WinError 2], не проверив НИЧЕГО (живьём
+    # 17.09.2026, хост издателя). Берём заведомо присутствующий посторонний
+    # процесс — тот же интерпретатор, которым запущен сам прогон.
+    proc = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         state = instance.HubInstanceState(
             pid=proc.pid,

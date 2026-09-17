@@ -136,10 +136,23 @@ def test_find_cli_autodetects_next_to_package(tmp_path):
     assert find_cli(CompanionSettings(), extra_roots=[root]) == [str(binary)]
 
 
-def test_find_cli_returns_none_when_nothing_found(tmp_path):
+def test_find_cli_returns_none_when_nothing_found(tmp_path, monkeypatch):
     """Пусто — значит пусто. Гадать «а вдруг он в PATH» нельзя: там может оказаться
-    другая сборка MCP, и канал спросит лицензию не у того."""
-    assert find_cli(CompanionSettings(), extra_roots=[tmp_path / "нет-такой-папки"]) is None
+    другая сборка MCP, и канал спросит лицензию не у того.
+
+    ``extra_roots`` НЕДОСТАТОЧНО для изоляции: ``candidate_roots`` добавляет к
+    ним каталоги ВВЕРХ от самого пакета (``CLI_MAX_UP`` уровней). При обычной
+    установке колеса там ``site-packages`` и пусто, но при editable-установке
+    прямо из dev-репозитория издателя (``pip install -e``) четвёртый уровень
+    вверх — корень ``bpmsoft-mcp``, где рядом лежит НАСТОЯЩИЙ
+    ``BPMkit/server/main.py``. Тест «ничего не нашлось» тогда падал не из-за
+    кода, а из-за того, ГДЕ его запустили (живьём 17.09.2026 на хосте
+    издателя). Подменяем обход вверх на пустой список — проверяем ровно то,
+    что заявлено: пустые корни дают ``None``."""
+    empty_root = tmp_path / "нет-такой-папки"
+    monkeypatch.setattr(context_module, "_candidate_roots",
+                        lambda extra_roots=None: list(extra_roots or []))
+    assert find_cli(CompanionSettings(), extra_roots=[empty_root]) is None
 
 
 # --------------------------------------------------------------------------------------

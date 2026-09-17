@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import sys
 
-__all__ = ["HUB_MUTEX_NAME", "acquire_hub_mutex"]
+__all__ = ["HUB_MUTEX_NAME", "acquire_hub_mutex", "release_hub_mutex"]
 
 #: ПЕРВОИСТОЧНИК имени -- других копий в BPMkitStand быть не должно (искать перед правкой:
 #: grep -r HUB_MUTEX_NAME). Копия для установщика -- packaging/installer/
@@ -215,4 +215,47 @@ def acquire_hub_mutex():
     if not handle:
         return False
     _hub_mutex_handle = handle
+    return True
+
+
+def release_hub_mutex():
+    """Освобождает именованный мьютекс диспетчера, взятый ``acquire_hub_mutex``
+    (Д-3: штатный выход через ``POST /api/hub/shutdown`` и автовыход по простою).
+
+    ЗАЧЕМ ЯВНО, если хендл всё равно закрывает ОС при завершении процесса.
+    Потому что «процесс ещё не завершился» — это не мгновение, а заметный
+    интервал: после ``shutdown()`` хаб доигрывает ``server_close()``, гасит
+    фоновые потоки, чистит файл состояния, а в desktop-режиме ещё и закрывает
+    окна pywebview. Установщик/деинсталлятор BPMkit (``HubMutexRunning`` в
+    ``bpmkit_installer.iss``) всё это время продолжает видеть диспетчер
+    «запущенным» и отказывать пользователю, который только что нажал «Выход»
+    ИМЕННО ради того, чтобы установщик пошёл дальше. Освобождаем сразу, как
+    только решение выйти принято.
+
+    Идемпотентна: повторный вызов (и вызов без предшествующего захвата)
+    возвращает False, ничего не делая. ЛЮБАЯ ошибка подавляется по той же
+    причине, что и в ``acquire_hub_mutex``: диагностика установщика не имеет
+    права помешать диспетчеру завершиться.
+
+    Возвращает True, если хендл действительно был закрыт этим вызовом.
+    """
+    global _hub_mutex_handle
+    handle = _hub_mutex_handle
+    if handle is None:
+        return False
+    # Обнуляем ПЕРЕД закрытием: если CloseHandle почему-то бросит, повторный
+    # вызов не должен попытаться закрыть тот же хендл второй раз.
+    _hub_mutex_handle = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # ReleaseMutex (снять владение) + CloseHandle (отдать сам объект).
+        # Одного CloseHandle формально достаточно — ядро снимает владение при
+        # закрытии последнего хендла, — но явный ReleaseMutex делает намерение
+        # читаемым и не стоит ничего.
+        kernel32.ReleaseMutex(handle)
+        kernel32.CloseHandle(handle)
+    except Exception:
+        return False
     return True
