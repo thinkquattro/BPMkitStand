@@ -83,7 +83,8 @@ from standkit_hub.agent_control import AgentControlError, AgentController
 from standkit_hub import elevation as _elevation
 from standkit_hub import instance as _instance
 from standkit_hub.client import FederatedClient, RemoteCallError
-from standkit_hub.config import HubConfig
+from standkit_hub.config import HubConfig, normalize_idle_shutdown_min
+from standkit_hub.mutex import release_hub_mutex
 from standkit_hub.poller import StatusPoller, StatusSnapshot
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
 
@@ -147,6 +148,43 @@ _IIS_DETECT_PATH = "/api/iis/detect"
 # (GAP-311 п.6) — отдельный путь, а не суб-действие /api/stand/<name>/*,
 # потому что она не проходит через обычный HTTP-цикл: запускает отдельный
 # elevated-процесс (см. standkit_hub.elevated_op) и опрашивается по op_id.
+# Заголовок, которым страница сообщает серверу версию СВОЕЙ сборки (GAP-276 п.2).
+# Нужен, чтобы 404 на неизвестный маршрут отличал «такой функции тут нет вовсе»
+# от «сервер старее страницы» — см. Handler._send_unknown_api_route.
+_BUILD_VERSION_HEADER = "X-Standkit-Build"
+
+
+def on_disk_standkit_version(default: str = "") -> str:
+    """
+    Версия ``standkit`` ПО ФАЙЛУ НА ДИСКЕ, а не из памяти процесса (GAP-276 п.2).
+
+    ЗАЧЕМ ОТДЕЛЬНО ОТ ``standkit.__version__``. Ровно в этом расхождении и
+    состоит гэп: ``pip install`` заменил файлы пакета, но работающий процесс
+    продолжает держать в памяти СТАРЫЙ код и старую константу. Статика
+    (``index.html``/``app.js``) при этом читается с диска на каждый запрос —
+    то есть страница уже НОВАЯ. Чтобы страница смогла сказать «я новее
+    сервера», ей нужна версия, взятая оттуда же, откуда взялась она сама, —
+    с диска.
+
+    Читаем ИСХОДНИК, а не импортируем: повторный ``import``/``reload`` в
+    работающем процессе притащил бы новый код в старый процесс — именно то,
+    чего мы избегаем (наполовину обновлённый хаб хуже честно старого).
+    Регулярка вместо ``exec``: файл на диске может быть от версии, которая
+    этому процессу вообще не по зубам.
+
+    Любая беда (файла нет, прав нет, формат не узнан) — ``default``: сверка
+    версий не та функция, ради которой стоит ронять отдачу страницы.
+    """
+    try:
+        import standkit as _sk
+
+        init_path = Path(_sk.__file__)
+        text = init_path.read_text(encoding="utf-8")
+    except (OSError, ImportError, TypeError, ValueError):
+        return default
+    m = re.search(r"""^__version__\s*=\s*['"]([^'"]+)['"]""", text, re.MULTILINE)
+    return m.group(1) if m else default
+
 _ELEVATED_OP_PATH = "/api/hub/elevated-op"
 # Матчит ЛЮБОЙ хвост после .../elevated-op/ — по контракту (см. GAP-311 п.6)
 # невалидный op_id должен дать 400 «свой», а не молчаливый общий 404
@@ -1126,6 +1164,12 @@ def make_handler(
             except OSError:
                 theme = "auto"
             text = text.replace("__STANDKIT_THEME__", theme)
+            # Версия сборки СТАТИКИ (GAP-276 п.2) — берётся с ДИСКА, оттуда же,
+            # откуда только что прочитан сам index.html, и потому может
+            # отличаться от версии в памяти этого процесса. Расхождение и есть
+            # признак «пакет обновили, а хаб не перезапустили»: страница
+            # сверяет это значение с /api/version (app.js::checkVersionSkew).
+            text = text.replace("__STANDKIT_BUILD__", on_disk_standkit_version(_standkit_version))
             # Режим отображения — тем же приёмом, что и тема: атрибут на <html>
             # проставлен ДО выполнения JS, поэтому компактное окно не успевает
             # мигнуть полноразмерным дашбордом.
@@ -1302,6 +1346,13 @@ def make_handler(
             self.send_header("Connection", "close")
             self.end_headers()
 
+            # Д-3/GAP-276: живые SSE-потоки — единственный честный признак
+            # «дашборд кто-то смотрит». Регистрируемся ПОСЛЕ отправки
+            # заголовков (соединение состоялось) и снимаемся в finally, что бы
+            # ни оборвало цикл, — иначе счётчик уехал бы вверх навсегда и
+            # автовыход по простою не сработал бы уже никогда.
+            self.server.sse_client_opened()
+
             version = 0
             try:
                 # Рекомендация клиенту переподключаться не чаще, чем раз в
@@ -1325,6 +1376,8 @@ def make_handler(
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError, ValueError):
                 # Клиент закрыл вкладку/оборвал соединение — штатный выход.
                 return
+            finally:
+                self.server.sse_client_closed()
 
         def _api_stand_status(self, name: str) -> None:
             config = _load_config(config_path)
@@ -2044,6 +2097,172 @@ def make_handler(
                     with server.restart_lock:
                         server.restart_state = None
 
+        def _send_unknown_api_route(self) -> None:
+            """
+            404 на неизвестный ``/api/*`` маршрут — человеческим текстом
+            (GAP-276 п.4), а не сырым ``{"error": "not found"}``.
+
+            ЗАЧЕМ. Самый частый источник такого 404 — не опечатка в URL, а
+            рассинхрон версий: ``pip install`` положил новую статику поверх
+            РАБОТАЮЩЕГО процесса со старым кодом, новая страница зовёт маршрут,
+            которого у старого сервера ещё нет. Живой случай владельца
+            11.09.2026: раздел «Лицензия» показал пользователю ровно строку
+            ``not found`` как «лицензия не найдена» — сообщение, уводящее в
+            прямо противоположную сторону от причины.
+
+            ``hub_version``/``stale`` в теле — чтобы фронт мог не гадать: при
+            ``stale: true`` он показывает ту же плашку «перезапустить», что и
+            при явном расхождении версии сборки (см. ``checkVersionSkew``).
+            Признак «устарел» вычисляется не гаданием, а фактом: страница сама
+            прислала версию своей сборки заголовком ``X-Standkit-Build``, и она
+            не совпала с версией этого процесса.
+            """
+            build = (self.headers.get(_BUILD_VERSION_HEADER) or "").strip()
+            stale = bool(build) and build != _standkit_version
+            if stale:
+                message = (
+                    f"Диспетчер обновлён до {build}, а работающий сервер — {_standkit_version}. "
+                    "Перезапустите диспетчер, чтобы страница и сервер снова совпали."
+                )
+            else:
+                message = (
+                    "Сервер диспетчера не поддерживает эту функцию — возможно, он устарел. "
+                    "Перезапустите диспетчер и повторите."
+                )
+            self._send_json(404, {"error": message, "hub_version": _standkit_version,
+                                  "stale": stale, "unknown_route": True})
+
+        # --- API: штатный выход и перезапуск диспетчера (Д-3 / GAP-276) ---
+
+        def _api_hub_shutdown(self) -> None:
+            """
+            ``POST /api/hub/shutdown`` — кнопка «Выход» в шапке и в
+            «Настройки → О программе» (Д-3).
+
+            Отвечаем 202 и ТОЛЬКО ПОТОМ гасим сервер: ответ обязан успеть
+            уйти по сокету до того, как ``shutdown()`` закроет слушатель —
+            иначе вкладка увидит обрыв связи вместо подтверждения и не сможет
+            отличить «вышли, как просили» от «диспетчер упал».
+
+            Всю работу (мьютекс, файл состояния, сам ``shutdown``) делает
+            ``HubHTTPServer.request_self_shutdown`` — общая с автовыходом по
+            простою точка, см. её docstring. Дети (запущенные стенды, локальный
+            агент) НЕ трогаются.
+
+            409 на повторный запрос: выход уже идёт, второй ``shutdown()`` по
+            закрывающемуся серверу ничего не улучшит, а пользователю честнее
+            увидеть «уже завершается», чем второе «готово».
+            """
+            server = self.server
+            if getattr(server, "self_shutdown_requested", False):
+                self._send_json(409, {"error": "Диспетчер уже завершается."})
+                return
+            self._send_json(202, {"ok": True, "stopping": True})
+            try:
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError, ValueError):
+                # Клиент уже отвалился — выходим всё равно, его об этом просили.
+                pass
+            server.request_self_shutdown()
+
+        def _api_hub_restart(self) -> None:
+            """
+            ``POST /api/hub/restart`` — перезапуск диспетчера БЕЗ повышения
+            прав (GAP-276 п.3): та же машинерия, что у
+            ``/api/hub/restart-elevated``, но новый процесс запускается
+            обычным ``spawn``, а не ``ShellExecuteW(runas)`` — окна UAC нет.
+
+            ЗАЧЕМ ОТДЕЛЬНЫЙ ЭНДПОИНТ, а не «restart-elevated без runas». Их
+            смысл разный: elevated-перезапуск МЕНЯЕТ права процесса и потому
+            обязан спросить Windows и сверить учётную запись; этот — чинит
+            рассинхрон «код старый, статика новая» после ``pip install``
+            поверх работающего хаба, и права оставляет ровно те, что были.
+            Спрашивать за это UAC было бы вымогательством прав на пустом месте.
+
+            Переиспользуется ВСЁ, что уже построено для elevated-пути:
+            ``build_relaunch_params`` (те же ``--takeover``/``--no-browser``/
+            ``--desktop``/``--config``/``--session-token-file``), файл передачи
+            сессии (вкладка переживает перезапуск без повторного входа),
+            ``result_file`` и ``restart_state`` для отражения исхода в UI,
+            ``_watch_restart_result``. Отличается ровно одна строка — чем
+            именно порождается процесс.
+
+            ``--initiator-sid`` НЕ передаём: сверка учётной записи (GAP-311
+            п.4) существует ради over-the-shoulder UAC, а здесь процесс
+            заведомо порождается тем же пользователем.
+            """
+            server = self.server
+            with server.restart_lock:
+                current = server.restart_state
+                if current is not None and current.get("status") in ("requesting", "pending"):
+                    self._send_json(409, {"error": "Перезапуск уже запрошен — дождитесь его завершения."})
+                    return
+                server.restart_state = {"status": "requesting", "at": time.time()}
+
+            # committed — тот же приём, что в _api_hub_restart_elevated (GAP-311
+            # M3): любое непредвиденное исключение между «requesting» и явным
+            # исходом обязано откатить состояние, иначе все дальнейшие POST
+            # получают 409 про перезапуск, которого уже не будет.
+            committed = False
+            handoff: Optional[Path] = None
+            try:
+                config = _load_config(config_path)
+                run_dir = config.resolve_run_dir()
+                handoff = _elevation.handoff_path(run_dir)
+                try:
+                    _elevation.write_handoff(handoff, session_token)
+                except OSError as exc:
+                    self._send_json(500, {"error": f"Не удалось подготовить передачу сессии: {exc}"})
+                    return
+
+                result_file = run_dir / _RESTART_RESULT_FILE_NAME
+                try:
+                    result_file.unlink()
+                except OSError:
+                    pass
+
+                params = _elevation.build_relaunch_params(
+                    port=self._hub_port(),
+                    host=self._hub_host(),
+                    handoff=handoff,
+                    config_path=config_path,
+                    desktop=desktop_mode,
+                    result_file=result_file,
+                    insecure=insecure_mode,
+                )
+                executable, full_params = _elevation.relaunch_command(params)
+                # Тот же способ порождения, что у стендов и локального агента:
+                # без консольного окна и в СВОЕЙ группе процессов — новый
+                # диспетчер обязан пережить завершение этого, которое наступит
+                # через секунды (он сам пришлёт нам стоп-запрос на перехвате).
+                log_dir = Path(config.log_dir) if config.log_dir else Path.home() / ".standkit" / "logs"
+                try:
+                    _platform.spawn_hidden(
+                        [executable, *full_params],
+                        cwd=Path.home(),
+                        log_path=log_dir / "standkit-hub-restart.log",
+                    )
+                except Exception as exc:  # noqa: BLE001 - наружу только понятный текст
+                    _elevation.discard_handoff(handoff)
+                    self._send_json(
+                        500, {"error": f"Не удалось запустить новый процесс диспетчера: {exc}"})
+                    return
+
+                with server.restart_lock:
+                    server.restart_state = {"status": "pending", "at": time.time()}
+                committed = True
+                self._send_json(202, {"ok": True, "restarting": True})
+                threading.Thread(
+                    target=_watch_restart_result,
+                    args=(server, result_file, handoff),
+                    name="standkit-hub-restart-watch",
+                    daemon=True,
+                ).start()
+            finally:
+                if not committed:
+                    with server.restart_lock:
+                        server.restart_state = None
+
         # --- API: одноразовая операция с правами над стендом IIS (GAP-311 п.6) ---
 
         def _api_hub_elevated_op_start(self) -> None:
@@ -2664,7 +2883,7 @@ def make_handler(
                 self._api_stand_state(m.group("name"), parsed)
                 return
 
-            self._send_json(404, {"error": "not found"})
+            self._send_unknown_api_route()
 
         def do_POST(self) -> None:  # noqa: N802 - сигнатура BaseHTTPRequestHandler
             parsed = urlparse(self.path)
@@ -2725,6 +2944,22 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_pick()
+                return
+
+            if path == "/api/hub/shutdown":
+                # Выход — мутация сильнее некуда (процесс завершится), та же
+                # связка double-submit + локальный Origin, что у остальных.
+                if not self._authorize_mutation():
+                    return
+                self._api_hub_shutdown()
+                return
+
+            if path == "/api/hub/restart":
+                # Перезапуск БЕЗ повышения прав (GAP-276): процесс будет
+                # заменён своей же копией — мутация, авторизация та же.
+                if not self._authorize_mutation():
+                    return
+                self._api_hub_restart()
                 return
 
             if path == "/api/hub/restart-elevated":
@@ -2809,7 +3044,7 @@ def make_handler(
                 self._api_stand_redis_clear(m.group("name"))
                 return
 
-            self._send_json(404, {"error": "not found"})
+            self._send_unknown_api_route()
 
         def do_DELETE(self) -> None:  # noqa: N802 - сигнатура BaseHTTPRequestHandler
             parsed = urlparse(self.path)
@@ -2828,7 +3063,7 @@ def make_handler(
                 self._api_secret_delete(m.group("ref"))
                 return
 
-            self._send_json(404, {"error": "not found"})
+            self._send_unknown_api_route()
 
         def do_PUT(self) -> None:  # noqa: N802 - сигнатура BaseHTTPRequestHandler
             """Единственный PUT хаба — запись лицензионного ключа.
@@ -2999,6 +3234,154 @@ _STOP_REQUEST_POLL_INTERVAL_SEC = 0.5
 _STOP_REQUEST_MAX_AGE_SEC = 60.0
 
 
+# Как часто проверять условие простоя (Д-3/GAP-276). Раз в 15 с: таймер
+# считается в МИНУТАХ, поэтому доля минуты на точность срабатывания не влияет,
+# а фоновый поток при этом почти ничего не стоит.
+_IDLE_CHECK_INTERVAL_SEC = 15.0
+
+
+class _IdleShutdownWatcher:
+    """
+    Фоновый поток автовыхода по простою (Д-3/GAP-276, ``idle_shutdown_min``).
+
+    ЗАЧЕМ. Диспетчер живёт под ``pythonw.exe`` без окна: закрыв вкладку,
+    человек не закрывает процесс — тот держит порт 8770 и мьютекс до
+    перезагрузки, а установщик BPMkit потом отказывается работать «диспетчер
+    запущен», хотя пользователь давно о нём забыл. Кнопка «Выход» решает это
+    для того, кто о ней знает; таймер — для всех остальных.
+
+    УСЛОВИЕ ПРОСТОЯ — конъюнкция, оба слагаемых обязательны:
+
+    1. нет ни одного открытого SSE-клиента (``sse_client_count() == 0``) —
+       «дашборд никто не смотрит»;
+    2. нет ни одного стенда в состоянии ``running`` — «диспетчер сейчас ничем
+       не управляет».
+
+    Почему именно И, а не ИЛИ. Закрытая вкладка при живых стендах — штатная
+    работа: стенды подняли через диспетчер и ушли ими пользоваться, выйти
+    сейчас значит потерять управление ими (усыновление, ``external``-бейдж).
+    Открытая вкладка без стендов — человек смотрит на пустой список, но
+    смотрит; закрыть страницу у него под руками нельзя.
+
+    Таймер СБРАСЫВАЕТСЯ при каждой проверке, когда условие не выполняется, —
+    отсчёт всегда идёт от последнего момента активности, а не от старта хаба.
+
+    ``--desktop`` (pywebview) — особый случай (решение по дизайну Д-3): там
+    вкладки нет вовсе, окно и есть процесс, а SSE-поток может пересоздаваться
+    при перерисовке. Признак «никто не смотрит» в этом режиме недостоверен,
+    поэтому условие сводится ТОЛЬКО к стендам: пока их нет — считаем простой.
+    Закрытие окна в этом режиме и так завершает процесс штатно.
+
+    Настройка перечитывается перед каждой проверкой (как у ``poll_interval_of``):
+    правка ``idle_shutdown_min`` в форме настроек применяется без перезапуска, и
+    ``0`` останавливает отсчёт немедленно.
+    """
+
+    def __init__(self, server: "HubHTTPServer", config_path: Path, *,
+                 desktop: bool = False,
+                 check_interval: float = _IDLE_CHECK_INTERVAL_SEC,
+                 now: "Optional[Callable[[], float]]" = None):
+        self._server = server
+        self._config_path = config_path
+        self._desktop = bool(desktop)
+        self._check_interval = check_interval
+        # Подменяемые часы — чтобы тест проверял 30-минутный таймер, не ожидая
+        # 30 минут (и не подменяя time.monotonic глобально, что ломает соседей).
+        self._now = now or time.monotonic
+        self._stop_event = threading.Event()
+        self._idle_since: Optional[float] = None
+        self._thread = threading.Thread(target=self._run, name="standkit-hub-idle-watch", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+
+    # --- предикаты (публичные ради тестов: каждый проверяется отдельно) ---
+
+    def idle_timeout_sec(self) -> float:
+        """``idle_shutdown_min`` из конфига в секундах; ``0.0`` — выключено.
+
+        Битый/недоступный конфиг НЕ имеет права уронить фоновый поток и НЕ
+        имеет права выключить таймер молча: отдаём дефолт, ровно как
+        ``poll_interval_of``."""
+        try:
+            minutes = normalize_idle_shutdown_min(
+                _load_config(self._config_path).idle_shutdown_min)
+        except (OSError, TypeError, ValueError):
+            minutes = normalize_idle_shutdown_min(HubConfig().idle_shutdown_min)
+        return float(minutes) * 60.0
+
+    def has_running_stands(self) -> bool:
+        """Есть ли хоть один стенд в состоянии ``running``.
+
+        Берём ГОТОВЫЙ снапшот фонового поллера и НЕ опрашиваем стенды сами:
+        своя проба из этого потока стоила бы столько же, сколько тик поллера,
+        и удваивала бы сетевую нагрузку ради вопроса, ответ на который уже
+        собран рядом.
+
+        Поллера нет или он ещё не отдал первый снапшот — отвечаем ``True``
+        («стенды есть»), то есть НЕ выходим. Незнание обязано трактоваться в
+        пользу того, чтобы остаться: ошибочно оставшийся процесс человек
+        закроет кнопкой, ошибочно закрывшийся уносит с собой управление
+        живыми стендами."""
+        poller = getattr(self._server, "status_poller", None)
+        if poller is None:
+            return True
+        snapshot = poller.snapshot()
+        if snapshot is None:
+            return True
+        for stand in getattr(snapshot, "stands", []) or []:
+            process = (stand or {}).get("process") or {}
+            if process.get("state") == "running":
+                return True
+        return False
+
+    def is_idle(self) -> bool:
+        """Выполнено ли условие простоя ПРЯМО СЕЙЧАС (без учёта таймера)."""
+        if self.has_running_stands():
+            return False
+        if self._desktop:
+            # См. docstring класса: в режиме окна признак «никто не смотрит»
+            # недостоверен, условие сводится к стендам.
+            return True
+        return self._server.sse_client_count() == 0
+
+    # --- сам цикл ---
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self._tick()
+            except Exception:  # noqa: BLE001 - фоновый поток не имеет права упасть молча и навсегда
+                self._idle_since = None
+            self._stop_event.wait(self._check_interval)
+
+    def _tick(self) -> None:
+        timeout = self.idle_timeout_sec()
+        if timeout <= 0.0:
+            self._idle_since = None  # выключено — забываем накопленный отсчёт
+            return
+        if not self.is_idle():
+            self._idle_since = None
+            return
+        moment = self._now()
+        if self._idle_since is None:
+            self._idle_since = moment
+            return
+        if moment - self._idle_since < timeout:
+            return
+        self._idle_since = None
+        print(
+            f"[standkit-hub] простой дольше {timeout / 60.0:.0f} мин "
+            "(дашборд закрыт, работающих стендов нет) — диспетчер завершается; "
+            "запущенные стенды продолжат работать",
+        )
+        self._server.request_self_shutdown()
+
+
 class _StopRequestWatcher:
     """
     Фоновый поток, слушающий файл-запрос остановки (``standkit_hub.instance``,
@@ -3119,10 +3502,27 @@ class HubHTTPServer(ThreadingHTTPServer):
 
     daemon_threads = True
 
-    def __init__(self, server_address, handler_cls, *, config_path: Path, poll: bool = True):
+    def __init__(self, server_address, handler_cls, *, config_path: Path, poll: bool = True,
+                 desktop: bool = False):
         super().__init__(server_address, handler_cls)
         self.config_path = config_path
         self.status_poller: Optional[StatusPoller] = None
+        # Д-3/GAP-276. Счётчик открытых SSE-потоков — признак «дашборд смотрят»
+        # для автовыхода по простою (см. _IdleShutdownWatcher). Под Lock'ом, а
+        # не просто int: ThreadingHTTPServer ведёт КАЖДОЕ соединение в своём
+        # потоке, и += над обычным int здесь не атомарен.
+        self._sse_lock = threading.Lock()
+        self._sse_clients = 0
+        # Путь файла состояния экземпляра (standkit_hub.instance): штатный выход
+        # обязан подчистить его ДО завершения, иначе следующий запуск увидит
+        # «диспетчер уже работает» с pid'ом мёртвого процесса. Подставляется
+        # из __main__ после write_state; None — состояние не ведётся (тесты).
+        self.instance_state_file: Optional[Path] = None
+        # Запрошен ли штатный выход (Д-3): POST /api/hub/shutdown и автовыход по
+        # простою идут ОДНИМ путём (request_self_shutdown) и не должны
+        # сработать дважды — второй shutdown() по уже закрытому серверу.
+        self._self_shutdown_lock = threading.Lock()
+        self.self_shutdown_requested = False
         # Состояние перезапуска "с правами администратора" (GAP-311 п.5) —
         # общее для всех потоков-обработчиков ОДНОГО сервера, поэтому под
         # своим Lock'ом, а не полем Handler'а (Handler создаётся на каждый
@@ -3199,6 +3599,87 @@ class HubHTTPServer(ThreadingHTTPServer):
                 interval=lambda: poll_interval_of(config_path),
             )
             self.status_poller.start()
+        # Автовыход по простою (Д-3/GAP-276) поднимается ПОСЛЕ поллера: он
+        # читает именно его снапшот (см. _IdleShutdownWatcher.has_running_stands),
+        # и до старта поллера отвечал бы «стенды есть» на пустом месте.
+        # Поток создаётся всегда — сам таймер включается/выключается настройкой
+        # idle_shutdown_min, которую он перечитывает перед каждой проверкой;
+        # так правка в форме применяется без перезапуска хаба.
+        self.idle_watcher: Optional[_IdleShutdownWatcher] = _IdleShutdownWatcher(
+            self, config_path, desktop=desktop)
+        self.idle_watcher.start()
+
+    # --- Д-3/GAP-276: учёт SSE-клиентов и штатный выход ---
+
+    def sse_client_opened(self) -> None:
+        with self._sse_lock:
+            self._sse_clients += 1
+
+    def sse_client_closed(self) -> None:
+        with self._sse_lock:
+            # max(0, ...) — защита от рассинхрона (двойной finally при
+            # экзотическом обрыве): отрицательный счётчик навсегда убедил бы
+            # сторожа простоя, что клиентов «меньше нуля», то есть нет.
+            self._sse_clients = max(0, self._sse_clients - 1)
+
+    def sse_client_count(self) -> int:
+        with self._sse_lock:
+            return self._sse_clients
+
+    def request_self_shutdown(self) -> bool:
+        """
+        Штатный выход диспетчера (Д-3): и кнопка «Выход»
+        (``POST /api/hub/shutdown``), и автовыход по простою идут сюда.
+
+        Порядок шагов не произволен:
+
+        1. ``release_hub_mutex()`` — СРАЗУ, до всякой уборки. Именно ради
+           мьютекса чаще всего и нажимают «Выход» (установщик BPMkit иначе
+           отказывается работать), а уборка ниже занимает заметное время.
+        2. ``clear_state`` — файл состояния экземпляра убирается ДО завершения,
+           иначе следующий запуск увидит «диспетчер уже работает» с pid'ом
+           мёртвого процесса и откажется подниматься. ``pid=os.getpid()`` —
+           защита от гонки: если наш порт УЖЕ перехватил новый экземпляр
+           (перезапуск с правами), файл состояния теперь его, и трогать его
+           нельзя.
+        3. ``on_stop_request``/``_schedule_shutdown`` — ровно тот же путь
+           завершения, что у перехвата порта (GAP-311 Б1): в desktop-режиме
+           одного ``shutdown()`` мало, надо ещё закрыть окна pywebview.
+
+        ДЕТЕЙ НЕ ТРОГАЕМ вовсе: запущенные через диспетчер стенды (kestrel) и
+        локальный агент — прямые потомки этого процесса, и они обязаны пережить
+        его выход. Их усыновит init/system, они продолжат слушать свои порты.
+        Это и обещано пользователю в подтверждении кнопки «Выход».
+
+        Возвращает False, если выход уже был запрошен раньше (повторный вызов
+        ничего не делает — второй ``shutdown()`` по закрытому серверу).
+        """
+        with self._self_shutdown_lock:
+            if self.self_shutdown_requested:
+                return False
+            self.self_shutdown_requested = True
+
+        try:
+            release_hub_mutex()
+        except Exception:  # noqa: BLE001 - мьютекс не имеет права помешать выходу
+            pass
+
+        state_file = getattr(self, "instance_state_file", None)
+        if state_file is not None:
+            try:
+                _instance.clear_state(state_file, pid=os.getpid())
+            except Exception:  # noqa: BLE001 - то же: уборка не блокирует выход
+                pass
+
+        callback = getattr(self, "on_stop_request", None)
+        if callback is not None:
+            try:
+                callback()
+                return True
+            except Exception:  # noqa: BLE001
+                pass  # упавший колбэк не должен оставить процесс висящим
+        _schedule_shutdown(self, delay=_SHUTDOWN_DELAY_SEC)
+        return True
 
     def serve_forever(self, poll_interval: float = 0.5) -> None:
         # GAP-311 M7: выставляем ФЛАГ первым делом, до того, как реально
@@ -3217,6 +3698,10 @@ class HubHTTPServer(ThreadingHTTPServer):
         if watcher is not None:
             watcher.stop()
             self._stop_request_watcher = None
+        idle = getattr(self, "idle_watcher", None)
+        if idle is not None:
+            idle.stop()
+            self.idle_watcher = None
         poller = getattr(self, "status_poller", None)
         if poller is not None:
             poller.stop()
@@ -3264,7 +3749,8 @@ def create_hub_server(
         desktop_mode=desktop_mode,
         insecure_mode=insecure,
     )
-    return HubHTTPServer((host, port), handler_cls, config_path=config_path, poll=poll)
+    return HubHTTPServer((host, port), handler_cls, config_path=config_path, poll=poll,
+                         desktop=desktop_mode)
 
 
 # Коды ошибок bind'а, которые означают «порт занят/недоступен» и оправдывают

@@ -727,6 +727,30 @@ button:disabled {
   display: none;
 }
 
+/* Плашка рассинхрона версий (GAP-276 п.2). Предупреждающая, а не аварийная:
+   диспетчер РАБОТАЕТ, просто страница и сервер разошлись после обновления
+   пакета — это чинится одной кнопкой прямо здесь, и пугать красным незачем. */
+.version-skew-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  background: color-mix(in srgb, var(--bpmkit-unknown) 14%, transparent);
+  border-bottom: 1px solid var(--bpmkit-unknown);
+  color: var(--bpmkit-text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.version-skew-banner[hidden] {
+  display: none;
+}
+
+.version-skew-banner button {
+  flex: none;
+}
+
 /* Пока связи нет, таблица показывает ПОСЛЕДНИЙ успешный снапшот — данные в
    ней уже не соответствуют реальности. Гасим её, чтобы «Работает» из кэша не
    читался как свежий статус. Кнопки при этом остаются кликабельными: попытка

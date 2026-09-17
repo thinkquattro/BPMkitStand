@@ -581,6 +581,14 @@ def _run_node_harness(tmp_path) -> dict:
         [NODE, str(script_path)],
         capture_output=True,
         text=True,
+        # encoding="utf-8" ОБЯЗАТЕЛЕН: node печатает JSON в UTF-8 всегда, а
+        # text=True без явной кодировки декодирует вывод локалью процесса — на
+        # русской Windows это cp1251, и весь кириллический текст в ответе
+        # превращается в мусор («РџРѕРІС‹С€РµРЅРёРµ…»). Тесты, сверяющие
+        # русские сообщения, падали именно на этом, а не на коде страницы
+        # (живьём 17.09.2026, хост издателя).
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
@@ -678,7 +686,8 @@ function showSessionNotMovedOverlay() {{ calls.overlays.push({{ text: "session" 
 """
     path = tmp_path / "wait_for_hub_back.js"
     path.write_text(script, encoding="utf-8")
-    proc = subprocess.run([NODE, str(path)], capture_output=True, text=True, timeout=30)
+    proc = subprocess.run([NODE, str(path)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=30)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
 

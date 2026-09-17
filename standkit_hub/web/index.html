@@ -16,6 +16,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="standkit-token" content="__STANDKIT_TOKEN__" />
+  <!-- Версия сборки ЭТОЙ статики (GAP-276 п.2): подставляется сервером из
+       файла пакета НА ДИСКЕ, а не из своей памяти (server.py::
+       on_disk_standkit_version). Если пакет обновили под работающим хабом,
+       это значение уже новое, а /api/version — ещё старое; страница видит
+       расхождение и предлагает перезапуск. -->
+  <meta name="standkit-build" content="__STANDKIT_BUILD__" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Диспетчер стендов BPMkit</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
@@ -97,11 +103,35 @@
     <button id="about-btn" class="topbar-btn" type="button" title="О программе" aria-label="О программе">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="8" r=".7" fill="currentColor" stroke="none"/></svg>
     </button>
+    <!-- «Выход» (Д-3). Диспетчер живёт под pythonw.exe без окна: закрытая
+         вкладка НЕ завершает процесс, и он до перезагрузки держит порт 8770 и
+         именованный мьютекс, из-за которого установщик BPMkit отказывается
+         работать («диспетчер запущен»). Трея у нас нет по решению владельца,
+         поэтому единственная точка выхода — эта кнопка (и такой же пункт в
+         «Настройки → О программе»). Запущенные стенды выход НЕ трогает — они
+         прямые потомки процесса, но гасятся не они, а только сам диспетчер;
+         это сказано и в подтверждении. -->
+    <button id="exit-btn" class="topbar-btn" type="button" title="Выйти из диспетчера" aria-label="Выйти из диспетчера">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 17l-5-5 5-5"/><path d="M5 12h10"/></svg>
+    </button>
     <span id="conn-status" class="conn-status" title="Связь с хабом не проверялась">
       <span id="conn-status-dot" class="conn-status-dot conn-status-dot-pending"></span>
       <span id="conn-status-label">подключение…</span>
     </span>
   </header>
+
+  <!-- Плашка рассинхрона версий (GAP-276 п.2). Статика (этот файл, app.js,
+       style.css) читается с диска на КАЖДЫЙ запрос, а код сервера живёт в
+       памяти процесса: `pip install` поверх работающего хаба даёт новую
+       страницу на старом сервере. Живой случай 11.09.2026 — «О программе»
+       показывала версию из памяти процесса, а новый раздел «Лицензия» звал
+       маршрут, которого у старого сервера нет, и пользователь видел сырое
+       `not found`. Версия сборки страницы — константа HUB_BUILD_VERSION в
+       app.js (проставляется при сборке пакета), сверяется с /api/version. -->
+  <div id="version-skew-banner" class="version-skew-banner" hidden role="status">
+    <span id="version-skew-text"></span>
+    <button id="version-skew-restart-btn" type="button" class="secondary">Перезапустить диспетчер</button>
+  </div>
 
   <!-- Баннер «нет связи»: диспетчер живёт отдельным процессом (pythonw, без
        консоли) и может быть остановлен или пережить перезагрузку — вкладка об
@@ -612,6 +642,19 @@
               </span>
               <input type="number" name="refresh_interval_sec" min="1" max="3600" />
             </label>
+            <label>Закрывать диспетчер после простоя, мин
+              <span class="field-help" tabindex="0" role="img"
+                    aria-label="Через сколько минут простоя диспетчер закроется сам. Простой — когда страница дашборда закрыта И нет ни одного запущенного стенда. 0 — не закрывать никогда. Запущенные стенды продолжат работать. Пример: 30"
+                    data-tip="Через сколько минут простоя диспетчер закроется сам. Простой — когда страница дашборда закрыта И нет ни одного запущенного стенда. 0 — не закрывать никогда. Запущенные стенды продолжат работать. Пример: 30">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+                  <circle cx="10" cy="10" r="8.5" stroke="currentColor" stroke-width="1.4" />
+                  <path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .8-1 1.5" stroke="currentColor"
+                        stroke-width="1.4" stroke-linecap="round" fill="none" />
+                  <circle cx="10" cy="14.2" r="0.9" fill="currentColor" />
+                </svg>
+              </span>
+              <input type="number" name="idle_shutdown_min" min="0" max="10080" />
+            </label>
             <div class="panel-toolbar pane-actions">
               <button type="submit">Сохранить</button>
               <button type="button" id="install-shortcut-btn" class="secondary">Создать ярлык на рабочем столе</button>
@@ -915,6 +958,17 @@
                    в шапке (app.js::restartElevatedFlow). -->
               <button id="about-elevation-restart-btn" type="button" class="secondary" hidden>
                 Перезапустить с правами администратора
+              </button>
+              <!-- Перезапуск БЕЗ повышения прав (GAP-276 п.3): чинит
+                   рассинхрон «код старый, статика новая» после обновления
+                   пакета. Окна UAC не показывает — права остаются теми же. -->
+              <button id="about-restart-btn" type="button" class="secondary">
+                Перезапустить диспетчер
+              </button>
+              <!-- Тот же выход, что кнопкой в шапке (Д-3) — здесь для тех, кто
+                   ищет его там, где обычно живут «О программе» и «Выход». -->
+              <button id="about-exit-btn" type="button" class="secondary">
+                Выйти из диспетчера
               </button>
             </div>
             <!-- Однократная операция без перезапуска диспетчера (GAP-311, П2):

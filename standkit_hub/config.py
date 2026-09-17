@@ -39,6 +39,12 @@ _DEFAULT_LOCKOUT_MAX_FAILURES = 5
 _DEFAULT_LOCKOUT_WINDOW_SEC = 300.0
 _DEFAULT_REFRESH_INTERVAL_SEC = 10
 
+# Через сколько минут простоя диспетчер выходит сам (Д-3/GAP-276). 0 — выключено.
+# 30 минут — компромисс: дольше типичной паузы в работе (не закрываем диспетчер
+# под руками у человека, отошедшего за кофе), но заметно короче рабочего дня, за
+# который забытый фоновый процесс успевает стать «почему занят порт 8770».
+_DEFAULT_IDLE_SHUTDOWN_MIN = 30
+
 # Тема оформления дашборда. Источник правды — ИМЕННО конфиг, а не
 # localStorage браузера: localStorage привязан к origin (включая порт), а хаб
 # исторически стартовал на эфемерном порту — каждый запуск давал новый origin
@@ -59,6 +65,29 @@ def normalize_theme(value: object) -> str:
     if isinstance(value, str) and value.strip().lower() in HUB_THEMES:
         return value.strip().lower()
     return _DEFAULT_THEME
+
+
+def normalize_idle_shutdown_min(value: object) -> int:
+    """
+    Приводит «автовыход по простою» к целому числу минут ≥ 0 (Д-3/GAP-276).
+
+    Битое/отрицательное значение (руками правленый конфиг, присланная формой
+    строка) откатывается на дефолт, а НЕ на 0: молчаливое «выключено» из-за
+    опечатки человек заметит только через сутки забытого процесса, тогда как
+    вернувшийся дефолт виден в форме настроек сразу.
+
+    ``0`` — единственное значение, отключающее таймер, и оно проходит как есть:
+    это осознанное решение пользователя, а не сбой разбора.
+    """
+    if isinstance(value, bool):  # bool — подкласс int, но «True минут» бессмысленно
+        return _DEFAULT_IDLE_SHUTDOWN_MIN
+    try:
+        minutes = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return _DEFAULT_IDLE_SHUTDOWN_MIN
+    if minutes < 0:
+        return _DEFAULT_IDLE_SHUTDOWN_MIN
+    return minutes
 
 
 @dataclass
@@ -236,6 +265,13 @@ class HubConfig:
     run_dir: str = ""
     log_dir: str = ""
     refresh_interval_sec: int = _DEFAULT_REFRESH_INTERVAL_SEC
+    # Автовыход по простою (Д-3/GAP-276), МИНУТЫ; 0 — выключено. Простой =
+    # «нет ни одного открытого SSE-клиента И ни одного running-стенда»: первое
+    # означает «дашборд никто не смотрит», второе — «диспетчер сейчас ничем не
+    # управляет». Оба условия обязательны вместе: закрытая вкладка при живых
+    # стендах — норма (стенды поднимали через диспетчер и ждут), а открытая
+    # вкладка без стендов — человек смотрит на пустой список, но смотрит.
+    idle_shutdown_min: int = _DEFAULT_IDLE_SHUTDOWN_MIN
     # light | dark | auto (см. normalize_theme). Подставляется сервером прямо
     # в атрибут data-theme отдаваемого index.html — тема применяется ДО
     # выполнения JS, без «мигания» светлой темой у любителей тёмной.
@@ -360,6 +396,8 @@ class HubConfig:
                 kwargs[key] = CompanionSettings.from_dict(value)
             elif key == "theme":
                 kwargs[key] = normalize_theme(value)
+            elif key == "idle_shutdown_min":
+                kwargs[key] = normalize_idle_shutdown_min(value)
             else:
                 kwargs[key] = value
         return cls(**kwargs)
@@ -372,4 +410,6 @@ class HubConfig:
         # конструктором (в обход from_dict), а фронт обязан получать только
         # значение из HUB_THEMES.
         result["theme"] = normalize_theme(result.get("theme"))
+        result["idle_shutdown_min"] = normalize_idle_shutdown_min(
+            result.get("idle_shutdown_min"))
         return result
