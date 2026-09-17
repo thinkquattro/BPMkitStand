@@ -54,7 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import __version__, context, patterns, releases, revocations
+from . import __version__, context, cookbook, patterns, releases, revocations
 from .backend import BackendClient
 from .errors import ChannelError, CompanionError, ContextUnavailable, NotModified
 from .state import STATE_FILE_NAME, CompanionState
@@ -406,8 +406,43 @@ class CompanionRunner:
         return _Session(ctx=ctx, client=client)
 
     # -- выполнение --------------------------------------------------------------------
+    def _sync_cookbook(self, session) -> Optional[dict]:
+        """Доставка кукбука попутно с любым обновлением (GAP-361, требование
+        владельца 17.09.2026: «при ЛЮБОМ обновлении — MCP, диспетчера,
+        паттернов — если у издателя есть более новая версия кукбука, она
+        доставляется»).
+
+        НЕ отдельный цикл планировщика: у документа нет собственного расписания,
+        он едет пассажиром на уже состоявшемся пробуждении канала. Отдельный
+        цикл означал бы ещё один тик, ещё одну строку в UI и ещё один повод
+        разбудить машину — ради файла, который меняется реже всех остальных
+        артефактов.
+
+        Отказ здесь НЕ роняет несущую операцию: не приехала инструкция — это не
+        повод объявить неудачей синхронизацию паттернов или проверку релиза,
+        которые уже отработали. Исход оседает в `state.cookbook` и виден в UI.
+        В отличие от `apply_staged`, тихое применение здесь законно: документ
+        ничего не подменяет в поставке и не требует перезапуска (SECURITY.md
+        §4.1 про «никакого тихого действия» касается исполняемого кода).
+        """
+        try:
+            return cookbook.sync(session.client, self._state, session.ctx)
+        except Exception as exc:  # noqa: BLE001
+            # Ловим ШИРОКО сознательно. Несущая операция (синхронизация паттернов,
+            # проверка релиза) к этому моменту УЖЕ отработала и её результат уже
+            # в руках у вызывающего; уронить его из-за попутчика значило бы
+            # превратить «не приехала инструкция» в «не синхронизировались
+            # паттерны». Сюда попадает не только `CompanionError`/`OSError`, но и
+            # любой отказ транспорта, который канал не предвидел.
+            self._state.mark("cookbook", "error", str(exc))
+            self._state.save()
+            return {"applied": False, "reason": "error", "detail": str(exc)}
+
     def _run_patterns(self, session, settings) -> dict:
-        return patterns.sync(session.client, self._state, session.ctx, settings)
+        result = patterns.sync(session.client, self._state, session.ctx, settings)
+        if isinstance(result, dict):
+            result["cookbook"] = self._sync_cookbook(session)
+        return result
 
     def _run_releases(self, session, settings) -> dict:
         """Проверка релиза и — по явной настройке — только подготовка.
@@ -424,7 +459,8 @@ class CompanionRunner:
         if check.get("available") and bool(getattr(settings, "auto_stage_release", False)):
             staged = releases.stage(session.client, self._state, session.ctx,
                                     check.get("target") or "latest")
-        return {"check": check, "staged": staged}
+        return {"check": check, "staged": staged,
+                "cookbook": self._sync_cookbook(session)}
 
     def _run_revocations(self, session, settings) -> dict:
         return revocations.refresh(session.client, self._state, session.ctx)
@@ -643,7 +679,10 @@ class CompanionRunner:
                                          version=version)
             session = self._session(settings)
             if action == "sync_patterns":
-                return patterns.sync(session.client, self._state, session.ctx, settings)
+                result = patterns.sync(session.client, self._state, session.ctx, settings)
+                if isinstance(result, dict):
+                    result["cookbook"] = self._sync_cookbook(session)
+                return result
             if action == "check_update":
                 # GAP-241: «Проверить обновление» = проверка И подготовка найденного.
                 # Два раздельных нажатия («проверить», потом «подготовить») были чистой
@@ -657,6 +696,7 @@ class CompanionRunner:
                                             check.get("target") or "latest")
                 result = dict(check)
                 result["staged"] = staged
+                result["cookbook"] = self._sync_cookbook(session)
                 return result
             if action == "stage_update":
                 return releases.stage(session.client, self._state, session.ctx,
