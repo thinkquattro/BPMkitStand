@@ -373,11 +373,12 @@
       const data = await apiGet("/api/version");
       hubVersion = data.version || "";
       el.textContent = hubVersion ? `BPMkitStand ${hubVersion}` : "н/д";
-      const edition = document.getElementById("about-edition");
-      if (edition) {
-        edition.textContent =
-          data.edition === "companion" ? "с каналом обновлений" : "свободная";
-      }
+      // GAP-278 п.3: «Редакция: с каналом обновлений» — перевод внутреннего
+      // edition=companion. Пользователь спрашивает не про редакцию, а про то,
+      // будут ли приходить обновления и что делать, если нет; ссылка ведёт
+      // ровно туда, где это чинится. Настоящий статус канала (лицензия
+      // истекла/отозвана) приходит отдельным снимком — см. renderAboutUpdates.
+      renderAboutUpdates(data.edition);
       checkVersionSkew(hubVersion);
     } catch (e) {
       el.textContent = `ошибка: ${describeApiError(e)}`;
@@ -595,6 +596,17 @@
     document.getElementById("iis-detect-btn").addEventListener("click", () => detectIisSite(form));
 
     document.getElementById("register-stand-btn").addEventListener("click", openRegisterModal);
+    // Та же форма, что и по «+ Стенд»: приглашение на пустом реестре —
+    // второй вход в то же действие, а не отдельный сценарий (GAP-278 п.2).
+    const firstStandBtn = document.getElementById("register-first-stand-btn");
+    if (firstStandBtn) firstStandBtn.addEventListener("click", openRegisterModal);
+    const aboutLicenseLink = document.getElementById("about-license-link");
+    if (aboutLicenseLink) {
+      aboutLicenseLink.addEventListener("click", (evt) => {
+        evt.preventDefault();
+        selectSettingsPane("license");
+      });
+    }
     document.getElementById("register-modal-close-btn").addEventListener("click", closeRegisterModal);
     document.getElementById("register-modal-cancel-btn").addEventListener("click", closeRegisterModal);
     bindOverlayDismiss(overlay, closeRegisterModal);
@@ -1177,19 +1189,18 @@
   async function refreshStandsWithFeedback() {
     const btn = document.getElementById("refresh-stands-btn");
     if (btn.disabled) return;
-    const orig = btn.dataset.label || btn.textContent;
-    btn.dataset.label = orig;
+    // Кнопка стала иконочной (GAP-278 п.2), поэтому занятость показывается
+    // классом-вращением, а не подменой текста: писать «Обновление…» внутри
+    // кнопки 28×28 некуда.
     const startedAt = Date.now();
     btn.disabled = true;
     btn.classList.add("is-busy");
-    btn.textContent = "Обновление…";
     let ok = false;
     try {
       ok = await refreshStands();
     } finally {
       const elapsed = Date.now() - startedAt;
       if (elapsed < MIN_BUSY_MS) await sleep(MIN_BUSY_MS - elapsed);
-      btn.textContent = orig;
       btn.classList.remove("is-busy");
       btn.disabled = false;
     }
@@ -1204,6 +1215,15 @@
   function renderStands(stands) {
     const tbody = document.getElementById("stands-tbody");
     tbody.innerHTML = "";
+
+    // GAP-278 п.2: счётчик в заголовке таблицы и крупное приглашение вместо
+    // пустой таблицы с шапкой колонок.
+    const count = document.getElementById("stands-count");
+    if (count) count.textContent = stands.length ? ` · ${stands.length}` : "";
+    const empty = document.getElementById("stands-empty");
+    const table = document.querySelector(".stands-table");
+    if (empty) empty.hidden = stands.length > 0;
+    if (table) table.hidden = stands.length === 0;
     stands.forEach((s) => {
       const http = s.http || {};
       const redis = s.redis || {};
@@ -1579,13 +1599,22 @@
       return;
     }
     const age = data ? Number(data.age_sec) : NaN;
-    if (!Number.isFinite(age) || age <= (refreshIntervalMs / 1000) * 2) {
+    if (!Number.isFinite(age)) {
       el.textContent = "";
       el.title = "";
+      el.classList.remove("stands-age-stale");
       return;
     }
-    el.textContent = `данные от ${formatAge(age)} назад`;
-    el.title = "Фоновый опрос давно не обновлял снапшот состояния стендов";
+    // GAP-278 п.2: раньше строка молчала, пока данные не устареют вдвое, и
+    // пользователь не видел НИКАКОГО признака, что список обновляется сам, —
+    // отсюда и впечатление, что без кнопки «Обновить» таблица мёртвая.
+    // Теперь возраст показывается всегда; «устарело» лишь подсвечивается.
+    const stale = age > (refreshIntervalMs / 1000) * 2;
+    el.textContent = `обновлено ${formatAge(age)} назад`;
+    el.title = stale
+      ? "Фоновый опрос давно не обновлял снапшот состояния стендов"
+      : "Список обновляется автоматически";
+    el.classList.toggle("stands-age-stale", stale);
   }
 
   // --- поток обновлений (SSE) ---
@@ -2788,6 +2817,43 @@
       : "Сейчас: CLI не найден";
   }
 
+  // «Обновления: подключены / не подключены — нет лицензии» (GAP-278 п.3).
+  //
+  // Источников два, и они приходят В РАЗНОЕ ВРЕМЯ: /api/version знает редакцию
+  // сборки, /api/license — состояние лицензии. Поэтому функция зовётся из
+  // обоих мест и каждый раз берёт то, что уже известно: иначе более поздний
+  // ответ затирал бы более точный текст более общим.
+  let lastEdition = null;
+
+  function renderAboutUpdates(edition) {
+    if (edition !== undefined && edition !== null) lastEdition = edition;
+    const el = byId("about-edition");
+    const link = byId("about-license-link");
+    if (!el) return;
+
+    if (lastEdition === null) {
+      el.textContent = "—";
+      if (link) link.hidden = true;
+      return;
+    }
+    if (lastEdition !== "companion") {
+      // Сборка без канала обновлений: лицензия тут ни при чём, и ссылка на
+      // неё была бы ложным следом.
+      el.textContent = "не подключены — сборка без канала обновлений";
+      if (link) link.hidden = true;
+      return;
+    }
+    const lic = lastLicense || {};
+    const connected =
+      LICENSE_CHANNEL_STATUSES.indexOf(lic.status) >= 0;
+    el.textContent = connected
+      ? "подключены"
+      : lic.status
+      ? `не подключены — лицензия ${(LICENSE_STATE_LABELS[lic.status] || [lic.status])[0]}`
+      : "не подключены — нет лицензии";
+    if (link) link.hidden = connected;
+  }
+
   // Единственный источник правды для фактической версии MCP — читают и экран
   // лицензии (renderMcpRow не звонит до первого ответа канала обновлений, а
   // /api/license отвечает и в свободной редакции), и статус канала. Приоритет
@@ -2841,6 +2907,7 @@
     renderLicenseStatusline(snapshot);
     renderCliHint(snapshot);
     renderMcpVersion();
+    renderAboutUpdates();
     maybeShowLicenseCritModal(snapshot);
   }
 

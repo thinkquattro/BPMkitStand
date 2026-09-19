@@ -218,3 +218,105 @@ def test_compact_css_rules_exist():
     assert '[data-view="compact"]' in css
     assert '[data-view="compact"] .state-panel' in css
     assert '[data-view="compact"] .stands-table thead' in css
+
+
+# --- GAP-278: визуальные дефекты диспетчера ----------------------------------
+#
+# Приёмка гэпа визуальная (скриншоты в двух темах), и заменить её тестом
+# нельзя. Но ровно те элементы, ОТСУТСТВИЕ которых и было жалобой владельца,
+# проверяются статически — чтобы правка не откатилась молча при следующем
+# редактировании разметки.
+
+
+def _read_web(name: str) -> str:
+    return (WEB_DIR / name).read_text(encoding="utf-8")
+
+
+def test_header_uses_full_logo_not_favicon():
+    """
+    П.1: в шапке стоял favicon.svg (значок «k»), то есть продукт представлялся
+    обрезанным значком. Должен быть полный логотип — парой под светлую и
+    тёмную тему.
+    """
+    html = _read_web("index.html")
+    # Именно <header>, а не всё до </header>: в <head> стоит <link rel="icon">
+    # на тот же favicon, и он там законен — во вкладке значок и должен быть.
+    header = html.split("<header", 1)[1].split("</header>", 1)[0]
+
+    assert "bpmkit-logo.svg" in header
+    assert "bpmkit-logo-dark.svg" in header
+    assert "favicon.svg" not in header
+
+
+def test_header_separates_product_from_section():
+    html = _read_web("index.html")
+    header = html.split("<header", 1)[1].split("</header>", 1)[0]
+    assert "brand-sep" in header
+    # Название раздела без повтора имени продукта — бренд теперь рисует логотип.
+    assert "<h1>Диспетчер стендов</h1>" in header
+
+
+def test_brand_logo_switches_by_theme_like_about_logo():
+    """Переключение темы — CSS-правилами, той же механикой, что у .about-logo-*."""
+    css = _read_web("style.css")
+    assert '[data-theme="dark"] .brand-logo-light' in css
+    assert '[data-theme="dark"] .brand-logo-dark' in css
+    assert '[data-theme="auto"] .brand-logo-dark' in css
+
+
+def test_table_toolbar_replaces_loose_button_row():
+    """
+    П.2: «Обновить» и «Зарегистрировать стенд» висели отдельной строкой над
+    таблицей. Теперь это заголовок таблицы: счётчик слева, возраст данных и
+    действия справа.
+    """
+    html = _read_web("index.html")
+    assert 'id="stands-count"' in html
+    assert "panel-toolbar-right" in html
+    # Ручное обновление осталось, но стало иконкой, а не главной кнопкой экрана.
+    assert 'id="refresh-stands-btn"' in html
+    assert "icon-btn-refresh" in html
+    assert ">+ Стенд<" in html
+
+
+def test_empty_registry_offers_first_stand():
+    """П.2: пустой реестр показывал пустую таблицу с шапкой колонок."""
+    html = _read_web("index.html")
+    assert 'id="stands-empty"' in html
+    assert 'id="register-first-stand-btn"' in html
+
+    app = _read_web("app.js")
+    # Приглашение и таблица переключаются по числу стендов.
+    assert 'getElementById("stands-empty")' in app
+
+
+def test_about_answers_about_updates_not_edition():
+    """
+    П.3: строка «Редакция: с каналом обновлений» — перевод внутреннего
+    edition=companion. Пользователь спрашивает про обновления, а не про
+    редакцию, и ему нужна ссылка туда, где это чинится.
+    """
+    html = _read_web("index.html")
+    # Проверяем ПОДПИСЬ строки, а не любое вхождение слова: объяснение, почему
+    # строка переименована, живёт в комментарии рядом и упоминает старое имя.
+    assert '<div class="lic-k">Редакция</div>' not in html
+    assert '<div class="lic-k">Обновления</div>' in html
+    assert 'id="about-license-link"' in html
+
+    app = _read_web("app.js")
+    assert "renderAboutUpdates" in app
+    # Старый текст не ПРИСВАИВАЕТСЯ элементу (в комментарии рядом он остаётся:
+    # там объясняется, что именно было заменено и почему).
+    assert 'edition.textContent' not in app
+    assert "не подключены — нет лицензии" in app
+
+
+def test_snapshot_age_is_always_visible():
+    """
+    П.2: возраст снапшота показывался ТОЛЬКО при устаревании вдвое, поэтому
+    признака «список живой» не было вовсе — отсюда и впечатление, что без
+    кнопки «Обновить» таблица мёртвая.
+    """
+    app = _read_web("app.js")
+    assert "обновлено ${formatAge(age)} назад" in app
+    assert "stands-age-stale" in app

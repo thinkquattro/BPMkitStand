@@ -117,9 +117,45 @@ body {
   cursor: pointer;
 }
 
+/* GAP-278 п.1: в шапке стоял favicon 28×28 (значок «k»). Теперь полный
+   логотип; пара светлый/тёмный переключается ТЕМИ ЖЕ правилами, что и логотип
+   в «О программе» (.about-logo-*) — одна механика на весь файл. Высота, а не
+   ширина: у логотипа соотношение 3:1, и фиксировать нужно то измерение,
+   которым он вписан в шапку. */
 .brand-logo {
-  width: 28px;
-  height: 28px;
+  height: 26px;
+  width: auto;
+  display: none;
+}
+
+.brand-logo-light {
+  display: block;
+}
+
+[data-theme="dark"] .brand-logo-light {
+  display: none;
+}
+
+[data-theme="dark"] .brand-logo-dark {
+  display: block;
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="auto"] .brand-logo-light {
+    display: none;
+  }
+
+  [data-theme="auto"] .brand-logo-dark {
+    display: block;
+  }
+}
+
+/* Разделитель «продукт | раздел»: BPMkit это продукт, «Диспетчер стендов» —
+   его раздел, и без разделения они читались одной слипшейся строкой. */
+.brand-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--bpmkit-border);
 }
 
 .topbar h1 {
@@ -245,6 +281,11 @@ body {
 [data-view="compact"] #btn-settings,
 [data-view="compact"] .topbar-sep,
 [data-view="compact"] .panel-toolbar #register-stand-btn,
+/* В окне-виджете заголовок таблицы и приглашение на пустом реестре — шум:
+   регистрируют стенды из полного окна (GAP-278 п.2). */
+[data-view="compact"] .panel-title,
+[data-view="compact"] .stands-empty,
+[data-view="compact"] .brand-sep,
 [data-view="compact"] .hint-text,
 [data-view="compact"] .state-panel,
 [data-view="compact"] .statusline,
@@ -277,7 +318,19 @@ body {
   gap: 6px;
 }
 
-[data-view="compact"] .stands-table-wrap {
+/* Окно-виджет ~320 px: полный логотип рядом с кнопками не помещается, но и
+   обрезать бренд до значка не нужно — уменьшаем (GAP-278 п.1). */
+[data-view="compact"] .brand-logo {
+  height: 20px;
+}
+
+[data-view="compact"] /* Скругление сверху снято: верхнюю границу теперь рисует .panel-toolbar. */
+.stands-table-wrap {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.stands-table-wrap {
   border: none;
   padding: 0;
 }
@@ -671,11 +724,90 @@ main {
   display: block;
 }
 
+/* GAP-278 п.2: строка кнопок над таблицей превратилась в ЗАГОЛОВОК таблицы —
+   она прижата к её верхней рамке и читается как её часть, а не как отдельная
+   панель неизвестно чего. */
 .panel-toolbar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  margin-bottom: 12px;
+  margin-bottom: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--bpmkit-border);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: var(--bpmkit-panel-bg);
+}
+
+.panel-toolbar-left,
+.panel-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.panel-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.panel-count {
+  color: var(--bpmkit-muted-text, inherit);
+  font-weight: 400;
+}
+
+/* Иконка ручного обновления. Кнопка осталась (дождаться следующего тика не
+   всегда приемлемо), но перестала быть главным элементом экрана. */
+.icon-btn-refresh.is-busy svg {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-btn-refresh.is-busy svg {
+    animation: none;
+  }
+}
+
+/* Пустой реестр: вместо таблицы с шапкой колонок и без строк. */
+.stands-empty {
+  padding: 36px 20px;
+  text-align: center;
+}
+
+.stands-empty[hidden] {
+  display: none;
+}
+
+.stands-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.stands-empty-hint {
+  margin: 0 auto 16px;
+  max-width: 46ch;
+  font-size: 13px;
+  color: var(--bpmkit-muted-text, inherit);
+}
+
+.about-link {
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+.about-link[hidden] {
+  display: none;
 }
 
 button {
