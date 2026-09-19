@@ -886,16 +886,57 @@
     return `<b class="stand-name">${escapeHtml(s.name)}</b>${hostChip(s)}`;
   }
 
+  const REMOTE_HTTP_TITLE =
+    "Удалённый стенд без агента: известен только веб-адрес. Состояние — по HTTP-пробе; " +
+    "управление процессом, БД и Redis недоступны.";
+
+  // Из "https://host:443" (или голого host) делает host для колонки транспорта:
+  // в неё не помещается полный URL, а нужен ответ на вопрос «где стенд живёт».
+  function hostOf(value) {
+    const text = String(value || "");
+    try {
+      if (text.includes("://")) return new URL(text).hostname;
+    } catch (e) {
+      /* мусор в адресе не должен ронять отрисовку строки */
+    }
+    return text;
+  }
+
   // Транспорт agent значит «стендом управляет агент на другой машине» — без
   // имени этой машины строка не отвечает на единственный вопрос, ради которого
   // на неё смотрят: где стенд физически живёт.
   function transportCell(s) {
+    // Транспорт http (GAP-277) — удалённый стенд БЕЗ агента. Слово «агент» в
+    // этой строке было прямой дезинформацией: агента нет и не будет, поэтому
+    // пользователь не мог отличить «агент упал» от «агента здесь нет».
+    // Legacy-запись agent без agent_url сервер отдаёт с transport_warning и
+    // remote_host — показываем её как http, но с явным предупреждением, а не
+    // молча (реестр мы не переписывали, и оператор должен знать почему).
+    const warn = s.transport_warning || "";
+    if (s.transport === "http" || warn) {
+      const rhost = s.remote_host || (s.http && s.http.url) || "";
+      const title = warn ? `${REMOTE_HTTP_TITLE} ${warn}` : REMOTE_HTTP_TITLE;
+      const label = "удалённый · http";
+      const body = rhost ? `${label} · ${escapeHtml(hostOf(rhost))}` : label;
+      const badge = warn
+        ? ` <span class="badge badge-warn" title="${escapeAttr(warn)}">запись agent без адреса</span>`
+        : "";
+      return `<span title="${escapeAttr(title)}">${body}</span>${badge}`;
+    }
     if (s.transport !== "agent") return escapeHtml(s.transport || "—");
     const host = s.agent || (s.process && s.process.agent) || "";
     return host ? `агент · ${escapeHtml(host)}` : "агент";
   }
 
   function dbCell(s) {
+    // Имя базы из реестра у стенда без агента (GAP-277) — ничем не
+    // подтверждённая строка: её состояние никто не проверял. Показывать её
+    // цветом пробы значит выдавать запись реестра за факт.
+    if (s.transport === "http" || s.transport_warning) {
+      return `<span class="value-cell value-skipped" title="${escapeAttr(
+        "не проверяется без агента"
+      )}">—</span>`;
+    }
     const db = s.db || {};
     const engine = db.type || s.db_type || "";
     const icon = DB_ICONS[engine] || "";
@@ -912,7 +953,12 @@
   // недоступен» (GAP-003, п.4) — раньше обе ситуации выглядели одинаково, с
   // жёстко зашитым «Redis не настроен у стенда». Этот текст остался фолбэком
   // на случай ответа без reason (старый агент или снапшот без проб).
-  function redisCell(redis) {
+  function redisCell(redis, stand) {
+    if (stand && (stand.transport === "http" || stand.transport_warning)) {
+      return `<span class="value-cell value-skipped" title="${escapeAttr(
+        "не проверяется без агента"
+      )}">—</span>`;
+    }
     const num = redis && redis.number;
     const reason = reasonAttrs(redis && redis.reason);
     if (num === null || num === undefined) {
@@ -1021,21 +1067,31 @@
     return html;
   }
 
+  const NO_AGENT_TITLE = "без агента управление процессом недоступно";
+
   function actionButtons(s) {
     const processState = s.process ? s.process.state : "unknown";
     const isStarting = startingStands.has(s.name);
-    const startDisabled = processState === "ok" || isStarting;
-    const stopDisabled = processState === "down";
-    const restartDisabled = processState === "down";
+    // Удалённый стенд без агента (GAP-277): кнопки процесса не «пока серые»,
+    // а неприменимы в принципе — активная кнопка, которая ничего не может
+    // сделать, и была жалобой владельца.
+    const noAgent = s.transport === "http" || !!s.transport_warning;
+    const startDisabled = noAgent || processState === "ok" || isStarting;
+    const stopDisabled = noAgent || processState === "down";
+    const restartDisabled = noAgent || processState === "down";
     const redisNumber = s.redis && s.redis.number;
     const redisKnown = redisNumber !== null && redisNumber !== undefined;
-    const redisDisabled = !redisKnown;
-    const redisTitle = redisKnown ? "Очистить Redis" : "redis не настроен у стенда";
+    const redisDisabled = noAgent || !redisKnown;
+    const redisTitle = noAgent
+      ? NO_AGENT_TITLE
+      : redisKnown
+      ? "Очистить Redis"
+      : "redis не настроен у стенда";
     const name = escapeHtml(s.name);
     return `
-      <button class="icon-btn icon-btn-play" data-action="start" data-name="${name}" title="Запустить"${startDisabled ? " disabled" : ""}>${ICON_PLAY}</button>
-      <button class="icon-btn icon-btn-stop" data-action="stop" data-name="${name}" title="Остановить"${stopDisabled ? " disabled" : ""}>${ICON_STOP}</button>
-      <button class="icon-btn icon-btn-restart" data-action="restart" data-name="${name}" title="Перезапустить"${restartDisabled ? " disabled" : ""}>${ICON_RESTART}</button>
+      <button class="icon-btn icon-btn-play" data-action="start" data-name="${name}" title="${escapeAttr(noAgent ? NO_AGENT_TITLE : "Запустить")}"${startDisabled ? " disabled" : ""}>${ICON_PLAY}</button>
+      <button class="icon-btn icon-btn-stop" data-action="stop" data-name="${name}" title="${escapeAttr(noAgent ? NO_AGENT_TITLE : "Остановить")}"${stopDisabled ? " disabled" : ""}>${ICON_STOP}</button>
+      <button class="icon-btn icon-btn-restart" data-action="restart" data-name="${name}" title="${escapeAttr(noAgent ? NO_AGENT_TITLE : "Перезапустить")}"${restartDisabled ? " disabled" : ""}>${ICON_RESTART}</button>
       <button class="icon-btn icon-btn-redis" data-action="redis-clear" data-name="${name}" title="${escapeHtml(redisTitle)}"${redisDisabled ? " disabled" : ""}>${ICON_REDIS_CLEAR}</button>
     `;
   }
@@ -1160,7 +1216,7 @@
         <td>${processCell(s)}</td>
         <td>${httpCell(http)}</td>
         <td>${dbCell(s)}</td>
-        <td>${redisCell(redis)}</td>
+        <td>${redisCell(redis, s)}</td>
         <td class="row-actions">${actionButtons(s)}</td>
       `;
       tr.addEventListener("click", (evt) => {

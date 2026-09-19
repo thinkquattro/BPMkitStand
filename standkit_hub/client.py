@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional
+from typing import NoReturn, Optional
 
 from standkit import health, lifecycle
 from standkit.models import Stand, StandStatus, Transport
@@ -239,6 +239,26 @@ def _agent_request(
 STATUS_ALL_MAX_WORKERS = 8
 
 
+def _raise_unsupported(stand: Stand, name: str) -> NoReturn:
+    """
+    Отказ по операции, которой у этого транспорта нет.
+
+    Для ``http`` (удалённый стенд без агента, GAP-277) это НЕ «пока не
+    реализовано»: управлять процессом удалённого стенда, о котором известен
+    только веб-адрес, нечем в принципе, и обещание «TODO» вводило в
+    заблуждение. Текст отказа совпадает с подсказкой у выключенных кнопок
+    диспетчера, чтобы ответ был один и тот же, откуда бы его ни получили.
+    """
+    if stand.effective_transport == Transport.HTTP:
+        raise NotImplementedError(
+            f"стенд '{name}': без агента управление процессом недоступно "
+            "(транспорт http — известен только веб-адрес стенда)"
+        )
+    raise NotImplementedError(
+        f"Транспорт {stand.transport.value!r} для стенда '{name}' пока не реализован (TODO)"
+    )
+
+
 class FederatedClient:
     """
     Единая точка входа для хаба: даёт список стендов реестра со статусами,
@@ -262,7 +282,15 @@ class FederatedClient:
             pf = lifecycle.pidfile_path(stand)
             return health.check_stand(stand, pidfile=pf)
 
-        if stand.transport == Transport.AGENT:
+        # Транспорт http — удалённый стенд без агента (GAP-277): опрашиваем
+        # его РОВНО тем же health.check_stand, что и локальные, — проба HTTP
+        # там уже умеет ходить по stand_host/stand_port/stand_scheme, а
+        # process/db/redis сама вернёт SKIPPED. Никакого pidfile: локального
+        # процесса у такого стенда нет.
+        if stand.effective_transport == Transport.HTTP:
+            return health.check_stand(stand)
+
+        if stand.effective_transport == Transport.AGENT:
             if not stand.agent_url or not stand.agent_secret_ref:
                 raise RemoteCallError(stand.agent_url or "?", "не задан agent_url/agent_secret_ref")
             token = get_secret(stand.agent_secret_ref)
@@ -271,9 +299,7 @@ class FederatedClient:
             )
             return StandStatus.from_dict(data)
 
-        raise NotImplementedError(
-            f"Транспорт {stand.transport.value!r} для стенда '{name}' пока не реализован (TODO)"
-        )
+        _raise_unsupported(stand, name)
 
     def _status_or_error(self, name: str) -> StandStatus:
         """
@@ -343,9 +369,7 @@ class FederatedClient:
             candidate = data.get("candidate") if isinstance(data, dict) else None
             return candidate if isinstance(candidate, dict) else None
 
-        raise NotImplementedError(
-            f"Транспорт {stand.transport.value!r} для стенда '{name}' пока не реализован (TODO)"
-        )
+        _raise_unsupported(stand, name)
 
     def _agent_action(self, stand: Stand, name: str, action: str, *, query: str = "") -> dict:
         """POST к агенту стенда с резолвом токена из secretstore (секрет наружу не отдаётся)."""
@@ -385,9 +409,7 @@ class FederatedClient:
             data = self._agent_action(stand, name, action, query=query)
             return data.get("pid") if isinstance(data, dict) else None
 
-        raise NotImplementedError(
-            f"Транспорт {stand.transport.value!r} для стенда '{name}' пока не реализован (TODO)"
-        )
+        _raise_unsupported(stand, name)
 
     def logs(self, name: str, n: int = 100) -> list[str]:
         stand = self.registry.get(name)
@@ -406,6 +428,4 @@ class FederatedClient:
             )
             return list(data.get("lines", []))
 
-        raise NotImplementedError(
-            f"Транспорт {stand.transport.value!r} для стенда '{name}' пока не реализован (TODO)"
-        )
+        _raise_unsupported(stand, name)

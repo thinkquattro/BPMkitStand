@@ -1062,6 +1062,18 @@ body.hub-offline .stands-table-wrap {
   cursor: help;
 }
 
+/* «запись agent без адреса» (GAP-277) — запись реестра, которую диспетчер
+   трактует как удалённый стенд без агента. Та же контурная предупреждающая
+   форма, что у «вне диспетчера»: это не авария и не норма, а сообщение о том,
+   что показанное состояние выведено, а не взято из записи буквально. */
+.badge-warn {
+  background: transparent;
+  color: var(--bpmkit-unknown);
+  border: 1px solid var(--bpmkit-unknown);
+  font-weight: 500;
+  cursor: help;
+}
+
 /* Строка кнопки «Определить автоматически» в форме регистрации (host_kind=iis). */
 .iis-detect-row {
   display: flex;
