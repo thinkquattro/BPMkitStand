@@ -94,6 +94,19 @@ def _default_state() -> dict:
             "last_sync_at": None,
             "installed": None,
         },
+        # Обратный проход канала (GAP-260/GAP-248 п.2): единственный поток,
+        # который не ПРИНИМАЕТ, а ОТДАЁТ. Свой слот по той же причине, что у
+        # кукбука: у него свой исход («офлайн» здесь — норма, а не ошибка) и
+        # своя строка в UI; мешать его в `patterns` значило бы объявлять
+        # неудачей синхронизацию паттернов из-за того, что очередь не уехала.
+        "candidates": {
+            "last_check_at": None,
+            "last_status": "never",
+            "last_detail": "",
+            "last_sync_at": None,
+            "last_sent": None,
+            "last_remaining": None,
+        },
         "revocations": {
             "last_check_at": None,
             "last_status": "never",
@@ -188,6 +201,10 @@ class CompanionState:
     @property
     def cookbook(self) -> dict:
         return self.data["cookbook"]
+
+    @property
+    def candidates(self) -> dict:
+        return self.data["candidates"]
 
     def mark(self, section: str, status: str, detail: str = "") -> None:
         """Единая точка записи исхода тика. `status` — `ok`/`skipped`/`error`/`never`."""

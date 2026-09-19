@@ -54,7 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import __version__, context, cookbook, patterns, releases, revocations
+from . import __version__, candidates, context, cookbook, patterns, releases, revocations
 from .backend import BackendClient
 from .errors import ChannelError, CompanionError, ContextUnavailable, NotModified
 from .state import STATE_FILE_NAME, CompanionState
@@ -438,10 +438,39 @@ class CompanionRunner:
             self._state.save()
             return {"applied": False, "reason": "error", "detail": str(exc)}
 
+    def _sync_candidates(self, settings) -> Optional[dict]:
+        """Обратный проход: разгрузка локальной очереди находок вендору
+        (GAP-260, GAP-248 п.2 «автоматический flush очереди сабмишенов»).
+
+        Тем же попутчиком, что кукбук, и по той же причине: у очереди нет
+        собственного расписания, она едет на уже состоявшемся пробуждении
+        канала. Отдельный цикл означал бы ещё один тик, ещё одну строку в UI и
+        ещё один повод разбудить машину — ради очереди, которая чаще всего
+        пуста.
+
+        Направление при этом ПРОТИВОПОЛОЖНОЕ всему остальному каналу, и это
+        единственное место, где Companion что-то ОТПРАВЛЯЕТ. Сеть трогает не
+        он: он просит поставку (`bpmkit setup outbox-flush`) разгрузить
+        очередь, которой она владеет, — см. докстринг `candidates.py`, почему
+        читать `~/.bpmkit/outbox/` отсюда своими руками нельзя.
+
+        Отказ здесь НЕ роняет несущую операцию — ровно как у кукбука: не
+        уехали находки — не повод объявить неудачей синхронизацию паттернов
+        или проверку релиза, которые уже отработали.
+        """
+        try:
+            return candidates.flush(self._state, settings)
+        except Exception as exc:  # noqa: BLE001
+            # Широко и сознательно, по той же причине, что в `_sync_cookbook`.
+            self._state.mark("candidates", "error", str(exc))
+            self._save_state()
+            return {"flushed": False, "reason": "error", "detail": str(exc)}
+
     def _run_patterns(self, session, settings) -> dict:
         result = patterns.sync(session.client, self._state, session.ctx, settings)
         if isinstance(result, dict):
             result["cookbook"] = self._sync_cookbook(session)
+            result["candidates"] = self._sync_candidates(settings)
         return result
 
     def _run_releases(self, session, settings) -> dict:
@@ -460,7 +489,8 @@ class CompanionRunner:
             staged = releases.stage(session.client, self._state, session.ctx,
                                     check.get("target") or "latest")
         return {"check": check, "staged": staged,
-                "cookbook": self._sync_cookbook(session)}
+                "cookbook": self._sync_cookbook(session),
+                "candidates": self._sync_candidates(settings)}
 
     def _run_revocations(self, session, settings) -> dict:
         return revocations.refresh(session.client, self._state, session.ctx)
