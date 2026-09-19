@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from standkit_companion import cookbook, patterns, releases, revocations, runner
+from standkit_companion import candidates, cookbook, patterns, releases, revocations, runner
 from standkit_companion.errors import ChannelError, ContextUnavailable
 from standkit_companion.runner import (
     CompanionRunner,
@@ -185,7 +185,8 @@ def make_runner(tmp_path: Path, settings, *, clock=None, rng=None,
 
 
 def patch_cycles(monkeypatch, log, *, patterns_stub=None, releases_check=None,
-                 releases_stage=None, revocations_stub=None, cookbook_stub=None):
+                 releases_stage=None, revocations_stub=None, cookbook_stub=None,
+                 candidates_stub=None):
     """Подмена всех функций циклов сразу.
 
     Подменяются АТРИБУТЫ модулей (`patterns.sync` и т.д.), потому что раннер зовёт их
@@ -205,12 +206,20 @@ def patch_cycles(monkeypatch, log, *, patterns_stub=None, releases_check=None,
         # попутчик не должен его загромождать.
         "cookbook_sync": cookbook_stub or Recorder(
             "cookbook", [], result={"applied": False, "reason": "up_to_date"}),
+        # GAP-260: обратный проход — такой же попутчик, как кукбук, и заглушка
+        # ему нужна по той же причине, ПЛЮС по более жёсткой: без неё раннер
+        # уходит РЕЗОЛВИТЬ И ЗАПУСКАТЬ настоящий CLI поставки, а это внешний
+        # процесс — тик перестаёт укладываться в таймаут `stop()`.
+        # В `log` не пишет: порядок несущих циклов — предмет проверок ниже.
+        "candidates_flush": candidates_stub or Recorder(
+            "candidates", [], result={"flushed": False, "reason": "flushed", "sent": 0}),
     }
     monkeypatch.setattr(patterns, "sync", stubs["patterns_sync"])
     monkeypatch.setattr(releases, "check", stubs["releases_check"])
     monkeypatch.setattr(releases, "stage", stubs["releases_stage"])
     monkeypatch.setattr(revocations, "refresh", stubs["revocations_refresh"])
     monkeypatch.setattr(cookbook, "sync", stubs["cookbook_sync"])
+    monkeypatch.setattr(candidates, "flush", stubs["candidates_flush"])
     return stubs
 
 
