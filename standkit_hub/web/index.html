@@ -46,9 +46,18 @@
     выглядит чужеродно.
   -->
   <header class="topbar">
+    <!-- GAP-278 п.1: в шапке стоял favicon (значок «k» 28×28) — тот же файл,
+         что во вкладке браузера, то есть продукт представлялся обрезанным
+         значком. Теперь полный логотип, по одному на тему (светлый/тёмный
+         переключаются CSS, а не скриптом: при смене темы не должно быть
+         кадра со «старой» картинкой), и тонкий разделитель между брендом и
+         названием раздела — «BPMkit» это продукт, «Диспетчер стендов» это
+         его раздел, и раньше они читались одной слипшейся строкой. -->
     <button id="brand-btn" class="brand" type="button" title="Стенды">
-      <img class="brand-logo" src="/static/favicon.svg" alt="BPMkit" />
-      <h1>Диспетчер стендов BPMkit</h1>
+      <img class="brand-logo brand-logo-light" src="/static/bpmkit-logo.svg" alt="BPMkit" />
+      <img class="brand-logo brand-logo-dark" src="/static/bpmkit-logo-dark.svg" alt="BPMkit" />
+      <span class="brand-sep" aria-hidden="true"></span>
+      <h1>Диспетчер стендов</h1>
     </button>
 
     <!-- Кнопка «Обновления» есть только в платной редакции И только когда
@@ -429,14 +438,35 @@
   <main>
     <!-- ═══ Сцена: стенды ═══ -->
     <section id="scene-stands" class="scene active">
+      <!-- GAP-278 п.2: «Обновить» и «Зарегистрировать стенд» стояли отдельной
+           строкой НАД таблицей и ни с чем не были связаны, а сама кнопка
+           «Обновить» создавала впечатление, что список сам не обновляется
+           (хотя поллер работает по refresh_interval_sec). Теперь это строка
+           ЗАГОЛОВКА таблицы: слева — сколько стендов, справа — когда
+           обновлялись данные, ручное обновление иконкой ↻ (оно остаётся:
+           дождаться следующего тика не всегда приемлемо) и основная кнопка
+           «+ Стенд». -->
       <div class="panel-toolbar">
-        <button id="refresh-stands-btn">Обновить</button>
-        <button id="register-stand-btn" class="secondary" type="button">Зарегистрировать стенд</button>
-        <span id="stands-error" class="error-text"></span>
-        <!-- Возраст снапшота: показывается ТОЛЬКО когда данные заметно
-             устарели или пробы ещё не выполнялись (см. app.js::updateSnapshotAge).
-             В норме пусто и глаз не отвлекает. -->
-        <span id="stands-age" class="stands-age" role="status" aria-live="polite"></span>
+        <div class="panel-toolbar-left">
+          <h2 class="panel-title">Стенды<span id="stands-count" class="panel-count"></span></h2>
+          <span id="stands-error" class="error-text"></span>
+        </div>
+        <div class="panel-toolbar-right">
+          <!-- Возраст снапшота. Раньше показывался ТОЛЬКО при заметном
+               устаревании; теперь в норме говорит «обновлено N назад» — это и
+               есть ответ на вопрос «а список-то живой?», из-за которого
+               кнопка «Обновить» читалась как единственный способ увидеть
+               свежие данные (см. app.js::updateSnapshotAge). -->
+          <span id="stands-age" class="stands-age" role="status" aria-live="polite"></span>
+          <button id="refresh-stands-btn" class="icon-btn icon-btn-refresh" type="button"
+                  title="Обновить сейчас" aria-label="Обновить сейчас">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
+                 stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M13.2 8A5.2 5.2 0 1 1 10.9 3.6" /><path d="M13.4 2.6v3.4h-3.4" />
+            </svg>
+          </button>
+          <button id="register-stand-btn" type="button">+ Стенд</button>
+        </div>
       </div>
       <div id="action-status" class="action-status" role="status" aria-live="polite">
         <span id="action-status-text"></span>
@@ -485,6 +515,18 @@
           </thead>
           <tbody id="stands-tbody"></tbody>
         </table>
+        <!-- GAP-278 п.2: пустой реестр показывал пустую таблицу с шапкой
+             колонок — экран, на котором нечего делать и непонятно, что
+             делать дальше. Кнопка регистрации при этом стояла отдельной
+             строкой выше и не читалась как следующий шаг. -->
+        <div id="stands-empty" class="stands-empty" hidden>
+          <p class="stands-empty-title">Пока нет ни одного стенда</p>
+          <p class="stands-empty-hint">
+            Диспетчер управляет уже установленными стендами BPMSoft: он их не создаёт,
+            а подключает по пути к папке стенда — либо по одному веб-адресу, если стенд удалённый.
+          </p>
+          <button id="register-first-stand-btn" type="button">+ Зарегистрировать первый стенд</button>
+        </div>
       </div>
       <p class="hint-text">Клик по строке выбирает стенд — выбор управляет панелью «Текущее состояние» ниже.</p>
 
@@ -951,7 +993,19 @@
               <div><div class="lic-k">Диспетчер стендов</div><div class="lic-v" id="about-version">…</div></div>
               <div><div class="lic-k">MCP-сервер BPMkit</div><div class="lic-v" id="about-mcp-version">—</div></div>
               <div><div class="lic-k">Адрес диспетчера</div><div class="lic-v" id="about-origin">—</div></div>
-              <div><div class="lic-k">Редакция</div><div class="lic-v" id="about-edition">—</div></div>
+              <!-- GAP-278 п.3: строка называлась «Редакция» и показывала
+                   «с каналом обновлений» — прямой перевод внутреннего
+                   edition=companion, который пользователю ничего не говорит.
+                   Вопрос, который за ней стоит, — «будут ли мне приходить
+                   обновления и почему нет», — и отвечать надо на него, со
+                   ссылкой туда, где это чинится. -->
+              <div>
+                <div class="lic-k">Обновления</div>
+                <div class="lic-v">
+                  <span id="about-edition">—</span>
+                  <a href="#" id="about-license-link" class="about-link" hidden>Лицензия</a>
+                </div>
+              </div>
               <!-- Права диспетчера (GAP-311): значение приходит из того же
                    GET /api/hub/elevation, что и щит в шапке (app.js::
                    refreshElevation/updateAboutElevation) — здесь то же
