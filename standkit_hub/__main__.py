@@ -35,14 +35,20 @@ import webbrowser
 from pathlib import Path
 from typing import Optional
 
+from standkit import __version__ as _standkit_version
 from standkit.platform import current_user_name, current_user_sid, is_elevated
 from standkit_hub import instance as _instance
 from standkit_hub.config import HubConfig
+from standkit_hub import hub_logging as _hub_logging
 from standkit_hub.mutex import acquire_hub_mutex
 from standkit_hub.elevation import ReparseGuardError, read_handoff, refusal_text, write_result_atomic
 from standkit_hub.security import InsecureBindError, generate_session_token
 from standkit_hub.server import DEFAULT_HUB_PORT, HubAlreadyRunning, bind_hub_server
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
+
+# Лог диспетчера (GAP-384). Под pythonw.exe stderr не подключён никуда,
+# поэтому всё, что объясняет отказ или завершение, идёт в файл.
+_log = _hub_logging.logger()
 
 # Сколько в сумме ждать строгий bind перехваченного порта (GAP-311 В4/В6):
 # порт может освободиться не мгновенно даже после успешной остановки старого
@@ -102,7 +108,7 @@ def _write_relaunch_result(result_file: str, *, status: str, message: str = "", 
     try:
         write_result_atomic(Path(result_file), payload)
     except (OSError, ReparseGuardError) as exc:
-        print(f"[standkit-hub] не удалось записать результат перезапуска: {exc}", file=sys.stderr)
+        _log.warning(f"не удалось записать результат перезапуска: {exc}")
 
 
 def _describe_elevation(value) -> str:
@@ -144,22 +150,21 @@ def _takeover_running_instance(
         # напрямую; сейчас это просто впустую потраченное время пользователя.
         # Отказ немедленно, без ожидания.
         reason = "файл состояния работающего диспетчера не найден — закройте его вручную и запустите снова"
-        print(f"[standkit-hub] {reason}", file=sys.stderr)
+        _log.warning(f"{reason}")
         return False, reason
 
-    print(
-        f"[standkit-hub] перехватываю порт {exc.port} у работающего диспетчера "
+    _log.warning(f"перехватываю порт {exc.port} у работающего диспетчера "
         f"(pid {state.pid}, права администратора: {_describe_elevation(state.elevated)})"
     )
     ok, reason = _instance.stop_running_instance(state, run_dir=run_dir, requester_pid=os.getpid())
     if not ok:
         message = reason or f"не удалось остановить процесс {state.pid}"
-        print(f"[standkit-hub] {message} — перехват отменён", file=sys.stderr)
+        print(f"[standkit-hub] {message} — перехват отменён")
         return False, message
 
     if not _instance.wait_port_released(exc.host, exc.port):
         reason = f"порт {exc.port} так и не освободился — перехват отменён"
-        print(f"[standkit-hub] {reason}", file=sys.stderr)
+        _log.warning(f"{reason}")
         return False, reason
     return True, ""
 
@@ -190,12 +195,11 @@ def _warn_if_run_dir_outside_profile(run_dir: Path) -> None:
     try:
         resolved.relative_to(home)
     except ValueError:
-        print(
-            f"[standkit-hub] ВНИМАНИЕ: run_dir ({resolved}) находится вне домашнего "
+        _log.warning(
+            f"ВНИМАНИЕ: run_dir ({resolved}) находится вне домашнего "
             f"каталога пользователя ({home}) — файлы с правами 0o600 (handoff, состояние) "
             "на Windows не защищены ACL профиля; убедитесь, что каталог недоступен другим "
-            "локальным учётным записям",
-            file=sys.stderr,
+            "локальным учётным записям"
         )
 
 
@@ -297,13 +301,34 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # Лог поднимаем ПЕРВЫМ делом после разбора аргументов — до mutex/bind/
+    # state и до любой ветки, которая может завершиться отказом: инцидент
+    # 18.09.2026 показал, что дороже всего обходятся именно те сообщения,
+    # которые процесс успел бы написать ДО того, как что-то пошло не так.
+    # Неудача настройки лога старт НЕ прерывает (см. hub_logging.setup_logging).
+    _log_path = _hub_logging.setup_logging()
+    _log.info(
+        "старт standkit-hub: версия=%s python=%s pid=%s лог=%s",
+        _standkit_version, sys.version.split()[0], os.getpid(), _log_path or "(нет)",
+    )
+
+    # Необработанное исключение обязано остаться в логе, а не исчезнуть вместе
+    # с невидимым stderr: без этого «диспетчер просто пропал» — всё, что
+    # человек может сообщить о падении.
+    def _log_unhandled(exc_type, exc_value, exc_tb):
+        _log.critical("необработанное исключение — процесс завершается",
+                      exc_info=(exc_type, exc_value, exc_tb))
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _log_unhandled
+
     if args.elevated_op:
         # ДО любых bind/mutex/state/handoff: это одноразовый процесс "выполнить
         # и выйти", HTTP-сервер ему не нужен вовсе (см. standkit_hub.elevated_op).
         from standkit_hub import elevated_op as _elevated_op
 
         if not args.stand or not args.result_file:
-            print("[standkit-hub] --elevated-op требует --stand и --result-file", file=sys.stderr)
+            print("[standkit-hub] --elevated-op требует --stand и --result-file")
             return 1
         config_path = Path(args.config) if args.config else None
         return _elevated_op.run(
@@ -316,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.install_shortcut or args.uninstall_shortcut:
         result = install_desktop_shortcut() if args.install_shortcut else uninstall_desktop_shortcut()
-        print(f"[standkit-hub] {result.message}")
+        _log.warning(f"{result.message}")
         return 0 if result.ok else 1
 
     our_sid = current_user_sid()
@@ -333,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.initiator_sid:
         if our_sid and our_sid != args.initiator_sid:
             message = refusal_text(current_user_name())
-            print(f"[standkit-hub] {message}", file=sys.stderr)
+            print(f"[standkit-hub] {message}")
             if args.result_file:
                 _write_relaunch_result(
                     args.result_file, status="refused", message=message, user=current_user_name()
@@ -356,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config.ensure_registry_dir()
     except OSError as exc:
-        print(f"[standkit-hub] не удалось подготовить папку реестра: {exc}", file=sys.stderr)
+        _log.warning(f"не удалось подготовить папку реестра: {exc}")
 
     run_dir = config.resolve_run_dir()
     _warn_if_run_dir_outside_profile(run_dir)
@@ -369,10 +394,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.session_token_file:
         session_token = read_handoff(Path(args.session_token_file)) or ""
         if not session_token:
-            print(
-                "[standkit-hub] сессию предыдущего экземпляра перенести не удалось "
-                "(файл передачи отсутствует или протух) — открывайте дашборд заново по ярлыку",
-                file=sys.stderr,
+            _log.warning(
+                "сессию предыдущего экземпляра перенести не удалось "
+                "(файл передачи отсутствует или протух) — открывайте дашборд заново по ярлыку"
             )
     if not session_token:
         session_token = generate_session_token()
@@ -389,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     def _report_port_busy(requested: int, exc: OSError) -> None:
         # Печатаем ДО повторного bind'а: пользователь должен понимать, почему
         # адрес в консоли/закладке вдруг отличается от привычного.
-        print(f"[standkit-hub] порт {requested} занят ({exc.strerror or exc}) — беру свободный", file=sys.stderr)
+        _log.warning(f"порт {requested} занят ({exc.strerror or exc}) — беру свободный")
 
     def _bind():
         return bind_hub_server(
@@ -439,7 +463,7 @@ def main(argv: list[str] | None = None) -> int:
                 httpd = _bind_with_retries(_bind_strict)
             except (HubAlreadyRunning, InsecureBindError, OSError) as exc2:
                 message = f"перехват не удался: {exc2}"
-                print(f"[standkit-hub] {message}", file=sys.stderr)
+                _log.warning(f"{message}")
                 if args.result_file:
                     _write_relaunch_result(args.result_file, status="failed", message=message)
                 return 1
@@ -453,13 +477,13 @@ def main(argv: list[str] | None = None) -> int:
             # не удалось остановить и т.п.), если она есть, — а не
             # обобщённый текст.
             message = takeover_reason or "перехват порта не выполнен: работающий экземпляр перехвату не подлежит"
-            print(f"[standkit-hub] {message}", file=sys.stderr)
+            _log.warning(f"{message}")
             _write_relaunch_result(args.result_file, status="failed", message=message)
             return 1
         else:
             return _open_running_instance(exc, no_browser=args.no_browser)
     except InsecureBindError as exc:
-        print(f"[standkit-hub] {exc}", file=sys.stderr)
+        _log.warning(f"{exc}")
         if args.result_file:
             _write_relaunch_result(args.result_file, status="failed", message=str(exc))
         return 1
@@ -485,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
                 message = f"порт {args.port} занят другим приложением"
         else:
             message = f"не удалось занять {args.host}:{args.port} — {exc}"
-        print(f"[standkit-hub] {message}", file=sys.stderr)
+        _log.warning(f"{message}")
         if args.result_file:
             _write_relaunch_result(args.result_file, status="failed", message=message)
         return 1
@@ -499,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
 
     actual_port = httpd.server_address[1]
     if args.port and actual_port != args.port:
-        print(f"[standkit-hub] порт {args.port} занят, слушаю {actual_port}")
+        _log.warning(f"порт {args.port} занят, слушаю {actual_port}")
     # Файл состояния — чтобы СЛЕДУЮЩИЙ запуск знал, кого он видит на порту
     # (в т.ч. с правами администратора тот процесс или нет).
     elevated = is_elevated()
@@ -509,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
             _instance.current_state(args.host, actual_port, elevated=elevated, user_sid=our_sid),
         )
     except (OSError, ReparseGuardError) as exc:
-        print(f"[standkit-hub] не удалось записать файл состояния: {exc}", file=sys.stderr)
+        print(f"[standkit-hub] не удалось записать файл состояния: {exc}")
 
     # Д-3: штатный выход (кнопка «Выход» и автовыход по простою) обязан убрать
     # файл состояния ДО завершения процесса — иначе следующий запуск увидит
@@ -605,9 +629,8 @@ def _serve_inner(httpd, *, args, url: str) -> int:
         try:
             import webview  # type: ignore
         except ImportError:
-            print(
-                "[standkit-hub] pywebview не установлен (pip install standkit[desktop]) — открываю в системном браузере",
-                file=sys.stderr,
+            _log.warning(
+                "pywebview не установлен (pip install standkit[desktop]) — открываю в системном браузере"
             )
             if not args.no_browser:
                 webbrowser.open(url)

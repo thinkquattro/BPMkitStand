@@ -70,7 +70,7 @@ from standkit import logs as _logs
 from standkit import platform as _platform
 from standkit.hosting import HostingError, IisElevationError
 from standkit.lifecycle import AdoptionRequired, AdoptionUnavailable, LifecycleError
-from standkit.models import HostKind, Stand, Transport
+from standkit.models import HostKind, ProbeState, Stand, Transport
 from standkit.registry import Registry, RegistryError, default_registry_path
 from standkit.secrets import SecretError, delete_secret, has_secret, set_secret
 from standkit_hub import consent_api
@@ -84,9 +84,14 @@ from standkit_hub import elevation as _elevation
 from standkit_hub import instance as _instance
 from standkit_hub.client import FederatedClient, RemoteCallError
 from standkit_hub.config import HubConfig, normalize_idle_shutdown_min
+from standkit_hub.hub_logging import logger as _hub_logger
 from standkit_hub.mutex import release_hub_mutex
 from standkit_hub.poller import StatusPoller, StatusSnapshot
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
+
+# Единый лог диспетчера (GAP-384): всё, что объясняет завершение процесса
+# или необработанный отказ, идёт сюда, а не в мёртвый под pythonw stderr.
+_log = _hub_logger()
 
 # --- ТОЧКА РАСШИРЕНИЯ РЕДАКЦИИ: канал доставки обновлений издателя ------------
 #
@@ -3315,33 +3320,106 @@ class _IdleShutdownWatcher:
         return float(minutes) * 60.0
 
     def has_running_stands(self) -> bool:
-        """Есть ли хоть один стенд в состоянии ``running``.
+        """Есть ли хоть один ЖИВОЙ стенд — или повод считать, что он есть.
 
         Берём ГОТОВЫЙ снапшот фонового поллера и НЕ опрашиваем стенды сами:
         своя проба из этого потока стоила бы столько же, сколько тик поллера,
         и удваивала бы сетевую нагрузку ради вопроса, ответ на который уже
         собран рядом.
 
-        Поллера нет или он ещё не отдал первый снапшот — отвечаем ``True``
-        («стенды есть»), то есть НЕ выходим. Незнание обязано трактоваться в
-        пользу того, чтобы остаться: ошибочно оставшийся процесс человек
-        закроет кнопкой, ошибочно закрывшийся уносит с собой управление
-        живыми стендами."""
+        НЕЗНАНИЕ = ОСТАЁМСЯ. Ошибочно оставшийся процесс человек закроет
+        кнопкой; ошибочно закрывшийся уносит с собой управление живыми
+        стендами. Поэтому ``True`` («стенды есть», то есть НЕ выходим)
+        отвечается во ВСЕХ случаях, когда ответ неизвестен:
+
+        * поллера нет или он ещё не отдал первый снапшот;
+        * снапшот пришёл с ``error`` — это снапшот-ОТКАЗ ``_safe_build``
+          (``stands=[]``, ``probed=False``), то есть «опрос не состоялся», а
+          вовсе не «стендов нет». Ровно это и произошло 18.09.2026 20:56
+          (GAP-383): пустой список из отказа был прочитан как простой, и хаб
+          вышел при трёх живых стендах;
+        * ``probed=False`` — слепок реестра БЕЗ единой пробы: состояния в нём
+          заглушечные (``pending``), решать по ним вопрос выхода нельзя;
+        * запись стенда не разобралась (мусор вместо словаря).
+
+        ЖИВОЙ — ЭТО ``ProbeState.OK`` ПО ФАКТУ ПРОБЫ, а не «запущен нами»
+        (GAP-385). Проба ``process`` смотрит на порт/pid, поэтому усыновлённый
+        или поднятый мимо диспетчера стенд (``process.external``, см.
+        ``_is_external`` и ``standkit.adopt``) для неё такой же живой, как
+        свой: родитель мёртв, стенд работает, и потерять управление им ничуть
+        не лучше. Прежний код сравнивал состояние со строкой ``"running"``,
+        которой в ``ProbeState`` нет вообще (``ok``/``down``/``unknown``/
+        ``skipped``) — предикат был тождественно ложным на любом реальном
+        снапшоте, а тесты этого не ловили, подставляя выдуманное значение.
+        """
         poller = getattr(self._server, "status_poller", None)
         if poller is None:
             return True
         snapshot = poller.snapshot()
         if snapshot is None:
             return True
+        # Снапшот, которому нельзя верить, — это незнание, а не пустота.
+        if getattr(snapshot, "error", None):
+            return True
+        if not getattr(snapshot, "probed", False):
+            return True
         for stand in getattr(snapshot, "stands", []) or []:
-            process = (stand or {}).get("process") or {}
-            if process.get("state") == "running":
+            if not isinstance(stand, dict):
+                return True
+            process = stand.get("process")
+            if not isinstance(process, dict):
+                return True
+            if process.get("state") == ProbeState.OK.value:
                 return True
         return False
+
+    def version_desynced(self) -> bool:
+        """Заменили ли файлы пакета под живым процессом (ADR-0007 §4).
+
+        ``pip install`` поверх работающего диспетчера оставляет на диске новый
+        код, а в памяти — старый. Владелец сделал ровно это за два часа до
+        инцидента 18.09. Детект у хаба уже был (страница сверяет версию с
+        диска с ``/api/version`` из памяти и показывает плашку «перезапустите»),
+        но АВТОВЫХОД про рассинхрон не знал и выходил как обычно — унося с
+        собой стенды, которыми больше некому управлять.
+
+        Решение владельца 19.09 — НЕ ВЫХОДИТЬ. Перезапускать себя самостоятельно
+        хаб здесь не пытается: ``/api/hub/restart`` существует и вызывается
+        ЧЕЛОВЕКОМ с открытой страницы, а молчаливый самоперезапуск фонового
+        процесса — это ровно тот класс действий, из-за которого разбирают
+        инциденты вроде этого.
+
+        Любая беда при чтении версии — ``False`` (тихий фолбэк, как и у самой
+        сверки в ADR-0007 §4): «не смогли прочитать» не повод ни объявлять
+        рассинхрон, ни запрещать автовыход навсегда.
+        """
+        try:
+            on_disk = (self._version_on_disk() or "").strip()
+            in_memory = (self._version_in_memory() or "").strip()
+        except Exception:  # noqa: BLE001 - сверка версий не роняет сторожа
+            return False
+        if not on_disk or not in_memory:
+            return False
+        return on_disk != in_memory
+
+    @staticmethod
+    def _version_on_disk() -> str:
+        """Версия пакета ПО ФАЙЛАМ НА ДИСКЕ (подменяется в тестах)."""
+        return on_disk_standkit_version("")
+
+    @staticmethod
+    def _version_in_memory() -> str:
+        """Версия пакета, загруженная в этот процесс (подменяется в тестах)."""
+        return _standkit_version
 
     def is_idle(self) -> bool:
         """Выполнено ли условие простоя ПРЯМО СЕЙЧАС (без учёта таймера)."""
         if self.has_running_stands():
+            return False
+        if self.version_desynced():
+            # Файлы пакета заменили под живым процессом: выйти сейчас значит
+            # унести стенды ради обновления, которое человек всё равно обязан
+            # завершить сам перезапуском (GAP-383, см. version_desynced).
             return False
         if self._desktop:
             # См. docstring класса: в режиме окна признак «никто не смотрит»
@@ -3374,10 +3452,31 @@ class _IdleShutdownWatcher:
         if moment - self._idle_since < timeout:
             return
         self._idle_since = None
-        print(
-            f"[standkit-hub] простой дольше {timeout / 60.0:.0f} мин "
-            "(дашборд закрыт, работающих стендов нет) — диспетчер завершается; "
-            "запущенные стенды продолжат работать",
+        # В ЛОГ, А НЕ В stderr, и ФАКТАМИ, а не выводом (GAP-384). Под
+        # pythonw.exe stderr не подключён никуда, поэтому прежний print делал
+        # самое громкое решение диспетчера — завершение процесса — ровно тем
+        # событием, о котором назавтра нельзя узнать ничего. Разбор инцидента
+        # начинается с вопроса «сколько было клиентов и что показывал
+        # снапшот», поэтому здесь записываются ответы именно на него.
+        snapshot = None
+        poller = getattr(self._server, "status_poller", None)
+        if poller is not None:
+            try:
+                snapshot = poller.snapshot()
+            except Exception:  # noqa: BLE001 - диагностика не роняет сторожа
+                snapshot = None
+        _log.info(
+            "автовыход по простою: простой дольше %.0f мин — диспетчер завершается "
+            "(запущенные стенды продолжат работать). Факты решения: "
+            "sse_client_count=%s has_running_stands=%s desktop=%s "
+            "snapshot_probed=%s snapshot_error=%s snapshot_stands=%s",
+            timeout / 60.0,
+            self._server.sse_client_count(),
+            self.has_running_stands(),
+            self._desktop,
+            getattr(snapshot, "probed", None),
+            getattr(snapshot, "error", None),
+            len(getattr(snapshot, "stands", []) or []) if snapshot is not None else None,
         )
         self._server.request_self_shutdown()
 
@@ -3437,8 +3536,19 @@ class _StopRequestWatcher:
                 age = time.time() - float(request.get("at") or 0.0)
                 _instance.discard_stop_request(self._path)
                 if age > _STOP_REQUEST_MAX_AGE_SEC:
+                    # Протухший запрос — след чужого завершившегося перехвата
+                    # (см. докстринг класса). Он не причина выхода, но в логе
+                    # обязан остаться: иначе «почему диспетчер не закрылся по
+                    # запросу установщика» тоже становится неразбираемым.
+                    _log.warning(
+                        "стоп-запрос проигнорирован: он старше %.0f с (возраст %.0f с), "
+                        "запросивший процесс уже не ждёт ответа",
+                        _STOP_REQUEST_MAX_AGE_SEC, age)
                     self._stop_event.wait(self._poll_interval)
                     continue
+                _log.info(
+                    "получен стоп-запрос (возраст %.1f с, инициатор=%s) — завершаемся",
+                    age, request.get("by") or request.get("source") or "не указан")
                 self._trigger_stop()
                 return
             self._stop_event.wait(self._poll_interval)
@@ -3658,6 +3768,12 @@ class HubHTTPServer(ThreadingHTTPServer):
             if self.self_shutdown_requested:
                 return False
             self.self_shutdown_requested = True
+
+        # Единственная точка выхода — единственное место, где о нём можно
+        # написать (GAP-384). Сюда приходят и кнопка «Выход», и автовыход по
+        # простою, и стоп-запрос установщика: в логе они различаются тем, что
+        # вызывающий записал ДО этого вызова.
+        _log.info("запрошен штатный выход диспетчера (pid=%s)", os.getpid())
 
         try:
             release_hub_mutex()

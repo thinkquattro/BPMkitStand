@@ -107,11 +107,28 @@ class _FakePoller:
 
 
 class _FakeSnapshot:
-    def __init__(self, stands) -> None:
+    """Двойник StatusSnapshot — С ТЕМИ ЖЕ ПОЛЯМИ, что у настоящего.
+
+    Поля ``probed``/``error`` здесь не для красоты: их отсутствие в прежней
+    версии этого двойника и было причиной, по которой набор оставался зелёным,
+    пока предикат простоя в бою отвечал неверно (GAP-383). Двойник, который
+    беднее оригинала, проверяет не тот объект, что работает у пользователя.
+    """
+
+    def __init__(self, stands, *, probed: bool = True, error=None) -> None:
         self.stands = stands
+        self.probed = probed
+        self.error = error
 
 
 def _stand(state: str) -> dict:
+    """Запись стенда снапшота. ``state`` — значение ``ProbeState``.
+
+    ВАЖНО: допустимые значения — ``ok``/``down``/``unknown``/``skipped`` (плюс
+    заглушечное ``pending`` у непробованного слепка). Строки ``running``, на
+    которую опирался прежний код и прежние тесты, в ``ProbeState`` нет вообще
+    — см. test_probe_state_has_no_running_value.
+    """
     return {"name": "s", "process": {"state": state}}
 
 
@@ -191,7 +208,7 @@ def test_running_stand_alone_blocks_idle(tmp_path):
     # Второе слагаемое: вкладку закрыли, но стенд работает — выйти сейчас
     # значит потерять управление им.
     clock = _FakeClock()
-    server = _FakeServer(sse=0, stands=[_stand("running")])
+    server = _FakeServer(sse=0, stands=[_stand("ok")])
     watcher = _watcher(tmp_path, server, clock, minutes=1)
     assert watcher.is_idle() is False
 
@@ -203,7 +220,7 @@ def test_running_stand_alone_blocks_idle(tmp_path):
 
 def test_stopped_stands_do_not_block_idle(tmp_path):
     clock = _FakeClock()
-    server = _FakeServer(sse=0, stands=[_stand("stopped"), _stand("unknown")])
+    server = _FakeServer(sse=0, stands=[_stand("down"), _stand("unknown")])
     watcher = _watcher(tmp_path, server, clock, minutes=1)
     assert watcher.is_idle() is True
 
@@ -235,7 +252,7 @@ def test_desktop_mode_ignores_sse_clients(tmp_path):
     busy = _FakeServer(sse=5, stands=[])
     assert _watcher(tmp_path, busy, clock, minutes=1, desktop=True).is_idle() is True
 
-    with_stand = _FakeServer(sse=0, stands=[_stand("running")])
+    with_stand = _FakeServer(sse=0, stands=[_stand("ok")])
     assert _watcher(tmp_path, with_stand, clock, minutes=1, desktop=True).is_idle() is False
 
 
@@ -610,3 +627,200 @@ def test_acquire_then_release_hub_mutex():
     assert hub_mutex.acquire_hub_mutex() is True
     assert hub_mutex.release_hub_mutex() is True
     assert hub_mutex.release_hub_mutex() is False, "повторное освобождение — no-op"
+
+
+# --------------------------------------------------------------------------
+# GAP-383 / GAP-385 — снапшот, которому нельзя верить, и живые стенды по факту
+#
+# Инцидент 18.09.2026 20:56: хаб вышел САМ (`request_self_shutdown`) при трёх
+# живых стендах. Разбор дал две независимые поломки одного предиката:
+#
+#   * `has_running_stands()` сравнивал `process.state` со строкой "running",
+#     которой в `ProbeState` НЕТ ВООБЩЕ (ok/down/unknown/skipped) — на любом
+#     реальном снапшоте предикат отвечал «стендов нет». Прежние тесты этого не
+#     ловили, потому что сами подставляли выдуманное "running";
+#   * снапшот-ОТКАЗ поллера (`_safe_build`: stands=[], probed=False, error=...)
+#     читался как «стендов нет» вместо «я не знаю» — вопреки докстрингу
+#     предиката и ADR-0007 («незнание = остаёмся»).
+# --------------------------------------------------------------------------
+
+
+class _RawSnapshot:
+    """Снапшот в той форме, в какой его строит поллер (включая _safe_build)."""
+
+    def __init__(self, *, stands=None, probed=True, error=None):
+        self.stands = [] if stands is None else stands
+        self.probed = probed
+        self.error = error
+
+
+class _RawPoller:
+    def __init__(self, snapshot) -> None:
+        self._snapshot = snapshot
+
+    def snapshot(self):
+        return self._snapshot
+
+
+def _server_with_snapshot(snapshot, *, sse: int = 0) -> _FakeServer:
+    server = _FakeServer(sse=sse, stands=[])
+    server.status_poller = _RawPoller(snapshot)
+    return server
+
+
+def test_probe_state_has_no_running_value():
+    # Тест-сторож против возврата сравнения со строкой "running": предикат
+    # простоя обязан опираться на РЕАЛЬНЫЕ значения ProbeState, иначе он снова
+    # станет тождественно-ложным, а тесты — тождественно-зелёными.
+    from standkit.models import ProbeState
+
+    assert "running" not in {state.value for state in ProbeState}
+    assert ProbeState.OK.value == "ok"
+
+
+def test_live_stand_in_real_snapshot_shape_blocks_idle(tmp_path):
+    # ГЛАВНЫЙ регресс инцидента: стенд, живой по пробе (state="ok"), обязан
+    # удерживать хаб. Раньше здесь было False и хаб выходил при живых стендах.
+    clock = _FakeClock()
+    server = _server_with_snapshot(_RawSnapshot(stands=[_stand("ok")], probed=True))
+    watcher = _watcher(tmp_path, server, clock, minutes=1)
+
+    assert watcher.has_running_stands() is True
+    assert watcher.is_idle() is False
+
+    watcher._tick()
+    clock.advance(60 * 60)
+    watcher._tick()
+    assert server.shutdown_calls == 0
+
+
+def test_snapshot_with_error_keeps_hub_alive(tmp_path):
+    # Снапшот с `error` — это «я не знаю», а не «стендов нет».
+    clock = _FakeClock()
+    server = _server_with_snapshot(
+        _RawSnapshot(stands=[], probed=False, error="реестр недоступен"))
+    watcher = _watcher(tmp_path, server, clock, minutes=1)
+
+    assert watcher.has_running_stands() is True
+    assert watcher.is_idle() is False
+
+    watcher._tick()
+    clock.advance(60 * 60)
+    watcher._tick()
+    assert server.shutdown_calls == 0
+
+
+def test_unprobed_snapshot_keeps_hub_alive(tmp_path):
+    # probed=False — слепок реестра БЕЗ единой пробы: состояния в нём
+    # заглушечные ("pending"), решать по ним вопрос выхода нельзя.
+    clock = _FakeClock()
+    server = _server_with_snapshot(
+        _RawSnapshot(stands=[_stand("pending")], probed=False))
+    watcher = _watcher(tmp_path, server, clock, minutes=1)
+
+    assert watcher.has_running_stands() is True
+    assert watcher.is_idle() is False
+
+
+def test_probed_snapshot_without_live_stands_allows_idle(tmp_path):
+    # Обратная сторона: честный опрошенный снапшот, где все стенды лежат,
+    # простой РАЗРЕШАЕТ — иначе автовыход перестал бы работать вообще.
+    clock = _FakeClock()
+    server = _server_with_snapshot(_RawSnapshot(
+        stands=[_stand("down"), _stand("unknown"), _stand("skipped")], probed=True))
+    watcher = _watcher(tmp_path, server, clock, minutes=1)
+
+    assert watcher.has_running_stands() is False
+    assert watcher.is_idle() is True
+
+    watcher._tick()
+    clock.advance(60 * 60)
+    watcher._tick()
+    assert server.shutdown_calls == 1
+
+
+def test_external_adopted_stand_blocks_idle(tmp_path):
+    # GAP-385: усыновлённый/внешний стенд (поднят мимо диспетчера, родитель
+    # мёртв) — такой же живой стенд реестра. Условие простоя — «нет НИ ОДНОГО
+    # живого стенда по факту пробы», а не «нет запущенных нами».
+    clock = _FakeClock()
+    external = {"name": "ext", "process": {"state": "ok", "external": True}}
+    server = _server_with_snapshot(_RawSnapshot(stands=[external], probed=True))
+    watcher = _watcher(tmp_path, server, clock, minutes=1)
+
+    assert watcher.has_running_stands() is True
+    assert watcher.is_idle() is False
+
+    watcher._tick()
+    clock.advance(60 * 60)
+    watcher._tick()
+    assert server.shutdown_calls == 0
+
+
+def test_malformed_stand_entry_keeps_hub_alive(tmp_path):
+    # Мусор в снапшоте — тоже незнание: молча посчитать такой стенд мёртвым
+    # значит повторить инцидент другим путём.
+    clock = _FakeClock()
+    server = _server_with_snapshot(_RawSnapshot(stands=[{"name": "broken"}], probed=True))
+    watcher = _watcher(tmp_path, server, clock, minutes=1)
+
+    assert watcher.has_running_stands() is True
+
+
+# --------------------------------------------------------------------------
+# GAP-383 (вторая часть) — рассинхрон версий под живым процессом
+#
+# Владелец 18.09 сделал `pip install standkit` под работающим хабом: файлы на
+# диске заменились, код сервера остался в памяти. ADR-0007 §4 уже умеет
+# ДЕТЕКТИРОВАТЬ это (версия страницы с диска vs `/api/version` из памяти), но
+# автовыход про рассинхрон не знал и выходил как обычно — унося стенды.
+# Решение (дефолт по заданию владельца): НЕ ВЫХОДИТЬ.
+# --------------------------------------------------------------------------
+
+
+def test_version_desync_blocks_idle_shutdown(tmp_path):
+    clock = _FakeClock()
+    server = _server_with_snapshot(_RawSnapshot(stands=[], probed=True))
+    watcher = _watcher(tmp_path, server, clock, minutes=1)
+    # Без рассинхрона простой разрешён — иначе тест ниже ничего не доказывает.
+    assert watcher.is_idle() is True
+
+    watcher._version_on_disk = lambda: "9.9.9"
+    watcher._version_in_memory = lambda: "0.12.2"
+    assert watcher.version_desynced() is True
+    assert watcher.is_idle() is False
+
+    watcher._tick()
+    clock.advance(60 * 60)
+    watcher._tick()
+    assert server.shutdown_calls == 0
+
+
+def test_equal_versions_are_not_a_desync(tmp_path):
+    clock = _FakeClock()
+    server = _server_with_snapshot(_RawSnapshot(stands=[], probed=True))
+    watcher = _watcher(tmp_path, server, clock, minutes=1)
+
+    watcher._version_on_disk = lambda: "0.12.2"
+    watcher._version_in_memory = lambda: "0.12.2"
+    assert watcher.version_desynced() is False
+    assert watcher.is_idle() is True
+
+
+def test_unreadable_disk_version_is_not_a_desync(tmp_path):
+    # Не удалось прочитать версию с диска — это НЕ повод объявлять рассинхрон
+    # и не повод навсегда запретить автовыход: сверка версий не та функция,
+    # ради которой стоит ломать автовыход (ADR-0007 §4, «тихий фолбэк»).
+    clock = _FakeClock()
+    server = _server_with_snapshot(_RawSnapshot(stands=[], probed=True))
+    watcher = _watcher(tmp_path, server, clock, minutes=1)
+
+    watcher._version_on_disk = lambda: ""
+    watcher._version_in_memory = lambda: "0.12.2"
+    assert watcher.version_desynced() is False
+
+    def _boom():
+        raise OSError("диск отвалился")
+
+    watcher._version_on_disk = _boom
+    assert watcher.version_desynced() is False

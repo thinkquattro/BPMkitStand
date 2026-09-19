@@ -26,6 +26,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from standkit_hub.hub_logging import logger as _hub_logger
+
+# Отказ опроса пишется в лог диспетчера (GAP-384), см. _safe_build.
+_log = _hub_logger()
+
 # Нижняя граница периода опроса. Пользователь может выставить
 # ``refresh_interval_sec = 1`` (или 0 руками в конфиге) — без этого пола
 # фоновый поток превратился бы в busy-loop, дёргающий appcmd/docker в цикле.
@@ -155,6 +160,14 @@ class StatusPoller:
         except Exception as exc:  # noqa: BLE001 - фоновый поток не имеет права умереть
             # Честный отказ: снапшот с текстом ошибки, а не молчаливо
             # «всё хорошо» и не падение потока опроса.
+            #
+            # И этот отказ ОБЯЗАН оставить след (GAP-384). Молчаливый
+            # снапшот-отказ — ровно та слепота, из-за которой 18.09.2026 хаб
+            # вышел по простою при трёх живых стендах: пустой список из
+            # отказа неотличим от «стендов нет», если про отказ нигде не
+            # написано. exc_info — потому что разбирать придётся не текст
+            # ошибки, а место, где опрос сломался.
+            _log.warning("опрос стендов не состоялся: %s", exc, exc_info=True)
             return StatusSnapshot(
                 stands=[], default="", probed=False, generated_at=time.time(), error=str(exc)
             )
