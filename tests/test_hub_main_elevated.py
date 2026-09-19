@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import json
 
 import pytest
@@ -227,26 +229,31 @@ def test_write_relaunch_result_writes_status_and_message(tmp_path):
     assert "at" in data
 
 
-def test_write_relaunch_result_swallows_reparse_guard_error(tmp_path, monkeypatch, capsys):
+def test_write_relaunch_result_swallows_reparse_guard_error(tmp_path, monkeypatch, caplog):
     def fake_write_atomic(path, payload):
         raise ReparseGuardError("подложенный симлинк")
 
     monkeypatch.setattr(hub_main, "write_result_atomic", fake_write_atomic)
 
-    hub_main._write_relaunch_result(str(tmp_path / "result.json"), status="failed", message="x")
+    with caplog.at_level(logging.WARNING, logger="standkit_hub"):
+        hub_main._write_relaunch_result(str(tmp_path / "result.json"), status="failed", message="x")
 
-    assert "не удалось записать результат" in capsys.readouterr().err
+    # GAP-384: причина уходит В ЛОГ, а не в stderr — под pythonw.exe stderr не
+    # подключён никуда, и проверять его значило бы проверять канал, которого у
+    # продукта в бою нет.
+    assert "не удалось записать результат" in caplog.text
 
 
-def test_write_relaunch_result_swallows_oserror(tmp_path, monkeypatch, capsys):
+def test_write_relaunch_result_swallows_oserror(tmp_path, monkeypatch, caplog):
     def fake_write_atomic(path, payload):
         raise OSError("диск только на чтение")
 
     monkeypatch.setattr(hub_main, "write_result_atomic", fake_write_atomic)
 
-    hub_main._write_relaunch_result(str(tmp_path / "result.json"), status="failed")
+    with caplog.at_level(logging.WARNING, logger="standkit_hub"):
+        hub_main._write_relaunch_result(str(tmp_path / "result.json"), status="failed")
 
-    assert "не удалось записать результат" in capsys.readouterr().err
+    assert "не удалось записать результат" in caplog.text
 
 
 # --- _takeover_running_instance (Б1): стоп-запрос вместо убийства дерева ------
@@ -450,18 +457,18 @@ def test_main_writes_serving_result_after_successful_takeover_and_bind(tmp_path,
 # --- M14: WARN, если run_dir сконфигурирован вне профиля пользователя ---
 
 
-def test_warn_if_run_dir_outside_profile_warns_when_outside_home(tmp_path, monkeypatch, capsys):
+def test_warn_if_run_dir_outside_profile_warns_when_outside_home(tmp_path, monkeypatch, caplog):
     home = tmp_path / "home" / "someone"
     home.mkdir(parents=True)
     outside = tmp_path / "shared" / "run"
     outside.mkdir(parents=True)
     monkeypatch.setattr(hub_main.Path, "home", classmethod(lambda cls: home))
 
-    hub_main._warn_if_run_dir_outside_profile(outside)
+    with caplog.at_level(logging.WARNING, logger="standkit_hub"):
+        hub_main._warn_if_run_dir_outside_profile(outside)
 
-    captured = capsys.readouterr()
-    assert "ВНИМАНИЕ" in captured.err
-    assert str(outside.resolve()) in captured.err
+    assert "ВНИМАНИЕ" in caplog.text
+    assert str(outside.resolve()) in caplog.text
 
 
 def test_make_desktop_stop_callback_destroys_windows_and_shuts_down_server():
