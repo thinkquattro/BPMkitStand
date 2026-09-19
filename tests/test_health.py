@@ -726,3 +726,124 @@ def test_probe_redis_garbage_port_is_unknown_not_crash():
     status = check_stand(stand)
     assert status.redis == ProbeState.UNKNOWN
     assert "не задан" in status.details["redis_reason"]
+
+
+# --- GAP-277: удалённый стенд без агента (transport=http) ---------------------
+#
+# Суть гэпа не в том, что проб «не хватает», а в том, что диспетчер ВРАЛ:
+# показывал «агент · unknown» с активными кнопками и именем непроверенной БД.
+# Поэтому тесты проверяют не только «HTTP-проба отработала», но и что
+# остальные три пробы честно помечены SKIPPED, а не UNKNOWN.
+
+
+def _http_stand(**kw) -> Stand:
+    data = dict(
+        name="survey9",
+        transport=Transport.HTTP,
+        stand_host="stand.example.test",
+        stand_port=_find_closed_port(),
+        stand_scheme="http",
+    )
+    data.update(kw)
+    return Stand(**data)
+
+
+def test_http_transport_skips_process_db_redis_probes():
+    """Процесс/БД/Redis у стенда без агента — SKIPPED с объяснением."""
+    stand = _http_stand(
+        stand_host="127.0.0.1", db_host="127.0.0.1", db_port=5432,
+        redis_host="127.0.0.1", redis_port=6379,
+    )
+    status = check_stand(stand)
+
+    assert status.process is ProbeState.SKIPPED
+    assert status.db is ProbeState.SKIPPED
+    assert status.redis is ProbeState.SKIPPED
+    # UNKNOWN читается как «не смогли узнать»; здесь смысл другой — «проверять
+    # нечем по построению», и это должно быть сказано словами.
+    assert "без агента" in status.details["process_reason"]
+    assert status.details["db_reason"] == "не проверяется без агента"
+    assert status.details["redis_reason"] == "не проверяется без агента"
+
+
+def test_http_transport_still_probes_http_honestly():
+    """HTTP-проба выполняется по-настоящему: закрытый порт → DOWN, а не unknown."""
+    status = check_stand(_http_stand(stand_host="127.0.0.1"))
+    assert status.http is ProbeState.DOWN
+    assert "URL:" in status.details["http_reason"]
+
+
+def test_http_transport_http_probe_ok_on_live_server():
+    """Живой адрес → up (ровно тот же путь, что у локальных стендов)."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _QuietHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        stand = _http_stand(stand_host="127.0.0.1", stand_port=server.server_address[1])
+        status = check_stand(stand)
+        assert status.http is ProbeState.OK
+        assert status.process is ProbeState.SKIPPED
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_legacy_agent_without_url_reads_as_http():
+    """
+    Обратная совместимость (п.1 плана GAP-277): запись agent БЕЗ agent_url —
+    это и есть «удалённый стенд, к которому есть только адрес». До правки она
+    давала вечный unknown, потому что опрос уходил к несуществующему агенту.
+    """
+    stand = Stand(
+        name="legacy",
+        transport=Transport.AGENT,
+        stand_host="127.0.0.1",
+        stand_port=_find_closed_port(),
+    )
+    assert stand.effective_transport is Transport.HTTP
+    assert stand.transport_warning and "agent_url" in stand.transport_warning
+    # Поле реестра при этом НЕ переписано — трактовка живёт в рантайме.
+    assert stand.transport is Transport.AGENT
+
+    status = check_stand(stand)
+    assert status.process is ProbeState.SKIPPED
+    assert status.http is ProbeState.DOWN
+
+
+def test_agent_with_url_keeps_agent_semantics():
+    """Настоящая agent-запись не должна пострадать от совместимости выше."""
+    stand = Stand(
+        name="real-agent",
+        transport=Transport.AGENT,
+        agent_url="https://host:8765",
+        stand_dir="/srv/stand",
+    )
+    assert stand.effective_transport is Transport.AGENT
+    assert stand.transport_warning is None
+
+
+def test_http_stand_validation_rules():
+    """
+    Валидация записи http: stand_dir запрещён (его нет по построению), адрес
+    обязателен. Без этого каждая корректная запись «только адрес и пароль»
+    считалась бы невалидной из-за общего требования stand_dir.
+    """
+    assert _http_stand().validate() == []
+
+    # Локальный адрес у УДАЛЁННОГО стенда — это «адрес не задан» (у поля есть
+    # дефолт 127.0.0.1, поэтому пустым оно не бывает и проверять «заполнено ли»
+    # бессмысленно).
+    errors = _http_stand(stand_host="127.0.0.1").validate()
+    assert any("stand_host" in e for e in errors)
+
+    errors = _http_stand(stand_dir="C:/stand").validate()
+    assert any("stand_dir" in e for e in errors)
+
+
+class _QuietHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *args):  # тишина в выводе тестов
+        pass

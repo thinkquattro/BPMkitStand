@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from standkit.models import HostKind, ProbeState, Stand, StandStatus
+from standkit.models import Transport, HostKind, ProbeState, Stand, StandStatus
 
 # --- таймауты проб ---------------------------------------------------------
 #
@@ -431,6 +431,16 @@ def check_stand(
     status = StandStatus(name=stand.name)
 
     def _probe_process() -> tuple[ProbeState, Optional[str]]:
+        # Транспорт http — удалённый стенд БЕЗ агента (GAP-277): процессом
+        # управлять нечем и проверять его нечем. Это SKIPPED («проба сознательно
+        # не выполнялась»), а не UNKNOWN: UNKNOWN читается оператором как «не
+        # смогли узнать, возможно что-то сломалось», и ровно этой подменой
+        # смысла гэп и был заведён.
+        if stand.effective_transport == Transport.HTTP:
+            return ProbeState.SKIPPED, (
+                "без агента управление процессом недоступно: у стенда на транспорте "
+                "http известен только веб-адрес"
+            )
         if stand.host_kind in (HostKind.IIS, HostKind.DOCKER, HostKind.K8S):
             # Проба «процесс» для iis/docker/k8s консультируется с бэкендом
             # хостинга (состояние App Pool / контейнера / деплоймента), а не с
@@ -499,6 +509,8 @@ def check_stand(
     def _probe_db() -> tuple[ProbeState, Optional[str]]:
         # У БД-пробы объяснять пока нечего: адрес есть — проверяем порт, нет —
         # UNKNOWN. Пару возвращает ради единого протокола сборки деталей.
+        if stand.effective_transport == Transport.HTTP:
+            return ProbeState.SKIPPED, "не проверяется без агента"
         if not (stand.db_host and stand.db_port):
             return ProbeState.UNKNOWN, None
         if deep_db:
@@ -510,6 +522,8 @@ def check_stand(
         # Поля модели в приоритете, ``extra`` — фолбэк: до 0.8.0 адрес Redis
         # жил только в нетипизированном extra, и реестры, заполненные раньше,
         # обязаны продолжать работать без правок (GAP-003).
+        if stand.effective_transport == Transport.HTTP:
+            return ProbeState.SKIPPED, "не проверяется без агента"
         redis_host = str(stand.redis_host or stand.extra.get("redis_host") or "").strip()
         raw_port = stand.redis_port or stand.extra.get("redis_port") or 0
         try:

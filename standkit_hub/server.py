@@ -584,6 +584,16 @@ def _stand_entry(name: str, stand: Stand, status) -> dict:
         # НА КАКУЮ машину уходит управление. У локальных стендов поля нет (``None``),
         # а не пустая строка — «не применимо» и «не заполнено» это разные вещи.
         "agent": (stand.agent_url or None) if stand.transport == Transport.AGENT else None,
+        # Хост удалённого стенда без агента (GAP-277) — для колонки
+        # «удалённый · http · <хост>». У прочих транспортов ключа нет.
+        "remote_host": (
+            (stand.stand_host or None)
+            if stand.effective_transport == Transport.HTTP
+            else None
+        ),
+        # Предупреждение по записи, которую диспетчер трактует не буквально
+        # (legacy agent без agent_url → http, GAP-277). None — трактовка прямая.
+        "transport_warning": stand.transport_warning,
         "status": status_dict,
         # ``reason`` у http/redis — тот же приём, что у process.reason: без него
         # наружу уходил голый "down"/"—", и оператор не мог отличить закрытый

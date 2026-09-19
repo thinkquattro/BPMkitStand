@@ -10,6 +10,10 @@ projects.sample.json в корне репозитория) плюс универ
 - "agent" — стенд управляется через удалённый standkit_agent по HTTP
   (используются agent_url / agent_secret_ref, а для TLS-канала до агента —
   agent_ca / agent_verify_tls);
+- "http" — удалённый стенд БЕЗ агента: известен только веб-адрес стенда и
+  учётная запись администратора (кейс владельца «нужно работать с удалённым
+  стендом, имея только пароль», GAP-267 W0 / GAP-277). Управлять процессом
+  такого стенда нечем — доступна только HTTP-проба самого стенда;
 - "ssh" / "winrm" — зарезервировано под будущие транспорты, СХЕМОЙ допускается,
   логика НЕ реализована (бэклог, см. docs/ARCHITECTURE.md).
 """
@@ -26,6 +30,13 @@ class Transport(str, Enum):
 
     LOCAL = "local"
     AGENT = "agent"
+    # Удалённый стенд без агента: только веб-адрес + учётка (GAP-277).
+    # Значение УЖЕ принимает валидатор stand_register на стороне MCP
+    # (BPMkit/server/bpmkit/tools/projects.py, GAP-267 W0) и комментарий там
+    # обещает, что оно «зеркалит standkit.models.Transport» — до этой правки
+    # обещание было ложным: запись создавалась, а диспетчер падал на ней в
+    # NotImplementedError и показывал «агент · unknown».
+    HTTP = "http"
     # Задел на будущее — схема допускает значения, реализации пока нет.
     SSH = "ssh"
     WINRM = "winrm"
@@ -214,6 +225,36 @@ class Stand:
         result.update(self.extra)
         return result
 
+    @property
+    def effective_transport(self) -> Transport:
+        """
+        Транспорт, по которому НА САМОМ ДЕЛЕ можно дотянуться до стенда.
+
+        Единственное отличие от поля ``transport`` — обратная совместимость
+        (GAP-277, п.1 плана): запись ``transport=agent`` БЕЗ ``agent_url``
+        появилась до того, как у диспетчера был транспорт ``http``, — так
+        регистрировали именно «удалённый стенд, к которому есть только адрес».
+        Агента по такой записи не существует, поэтому опрос уходил в никуда и
+        строка висела «агент · unknown». Трактуем её как ``http``: это
+        возвращает честную HTTP-пробу вместо вечного unknown.
+
+        Поле реестра при этом НЕ переписывается молча — интерпретация живёт в
+        рантайме, а UI показывает предупреждение (см. ``transport_warning``).
+        """
+        if self.transport == Transport.AGENT and not (self.agent_url or "").strip():
+            return Transport.HTTP
+        return self.transport
+
+    @property
+    def transport_warning(self) -> Optional[str]:
+        """Текст предупреждения для UI, когда запись трактуется не буквально."""
+        if self.transport == Transport.AGENT and not (self.agent_url or "").strip():
+            return (
+                "в реестре указан transport=agent, но адрес агента (agent_url) не задан — "
+                "запись читается как удалённый стенд без агента (http)"
+            )
+        return None
+
     def validate(self) -> list[str]:
         """
         Минимальная валидация записи. Возвращает список текстов ошибок
@@ -223,7 +264,29 @@ class Stand:
         errors: list[str] = []
         if not self.name:
             errors.append("name не может быть пустым")
-        if not self.stand_dir:
+        # У стенда на транспорте http локальной папки нет ПО ПОСТРОЕНИЮ
+        # (GAP-267 W0 прямо запрещает stand_dir у такой записи), поэтому
+        # требовать её здесь значило бы объявить невалидной каждую корректную
+        # запись «только адрес и пароль».
+        if self.effective_transport == Transport.HTTP and self.transport == Transport.HTTP:
+            if self.stand_dir:
+                errors.append(
+                    "transport=http несовместим с stand_dir: у стенда, доступного "
+                    "только по HTTP-API, нет локальной папки"
+                )
+            # stand_host/stand_port НЕ проверяются на «заполненность»: у них
+            # есть дефолты (127.0.0.1:5000), поэтому пустыми они не бывают и
+            # проверка была бы декоративной. Осмысленность адреса для
+            # УДАЛЁННОГО стенда ловится на входе — валидатором stand_register
+            # (GAP-267 W0), который видит, задал ли адрес человек, — и самой
+            # HTTP-пробой, которая честно покажет down.
+            if str(self.stand_host).strip() in ("127.0.0.1", "localhost"):
+                errors.append(
+                    "transport=http со stand_host=127.0.0.1/localhost: у удалённого "
+                    "стенда без агента адрес обязан быть внешним — локальный означает, "
+                    "что адрес не задан"
+                )
+        elif not self.stand_dir:
             errors.append("stand_dir не может быть пустым")
         if str(self.stand_scheme).lower() not in ("http", "https"):
             errors.append("stand_scheme должен быть http или https")

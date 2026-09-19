@@ -228,6 +228,9 @@
               <select name="transport">
                 <option value="local" selected>local</option>
                 <option value="agent">agent</option>
+                <!-- GAP-277: удалённый стенд, к которому есть только веб-адрес
+                     и учётка. Процессом такого стенда управлять нечем. -->
+                <option value="http">http — удалённый, без агента</option>
               </select>
             </label>
             <label>Хостинг
@@ -238,6 +241,15 @@
                 <option value="k8s">k8s</option>
               </select>
             </label>
+          </div>
+
+          <div class="register-conditional" data-when-transport="http" hidden>
+            <p class="field-hint">
+              Удалённый стенд без агента: диспетчер знает только его веб-адрес
+              (поля «Хост стенда» / «Порт» / «Схема» ниже) и показывает состояние
+              по HTTP-пробе. Папка стенда не указывается — её нет; запуск,
+              остановка, перезапуск, БД и Redis для такого стенда недоступны.
+            </p>
           </div>
 
           <div class="register-conditional" data-when-transport="agent" hidden>
