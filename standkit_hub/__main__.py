@@ -41,6 +41,7 @@ from standkit_hub import instance as _instance
 from standkit_hub.config import HubConfig
 from standkit_hub import hub_logging as _hub_logging
 from standkit_hub.mutex import acquire_hub_mutex
+from standkit_hub import preload as _preload
 from standkit_hub.elevation import ReparseGuardError, read_handoff, refusal_text, write_result_atomic
 from standkit_hub.security import InsecureBindError, generate_session_token
 from standkit_hub.server import DEFAULT_HUB_PORT, HubAlreadyRunning, bind_hub_server
@@ -321,6 +322,16 @@ def main(argv: list[str] | None = None) -> int:
         sys.__excepthook__(exc_type, exc_value, exc_tb)
 
     sys.excepthook = _log_unhandled
+
+    # GAP-412: все модули пакетов — в память ДО того, как начнётся работа.
+    # `pip install -U` под живым процессом заменяет файлы на диске, и ленивый
+    # import внутри функции после этого притащил бы НОВЫЙ модуль в СТАРЫЙ
+    # процесс (см. standkit_hub.preload). Один проход при старте делает такой
+    # import безвредным поиском в sys.modules.
+    _loaded, _failed = _preload.preload()
+    _log.info("модули пакетов загружены при старте: %d", len(_loaded))
+    for _name, _reason in _failed:
+        _log.warning("модуль %s не загрузился при старте: %s", _name, _reason)
 
     if args.elevated_op:
         # ДО любых bind/mutex/state/handoff: это одноразовый процесс "выполнить

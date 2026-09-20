@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import NoReturn, Optional
 
 from standkit import health, lifecycle
+from standkit import logs as _logs
 from standkit.models import Stand, StandStatus, Transport
 from standkit.registry import Registry
 from standkit.secrets import SecretError, get_secret
@@ -278,7 +279,7 @@ class FederatedClient:
         """
         stand = self.registry.get(name)
 
-        if stand.transport == Transport.LOCAL:
+        if stand.effective_transport == Transport.LOCAL:
             pf = lifecycle.pidfile_path(stand)
             return health.check_stand(stand, pidfile=pf)
 
@@ -361,10 +362,10 @@ class FederatedClient:
         """
         stand = self.registry.get(name)
 
-        if stand.transport == Transport.LOCAL:
+        if stand.effective_transport == Transport.LOCAL:
             return lifecycle.adopt(stand).to_dict()
 
-        if stand.transport == Transport.AGENT:
+        if stand.effective_transport == Transport.AGENT:
             data = self._agent_action(stand, name, "adopt")
             candidate = data.get("candidate") if isinstance(data, dict) else None
             return candidate if isinstance(candidate, dict) else None
@@ -398,13 +399,13 @@ class FederatedClient:
         stand = self.registry.get(name)
         supports_force = action in ("stop", "restart")
 
-        if stand.transport == Transport.LOCAL:
+        if stand.effective_transport == Transport.LOCAL:
             fn = getattr(lifecycle, action)
             if supports_force:
                 return fn(stand, force=force)
             return fn(stand)
 
-        if stand.transport == Transport.AGENT:
+        if stand.effective_transport == Transport.AGENT:
             query = "?force=1" if (supports_force and force) else ""
             data = self._agent_action(stand, name, action, query=query)
             return data.get("pid") if isinstance(data, dict) else None
@@ -414,12 +415,10 @@ class FederatedClient:
     def logs(self, name: str, n: int = 100) -> list[str]:
         stand = self.registry.get(name)
 
-        if stand.transport == Transport.LOCAL:
-            from standkit import logs as _logs
-
+        if stand.effective_transport == Transport.LOCAL:
             return _logs.tail(lifecycle.log_path(stand), n)
 
-        if stand.transport == Transport.AGENT:
+        if stand.effective_transport == Transport.AGENT:
             if not stand.agent_url or not stand.agent_secret_ref:
                 raise RemoteCallError(stand.agent_url or "?", "не задан agent_url/agent_secret_ref")
             token = get_secret(stand.agent_secret_ref)

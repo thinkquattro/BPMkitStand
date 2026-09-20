@@ -115,10 +115,16 @@ class _FakeSnapshot:
     беднее оригинала, проверяет не тот объект, что работает у пользователя.
     """
 
-    def __init__(self, stands, *, probed: bool = True, error=None) -> None:
+    def __init__(self, stands, *, probed: bool = True, error=None,
+                 generated_at=None) -> None:
         self.stands = stands
         self.probed = probed
         self.error = error
+        # GAP-412: возраст снапшота — ТАКОЕ ЖЕ поле оригинала, как probed/error,
+        # и ровно такой же источник ложной зелени, если двойник его не имеет:
+        # предикат простоя теперь смотрит на давность, и снапшот без даты
+        # («собран в эпоху») честно считается протухшим.
+        self.generated_at = time.time() if generated_at is None else generated_at
 
 
 def _stand(state: str) -> dict:
@@ -648,10 +654,11 @@ def test_acquire_then_release_hub_mutex():
 class _RawSnapshot:
     """Снапшот в той форме, в какой его строит поллер (включая _safe_build)."""
 
-    def __init__(self, *, stands=None, probed=True, error=None):
+    def __init__(self, *, stands=None, probed=True, error=None, generated_at=None):
         self.stands = [] if stands is None else stands
         self.probed = probed
         self.error = error
+        self.generated_at = time.time() if generated_at is None else generated_at
 
 
 class _RawPoller:

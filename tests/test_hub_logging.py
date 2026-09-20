@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import time
 from pathlib import Path
 
 import pytest
@@ -124,10 +125,13 @@ class _Clock:
 
 
 class _Snapshot:
-    def __init__(self, stands=None, *, probed=True, error=None) -> None:
+    def __init__(self, stands=None, *, probed=True, error=None, generated_at=None) -> None:
         self.stands = stands or []
         self.probed = probed
         self.error = error
+        # GAP-412: у оригинала есть возраст, и предикат простоя его читает.
+        # Двойник без `generated_at` даёт снапшот «из эпохи», то есть протухший.
+        self.generated_at = time.time() if generated_at is None else generated_at
 
 
 class _Poller:
