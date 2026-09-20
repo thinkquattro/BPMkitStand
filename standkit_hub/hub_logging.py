@@ -49,6 +49,39 @@ BACKUP_COUNT = 5
 
 _LOG_FORMAT = "%(asctime)s %(levelname)-7s [%(name)s] %(message)s"
 
+#: Переменная окружения, которой уровень лога поднимают ДО DEBUG (GAP-411).
+#:
+#: ЗАЧЕМ. Сторож простоя пишет факты каждого своего тика на уровне DEBUG — это и есть
+#: ответ на вопрос «почему диспетчер не вышел», ради которого запись заводилась. Но в
+#: exe-поставке уровень был прибит к INFO в коде: тики существовали только в тестах, а
+#: у человека, который наблюдает проблему на своей машине, не было НИКАКОГО способа их
+#: увидеть — то есть диагностика была написана для всех, кроме того, кому она нужна.
+#:
+#: Переменная, а не настройка в ``standkit-hub.json``: уровень лога нужен ровно на время
+#: разбора одного случая, и просить человека править конфиг (а потом не забыть вернуть)
+#: — это лишний способ оставить боевой диспетчер в DEBUG навсегда. Переменная исчезает
+#: вместе с сеансом, в котором её задали.
+LOG_LEVEL_ENV = "STANDKIT_HUB_LOG_LEVEL"
+
+DEFAULT_LEVEL = logging.INFO
+
+
+def level_from_env(default: int = DEFAULT_LEVEL, environ=None) -> int:
+    """Уровень лога из ``STANDKIT_HUB_LOG_LEVEL``: имя (``DEBUG``) либо число (``10``).
+
+    Мусор в переменной — ``default`` и НИКАКОГО отказа: диспетчер, не запустившийся из-за
+    опечатки в имени уровня лога, — худший из возможных исходов настройки логирования."""
+    raw = (environ if environ is not None else os.environ).get(LOG_LEVEL_ENV)
+    if raw is None:
+        return default
+    value = str(raw).strip()
+    if not value:
+        return default
+    if value.isdigit():
+        return int(value)
+    named = logging.getLevelName(value.upper())
+    return named if isinstance(named, int) else default
+
 
 def logger() -> logging.Logger:
     """Логгер диспетчера. Всегда возвращает рабочий объект — см. докстринг модуля."""
@@ -88,16 +121,22 @@ def resolve_log_path(explicit_dir: "Optional[Path | str]" = None) -> Path:
 
 
 def setup_logging(*, log_dir: "Optional[Path | str]" = None,
-                  level: int = logging.INFO,
+                  level: "Optional[int]" = None,
                   force: bool = False) -> Optional[Path]:
     """
     Подключает ротируемый файловый обработчик. Возвращает путь лога или
     ``None``, если настроить не удалось (старт при этом НЕ прерывается).
 
+    ``level=None`` (по умолчанию) — уровень берётся из ``STANDKIT_HUB_LOG_LEVEL``
+    (см. ``level_from_env``), иначе INFO. Явный аргумент сильнее переменной: тесты
+    задают уровень сами и не должны зависеть от окружения машины.
+
     ``force`` — пересобрать обработчики (нужен тестам и повторному запуску в
     одном процессе). Без него повторный вызов идемпотентен: второй файловый
     обработчик означал бы дублирование каждой строки.
     """
+    if level is None:
+        level = level_from_env()
     log = logger()
     if force:
         reset_logging()

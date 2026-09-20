@@ -602,3 +602,53 @@ def test_package_version_matches_pyproject():
     m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
     assert m, "в pyproject.toml не найдена версия"
     assert standkit.__version__ == m.group(1)
+
+
+# --------------------------------------------------------------------------
+# GAP-411 — DEBUG-тики обязаны быть достижимы В ПОСТАВКЕ, а не только в тестах
+# --------------------------------------------------------------------------
+
+
+def test_log_level_comes_from_environment():
+    """`STANDKIT_HUB_LOG_LEVEL=DEBUG` поднимает уровень лога диспетчера.
+
+    Без этого DEBUG-строки тика существуют только в pytest: у человека, который
+    наблюдает «диспетчер не выходит» на своей машине, нет способа их увидеть —
+    то есть диагностика написана для всех, кроме того, кому она нужна."""
+    from standkit_hub import hub_logging
+
+    assert hub_logging.level_from_env(environ={}) == logging.INFO
+    assert hub_logging.level_from_env(environ={hub_logging.LOG_LEVEL_ENV: "DEBUG"}) == logging.DEBUG
+    assert hub_logging.level_from_env(environ={hub_logging.LOG_LEVEL_ENV: "debug"}) == logging.DEBUG
+    assert hub_logging.level_from_env(environ={hub_logging.LOG_LEVEL_ENV: "10"}) == logging.DEBUG
+
+
+@pytest.mark.parametrize("value", ["", "   ", "БОЛТОВНЯ", "verbose"])
+def test_broken_log_level_falls_back_to_info(value):
+    """Опечатка в имени уровня не имеет права ни поднять уровень, ни уронить старт."""
+    from standkit_hub import hub_logging
+
+    assert hub_logging.level_from_env(environ={hub_logging.LOG_LEVEL_ENV: value}) == logging.INFO
+
+
+def test_setup_logging_honours_environment(tmp_path, monkeypatch):
+    from standkit_hub import hub_logging
+
+    monkeypatch.setenv(hub_logging.LOG_LEVEL_ENV, "DEBUG")
+    try:
+        hub_logging.setup_logging(log_dir=tmp_path, force=True)
+        assert hub_logging.logger().level == logging.DEBUG
+    finally:
+        hub_logging.reset_logging()
+
+
+def test_explicit_level_beats_environment(tmp_path, monkeypatch):
+    """Явный аргумент сильнее переменной: тесты не должны зависеть от окружения машины."""
+    from standkit_hub import hub_logging
+
+    monkeypatch.setenv(hub_logging.LOG_LEVEL_ENV, "DEBUG")
+    try:
+        hub_logging.setup_logging(log_dir=tmp_path, level=logging.WARNING, force=True)
+        assert hub_logging.logger().level == logging.WARNING
+    finally:
+        hub_logging.reset_logging()
