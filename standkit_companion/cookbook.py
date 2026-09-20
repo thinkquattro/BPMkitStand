@@ -44,6 +44,7 @@ __all__ = [
     "cookbook_dir",
     "cookbook_path",
     "installed_version",
+    "installed_copies",
     "read_version",
     "check",
     "sync",
@@ -114,22 +115,94 @@ def read_version(path: Path) -> Optional[str]:
     return None
 
 
-def installed_version(ctx=None, config_dir: Optional[Path] = None) -> Optional[str]:
-    """Версия кукбука, который пользователь фактически откроет.
+#: Числовой префикс строки версии (`1.1.149-bb912a67` → `1.1.149`). Дальше `-sha8`
+#: от СОДЕРЖИМОГО — он сравнению не подлежит (не порядковый).
+_VERSION_PREFIX_RE = re.compile(r"^(\d+(?:\.\d+)*)")
 
-    Порядок ТОТ ЖЕ, в котором документ ищут ярлык и `self_check`: сначала
-    рабочая копия в профиле, затем фолбэк на поставку `{app}\\docs`. Совпадение
-    этого порядка — не совпадение стиля, а требование: если бы канал считал
-    «установленной» одну копию, а пользователь открывал другую, обновление
-    считалось бы применённым при открытом старом документе (ровно симптом
-    GAP-361)."""
-    profile = read_version(cookbook_path(config_dir))
-    if profile is not None:
-        return profile
-    shipped = _shipped_path(ctx)
-    if shipped is not None:
-        return read_version(shipped)
-    return None
+
+def _version_order_key(version: Optional[str]):
+    """Кортеж чисел для сравнения «кто новее», либо None, если версия не разбирается.
+
+    Разбирается ТОЛЬКО числовой префикс, посегментно и ЦЕЛЫМИ числами: строковое
+    сравнение здесь дало бы `1.1.9 > 1.1.149`, а сравнение по последнему числу —
+    класс ошибки GAP-400 (`16.2` < `9.6`)."""
+    if not version:
+        return None
+    match = _VERSION_PREFIX_RE.match(version.strip())
+    if not match:
+        return None
+    try:
+        return tuple(int(part) for part in match.group(1).split("."))
+    except ValueError:  # pragma: no cover — регэксп уже гарантирует цифры
+        return None
+
+
+def _mtime_or_zero(path: Optional[Path]) -> float:
+    try:
+        return Path(path).stat().st_mtime if path else 0.0
+    except OSError:
+        return 0.0
+
+
+def installed_copies(ctx=None, config_dir: Optional[Path] = None) -> list:
+    """Все копии кукбука на машине: [{origin, path, version, mtime}] в порядке
+    поиска (профиль, затем поставка). Только СУЩЕСТВУЮЩИЕ файлы.
+
+    Отдельная функция, потому что диагностике (`self_check`, отчёт канала) нужны
+    ОБЕ копии с их версиями, а не один «победивший» ответ."""
+    out = []
+    for origin, path in (("профиль", cookbook_path(config_dir)),
+                          ("поставка", _shipped_path(ctx))):
+        if path is None:
+            continue
+        version = read_version(path)
+        if version is None and not Path(path).exists():
+            continue
+        out.append({"origin": origin, "path": Path(path), "version": version,
+                     "mtime": _mtime_or_zero(path)})
+    return out
+
+
+def installed_version(ctx=None, config_dir: Optional[Path] = None) -> Optional[str]:
+    """Версия САМОГО СВЕЖЕГО кукбука на машине (профиль либо поставка).
+
+    GAP-429 (ОСТАТОК GAP-361/423). Раньше здесь безусловно побеждала копия в
+    профиле: `read_version(профиль)` и, только если её нет, фолбэк на поставку.
+    Дефект тот же, что чинил PR #837 в `_cookbook_report` dev-репо: после
+    установки НОВОЙ поставки в `{app}\\docs` ложится свежий документ, а в профиле
+    остаётся редакция, доставленная каналом раньше, — и канал считает
+    «установленной» СТАРУЮ. Следствие: `check` сравнивает бэкенд со старой
+    строкой, отчёт называет пользователю версию, которой у него уже нет, а
+    «обновление применено» может рапортоваться при открытом старом документе.
+
+    Теперь сравниваются ОБЕ копии, и побеждает НОВЕЙШАЯ:
+      * по числовому префиксу версии ВНУТРИ файла (`<версия поставки>-<sha8>`),
+        посегментно целыми числами;
+      * при равном префиксе (та же поставка, другой `sha8` содержимого) — по
+        времени файла, свежее берёт верх;
+      * если версия не разбирается ни у одной копии — порядок прежний (профиль
+        первым): это ровно тот случай, когда сравнивать нечем.
+
+    Порядок ПОИСКА (профиль, затем поставка) не меняется — он остаётся
+    тай-брейком, поэтому согласованность с ярлыком и `self_check` (GAP-361)
+    сохраняется: при одинаковых версиях ответ прежний."""
+    copies = installed_copies(ctx, config_dir)
+    known = [c for c in copies if c["version"] is not None]
+    if not known:
+        return None
+    if len(known) == 1:
+        return known[0]["version"]
+
+    def _key(entry):
+        order = _version_order_key(entry["version"])
+        # Копии без разбираемой версии не могут «победить» разбираемую.
+        return (0, (), 0.0) if order is None else (1, order, entry["mtime"])
+
+    best = known[0]
+    for candidate in known[1:]:
+        if _key(candidate) > _key(best):
+            best = candidate
+    return best["version"]
 
 
 def _shipped_path(ctx) -> Optional[Path]:
@@ -205,12 +278,37 @@ def check(client, state, ctx, *, config_dir: Optional[Path] = None) -> dict:
         available, reason = True, "update_available"
 
     cb["known_latest"] = latest
-    state.mark("cookbook", "ok", _check_detail(available, reason, latest, current, signed))
+    detail = _check_detail(available, reason, latest, current, signed)
+    # GAP-429: если СВЕЖАЯ копия лежит в поставке, а не в профиле, пользователь по
+    # ярлыку откроет ПРОФИЛЬНУЮ (старую). Это не мешает сравнению с бэкендом, но
+    # молчать об этом нельзя -- иначе «актуальная инструкция» в отчёте и документ
+    # перед глазами пользователя снова расходятся (симптом GAP-361).
+    stale = _stale_profile_copy(ctx, config_dir)
+    if stale:
+        detail += (" | [WARN] свежая копия лежит в поставке ({shipped}), а ярлык "
+                    "открывает копию в профиле ({profile}) -- обновите документ в "
+                    "профиле".format(**stale))
+    state.mark("cookbook", "ok", detail)
     state.save()
     return {"available": available, "latest": latest, "current": current,
             "signed": signed, "reason": reason,
+            "stale_profile_copy": stale,
             "sha256": str(meta.get("sha256") or "") or None,
             "size_bytes": meta.get("size_bytes")}
+
+
+def _stale_profile_copy(ctx, config_dir) -> Optional[dict]:
+    """{'profile': версия, 'shipped': версия}, если в ПОСТАВКЕ копия НОВЕЕ, чем в
+    профиле; иначе None. Основание -- те же правила сравнения, что у
+    `installed_version` (GAP-429)."""
+    by_origin = {c["origin"]: c for c in installed_copies(ctx, config_dir)}
+    profile, shipped = by_origin.get("профиль"), by_origin.get("поставка")
+    if not profile or not shipped:
+        return None
+    p_key, s_key = _version_order_key(profile["version"]), _version_order_key(shipped["version"])
+    if p_key is None or s_key is None or s_key <= p_key:
+        return None
+    return {"profile": profile["version"], "shipped": shipped["version"]}
 
 
 def _check_detail(available: bool, reason: str, latest: Optional[str],
