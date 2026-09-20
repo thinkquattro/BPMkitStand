@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -3254,6 +3255,13 @@ _STOP_REQUEST_MAX_AGE_SEC = 60.0
 # а фоновый поток при этом почти ничего не стоит.
 _IDLE_CHECK_INTERVAL_SEC = 15.0
 
+# Во сколько раз снапшот поллера может быть старше периода опроса, прежде чем
+# перестанет считаться знанием (GAP-412). Три круга — это уже не «тик задержался»,
+# а «поллер не отдаёт свежих данных»: зависшая проба, уснувшая машина, забитый
+# пул потоков. Решать по такому снапшоту вопрос выхода нельзя: он описывает
+# мир, которого могло не стать несколько минут назад.
+_SNAPSHOT_STALE_FACTOR = 3.0
+
 
 class _IdleShutdownWatcher:
     """
@@ -3269,8 +3277,18 @@ class _IdleShutdownWatcher:
 
     1. нет ни одного открытого SSE-клиента (``sse_client_count() == 0``) —
        «дашборд никто не смотрит»;
-    2. нет ни одного стенда в состоянии ``running`` — «диспетчер сейчас ничем
-       не управляет».
+    2. ни у одного стенда проба ``process`` не вернула ``ProbeState.OK`` —
+       «диспетчер сейчас ничем не управляет». Состояния ``running`` в
+       ``ProbeState`` НЕТ вовсе (``ok``/``down``/``unknown``/``skipped``), и
+       сравнение с этой строкой было тождественно ложным (GAP-385); здесь и
+       ниже речь идёт ровно о ``ProbeState.OK`` ПО ФАКТУ ПРОБЫ.
+
+    СТЕНДЫ НА ТРАНСПОРТЕ ``http`` (удалённый стенд без агента, GAP-277) в
+    условие НЕ входят и войти не могут: процесса у такой записи нет (проба
+    ``process`` возвращает ``SKIPPED``), диспетчер его не запускал и не может
+    ни остановить, ни усыновить. Терять при выходе нечего — поэтому реестр
+    из одних только http-стендов считается простоем, и диспетчер выйдет по
+    таймауту, а сами стенды продолжат работать, как работали до него.
 
     Почему именно И, а не ИЛИ. Закрытая вкладка при живых стендах — штатная
     работа: стенды подняли через диспетчер и ушли ими пользоваться, выйти
@@ -3295,7 +3313,8 @@ class _IdleShutdownWatcher:
     def __init__(self, server: "HubHTTPServer", config_path: Path, *,
                  desktop: bool = False,
                  check_interval: float = _IDLE_CHECK_INTERVAL_SEC,
-                 now: "Optional[Callable[[], float]]" = None):
+                 now: "Optional[Callable[[], float]]" = None,
+                 wall_now: "Optional[Callable[[], float]]" = None):
         self._server = server
         self._config_path = config_path
         self._desktop = bool(desktop)
@@ -3303,11 +3322,41 @@ class _IdleShutdownWatcher:
         # Подменяемые часы — чтобы тест проверял 30-минутный таймер, не ожидая
         # 30 минут (и не подменяя time.monotonic глобально, что ломает соседей).
         self._now = now or time.monotonic
+        # Возраст снапшота считается по СТЕННЫМ часам, а не по monotonic:
+        # ``StatusSnapshot.generated_at`` заполняется ``time.time()``, и мерить
+        # его подменяемым таймером таймаута нельзя (тест ускоряет один и
+        # тормозит другой).
+        self._wall_now = wall_now or time.time
         self._stop_event = threading.Event()
         self._idle_since: Optional[float] = None
+        # GAP-412: версия пакета на диске, которую мы УЖЕ читали успешно.
+        # Нужна, чтобы отличить «читать было нечего с самого начала» (обычная
+        # frozen-сборка: исходника standkit/__init__.py на диске нет) от
+        # «файл был, а теперь не читается» — второе означает, что пакет
+        # обновляют прямо сейчас, и это рассинхрон, а не «беда при чтении».
+        self._version_seen_on_disk: str = ""
+        # Троттлинг WARN о протухшем снапшоте: сторож тикает раз в 15 с, и
+        # зависший поллер иначе залил бы лог одной и той же строкой.
+        self._stale_warned: bool = False
         self._thread = threading.Thread(target=self._run, name="standkit-hub-idle-watch", daemon=True)
 
     def start(self) -> None:
+        # INFO ПРИ СТАРТЕ (GAP-411). До этой строки «сторож не запустился»,
+        # «конфиг не прочитан», «таймаут выключен нулём» и «стенды считаются
+        # живыми» выглядели в hub.log ОДИНАКОВО — никак: единственная запись
+        # сторожа появлялась в момент выхода, то есть ровно тогда, когда
+        # выхода и не происходило. Живой прогон VM 20.09 (GAP-411) уткнулся
+        # именно в это: диспетчер не вышел, и в логе не было НИ СЛОВА о том,
+        # почему. Поэтому сторож теперь представляется сам.
+        timeout_min = self.idle_timeout_sec() / 60.0
+        _log.info(
+            "сторож простоя: таймаут %.0f мин (%s), config=%s, desktop=%s, проверка раз в %.0f с",
+            timeout_min,
+            "включён" if timeout_min > 0 else "ВЫКЛЮЧЕН (idle_shutdown_min=0)",
+            self._config_path,
+            self._desktop,
+            self._check_interval,
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -3350,6 +3399,13 @@ class _IdleShutdownWatcher:
           вышел при трёх живых стендах;
         * ``probed=False`` — слепок реестра БЕЗ единой пробы: состояния в нём
           заглушечные (``pending``), решать по ним вопрос выхода нельзя;
+        * снапшот СТАРШЕ ``_SNAPSHOT_STALE_FACTOR`` периодов опроса (GAP-412):
+          зависшая проба, уснувшая и проснувшаяся машина, забитый пул потоков
+          — во всех этих случаях поллер продолжает отдавать последний
+          успешный снапшот, и тот тем увереннее врёт, чем он старше. Пустой
+          список трёхминутной давности — это «мы не знаем, что там сейчас», а
+          не «стендов нет»; рецидив 18.09 (GAP-383) отличался от этого только
+          источником пустого списка;
         * запись стенда не разобралась (мусор вместо словаря).
 
         ЖИВОЙ — ЭТО ``ProbeState.OK`` ПО ФАКТУ ПРОБЫ, а не «запущен нами»
@@ -3373,6 +3429,9 @@ class _IdleShutdownWatcher:
             return True
         if not getattr(snapshot, "probed", False):
             return True
+        if self.snapshot_is_stale(snapshot):
+            return True
+        self._stale_warned = False
         for stand in getattr(snapshot, "stands", []) or []:
             if not isinstance(stand, dict):
                 return True
@@ -3382,6 +3441,43 @@ class _IdleShutdownWatcher:
             if process.get("state") == ProbeState.OK.value:
                 return True
         return False
+
+    def snapshot_is_stale(self, snapshot) -> bool:
+        """Снапшот старше ``_SNAPSHOT_STALE_FACTOR`` периодов опроса (GAP-412).
+
+        Порог считается ОТ ТЕКУЩЕЙ настройки ``refresh_interval_sec``, а не от
+        константы: у человека, поставившего опрос раз в минуту, трёхминутный
+        снапшот — норма, а у дефолтных 10 с — уже авария.
+
+        ``generated_at`` без значения (``0``/мусор) — тоже «не знаем, когда
+        собран», то есть протухший: датировать снапшот задним числом дешевле,
+        чем объяснять потом, почему диспетчер ушёл.
+
+        Протухание пишется в лог ОДИН раз на серию (``_stale_warned``): сторож
+        тикает раз в 15 с, и зависший поллер иначе превратил бы hub.log в одну
+        бесконечную строку.
+        """
+        try:
+            interval = float(poll_interval_of(self._config_path))
+        except (OSError, TypeError, ValueError):
+            interval = float(HubConfig().refresh_interval_sec)
+        limit = max(1.0, interval) * _SNAPSHOT_STALE_FACTOR
+        generated_at = getattr(snapshot, "generated_at", 0.0) or 0.0
+        try:
+            age = float(self._wall_now()) - float(generated_at)
+        except (TypeError, ValueError):
+            age = limit + 1.0
+        if age < limit:
+            return False
+        if not self._stale_warned:
+            self._stale_warned = True
+            _log.warning(
+                "снапшот стендов протух: возраст %.0f с при пороге %.0f с "
+                "(%.0f × refresh_interval=%.0f с) — считаем, что о стендах НИЧЕГО не известно, "
+                "и остаёмся (автовыход по простою отложен)",
+                age, limit, _SNAPSHOT_STALE_FACTOR, interval,
+            )
+        return True
 
     def version_desynced(self) -> bool:
         """Заменили ли файлы пакета под живым процессом (ADR-0007 §4).
@@ -3402,14 +3498,27 @@ class _IdleShutdownWatcher:
         Любая беда при чтении версии — ``False`` (тихий фолбэк, как и у самой
         сверки в ADR-0007 §4): «не смогли прочитать» не повод ни объявлять
         рассинхрон, ни запрещать автовыход навсегда.
+
+        ОДНО ИСКЛЮЧЕНИЕ (GAP-412): версия, которую мы УЖЕ читали успешно, а
+        сейчас прочитать не можем, — это НЕ «не смогли», а окно замены пакета.
+        ``pip install`` снимает ``standkit/__init__.py`` и кладёт новый не
+        атомарно; попасть тиком сторожа ровно в это окно — вопрос времени, а
+        цена ошибки прежняя: выход с живыми стендами посреди обновления.
+        Поэтому исчезнувший файл после прочитанного считается рассинхроном.
+        Никогда не читавшаяся версия (frozen-сборка: исходника пакета на диске
+        нет вовсе) остаётся ``False`` — иначе exe-поставка запретила бы себе
+        автовыход навсегда.
         """
         try:
             on_disk = (self._version_on_disk() or "").strip()
             in_memory = (self._version_in_memory() or "").strip()
         except Exception:  # noqa: BLE001 - сверка версий не роняет сторожа
             return False
-        if not on_disk or not in_memory:
+        if not in_memory:
             return False
+        if not on_disk:
+            return bool(self._version_seen_on_disk)
+        self._version_seen_on_disk = on_disk
         return on_disk != in_memory
 
     @staticmethod
@@ -3447,15 +3556,63 @@ class _IdleShutdownWatcher:
                 self._idle_since = None
             self._stop_event.wait(self._check_interval)
 
+    def _debug_tick(self, timeout: float, idle: "Optional[bool]", waited: float) -> None:
+        """DEBUG-строка одного тика решения (GAP-411).
+
+        Сторож принимает самое громкое решение диспетчера — завершение
+        процесса, — и до 20.09.2026 объяснял его ровно один раз: в момент
+        выхода. Когда выхода НЕ происходило (живой прогон VM 20.09), в
+        hub.log не оставалось ничего, и «сторож не запустился», «конфиг не
+        прочитан», «стенды считаются живыми» и «дашборд открыт в браузере»
+        были неразличимы. Уровень DEBUG, а не INFO: раз в 15 с круглые сутки —
+        это лог ради лога, пока никто не разбирает инцидент; включается
+        настройкой уровня, см. ``hub_logging.setup_logging``.
+        """
+        if not _log.isEnabledFor(logging.DEBUG):
+            # Факты для строки собираются не бесплатно (снапшот, три
+            # предиката): при выключенном DEBUG тик обязан стоить столько же,
+            # сколько стоил раньше.
+            return
+        snapshot = None
+        poller = getattr(self._server, "status_poller", None)
+        if poller is not None:
+            try:
+                snapshot = poller.snapshot()
+            except Exception:  # noqa: BLE001 - диагностика не роняет сторожа
+                snapshot = None
+        generated_at = getattr(snapshot, "generated_at", 0.0) or 0.0
+        try:
+            age = round(float(self._wall_now()) - float(generated_at), 1) if generated_at else None
+        except (TypeError, ValueError):
+            age = None
+        _log.debug(
+            "тик сторожа простоя: таймаут=%.0f с idle=%s накоплено=%.0f с "
+            "sse_client_count=%s has_running_stands=%s version_desynced=%s desktop=%s "
+            "snapshot_probed=%s snapshot_error=%s snapshot_stands=%s snapshot_age_sec=%s",
+            timeout, idle, waited,
+            self._server.sse_client_count(),
+            self.has_running_stands(),
+            self.version_desynced(),
+            self._desktop,
+            getattr(snapshot, "probed", None),
+            getattr(snapshot, "error", None),
+            len(getattr(snapshot, "stands", []) or []) if snapshot is not None else None,
+            age,
+        )
+
     def _tick(self) -> None:
         timeout = self.idle_timeout_sec()
         if timeout <= 0.0:
             self._idle_since = None  # выключено — забываем накопленный отсчёт
+            self._debug_tick(timeout, None, 0.0)
             return
-        if not self.is_idle():
+        idle = self.is_idle()
+        moment = self._now()
+        waited = 0.0 if (not idle or self._idle_since is None) else moment - self._idle_since
+        self._debug_tick(timeout, idle, waited)
+        if not idle:
             self._idle_since = None
             return
-        moment = self._now()
         if self._idle_since is None:
             self._idle_since = moment
             return
