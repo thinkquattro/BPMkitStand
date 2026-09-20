@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import errno as _errno
+import logging
 import os
 import sys
 import threading
@@ -309,8 +310,10 @@ def main(argv: list[str] | None = None) -> int:
     # Неудача настройки лога старт НЕ прерывает (см. hub_logging.setup_logging).
     _log_path = _hub_logging.setup_logging()
     _log.info(
-        "старт standkit-hub: версия=%s python=%s pid=%s лог=%s",
+        "старт standkit-hub: версия=%s python=%s pid=%s лог=%s уровень=%s (%s=%s)",
         _standkit_version, sys.version.split()[0], os.getpid(), _log_path or "(нет)",
+        logging.getLevelName(_log.level),
+        _hub_logging.LOG_LEVEL_ENV, os.environ.get(_hub_logging.LOG_LEVEL_ENV) or "не задана",
     )
 
     # Необработанное исключение обязано остаться в логе, а не исчезнуть вместе
