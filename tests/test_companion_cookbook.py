@@ -151,10 +151,14 @@ def test_read_version_missing_file_is_none(tmp_path):
     assert cookbook.read_version(tmp_path / "нет-такого.html") is None
 
 
-def test_installed_version_prefers_profile_over_shipped(env):
-    """Порядок обязан совпадать с тем, в котором документ ищут ярлык и self_check:
-    иначе канал считал бы обновление применённым, пока пользователь открывает
-    старую копию — ровно симптом GAP-361."""
+def test_installed_version_prefers_newer_copy(env):
+    """Установленной считается САМАЯ СВЕЖАЯ копия (GAP-429).
+
+    Раньше здесь безусловно побеждал профиль -- и новая копия из поставки
+    игнорировалась. Теперь сравниваются версии внутри файлов; порядок поиска
+    (профиль, затем поставка) остаётся тай-брейком, поэтому согласованность с
+    ярлыком и self_check (GAP-361) сохраняется. Подробные кейсы --
+    tests/test_gap429_cookbook_installed_version.py."""
     _state, ctx, config_dir = env
     shipped = Path(ctx.binary_path).parent.parent / "docs" / "cookbook.html"
     shipped.parent.mkdir(parents=True, exist_ok=True)
