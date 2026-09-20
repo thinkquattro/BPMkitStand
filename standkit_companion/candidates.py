@@ -33,10 +33,26 @@
 тике, обесценивает индикацию.
 
 **Согласие не спрашивается здесь и не может быть обойдено отсюда.** Флаги
-(`analytics` / `pattern_submission` / `candidate_submission`) независимы
-(ADR-0024) и проверяются транспортом на стороне MCP. Companion не знает о них
-ничего и не вправе знать: единственный способ отправить что-либо отсюда —
-попросить поставку разгрузить очередь, а она откажет сама, если согласия нет.
+(`analytics` / `attach_logs` / `pattern_submission` / `candidate_submission`)
+независимы (ADR-0024) и проверяются транспортом на стороне MCP. Companion не
+знает о них ничего и не вправе знать: единственный способ отправить что-либо
+отсюда — попросить поставку разгрузить очередь.
+
+**Как именно отказывает поставка (по факту, GAP-413).** До 20.09.2026 фраза
+«она откажет сама» была неточной: согласие проверялось только в момент, когда
+письмо КЛАДЁТСЯ в очередь, а `feedback._transport_send` отправлял уже стоящее
+без единой проверки — отзыв согласия очередь не останавливал (строка L-31
+`docs/legal_backlog.md`, 152-ФЗ). Теперь гейт стоит ПЕРЕД КАЖДЫМ письмом: при
+снятом флаге письмо получает статус `no_consent`, НЕ отправляется, остаётся в
+очереди нетронутым и считается отдельно — поставка печатает их число полем
+`held_no_consent`. Для канала это не отказ и не системная остановка: проход
+идёт дальше по остальным письмам, а число задержанных попадает в состояние и в
+текст для пользователя. Молчать о них нельзя — иначе снявший галку человек
+видит «очередь пуста» и не понимает, почему находки не уезжают.
+
+Поле может отсутствовать: Companion и MCP обновляются РАЗНЫМИ артефактами и
+разными каналами, поэтому старая поставка его не печатает — это норма, а не
+повод объявить проход неудачным (читается через `int(... or 0)`).
 """
 from __future__ import annotations
 
@@ -153,7 +169,7 @@ def flush(state, settings, *, run: Optional[Callable] = None,
                    "CLI BPMkit не найден — очередь находок не разгружалась")
         state.save()
         return {"flushed": False, "reason": "cli_not_found",
-                "sent": 0, "failed": 0, "remaining": None}
+                "sent": 0, "failed": 0, "held_no_consent": 0, "remaining": None}
 
     argv = list(cli) + list(FLUSH_ARGV_TAIL)
     if limit is not None:
@@ -168,7 +184,7 @@ def flush(state, settings, *, run: Optional[Callable] = None,
         state.mark("candidates", "error", f"CLI BPMkit не запустился: {_clip(str(exc))}")
         state.save()
         return {"flushed": False, "reason": "spawn_error",
-                "sent": 0, "failed": 0, "remaining": None}
+                "sent": 0, "failed": 0, "held_no_consent": 0, "remaining": None}
 
     if rc != 0:
         block["last_sync_at"] = utc_now_iso()
@@ -176,7 +192,7 @@ def flush(state, settings, *, run: Optional[Callable] = None,
         state.mark("candidates", "error", f"разгрузка очереди отказала: {detail}")
         state.save()
         return {"flushed": False, "reason": "cli_error", "detail": detail,
-                "sent": 0, "failed": 0, "remaining": None}
+                "sent": 0, "failed": 0, "held_no_consent": 0, "remaining": None}
 
     payload = _parse_stdout(stdout)
 
@@ -186,37 +202,42 @@ def flush(state, settings, *, run: Optional[Callable] = None,
         state.mark("candidates", "error", f"очередь не разгружена: {detail}")
         state.save()
         return {"flushed": False, "reason": payload.get("reason") or "refused",
-                "detail": detail, "sent": 0, "failed": 0, "remaining": None}
+                "detail": detail, "sent": 0, "failed": 0, "held_no_consent": 0, "remaining": None}
 
     sent = int(payload.get("sent") or 0)
     failed = int(payload.get("failed") or 0)
+    # Письма, задержанные гейтом согласия (GAP-413). Старая поставка поля не
+    # печатает — см. докстринг модуля, это обратная совместимость, а не ошибка.
+    held = int(payload.get("held_no_consent") or 0)
     remaining = payload.get("remaining")
     stopped = payload.get("stopped_reason") or None
 
     block["last_sync_at"] = utc_now_iso()
     block["last_sent"] = sent
+    block["last_held_no_consent"] = held
     block["last_remaining"] = remaining
 
     if stopped in SYSTEM_STOP_REASONS:
         # Ровно требование строки GAP-260: офлайн/квота/нет лицензии не
         # должны быть ошибкой ПО ПОСТРОЕНИЮ. Отправленное до остановки при
         # этом отправлено — об этом и говорим.
-        state.mark("candidates", "skipped", _stop_text(stopped, sent, remaining))
+        state.mark("candidates", "skipped",
+                   _with_held(_stop_text(stopped, sent, remaining), held))
         state.save()
         return {"flushed": sent > 0, "reason": stopped, "sent": sent,
-                "failed": failed, "remaining": remaining}
+                "failed": failed, "held_no_consent": held, "remaining": remaining}
 
     if stopped:
         state.mark("candidates", "error",
-                   f"проход очереди остановлен: {_clip(stopped)}")
+                   _with_held(f"проход очереди остановлен: {_clip(stopped)}", held))
         state.save()
         return {"flushed": sent > 0, "reason": stopped, "sent": sent,
-                "failed": failed, "remaining": remaining}
+                "failed": failed, "held_no_consent": held, "remaining": remaining}
 
-    state.mark("candidates", "ok", _ok_text(sent, failed, remaining))
+    state.mark("candidates", "ok", _ok_text(sent, failed, remaining, held))
     state.save()
     return {"flushed": sent > 0, "reason": "flushed", "sent": sent,
-            "failed": failed, "remaining": remaining}
+            "failed": failed, "held_no_consent": held, "remaining": remaining}
 
 
 def _stop_text(reason: str, sent: int, remaining) -> str:
@@ -235,12 +256,28 @@ def _stop_text(reason: str, sent: int, remaining) -> str:
     return f"Находки не отправлены: {head}{left}"
 
 
-def _ok_text(sent: int, failed: int, remaining) -> str:
-    if not sent and not failed:
+def _with_held(text: str, held: int) -> str:
+    """Дописывает к тексту исхода число писем, задержанных гейтом согласия.
+
+    Отдельной строкой, а не заменой текста: «отправлено 3, задержано 2» и
+    «задержано 2» — разные сообщения, и первое не имеет права потеряться.
+    """
+    if not held:
+        return text
+    return f"{text}; задержано без согласия: {held} (проверьте флаги в «Данные и телеметрия»)"
+
+
+def _ok_text(sent: int, failed: int, remaining, held: int = 0) -> str:
+    if not sent and not failed and not held:
         return "Очередь находок пуста — отправлять нечего"
+    if not sent and not failed and held:
+        # Очередь НЕ пуста, но ничего не уехало и уехать не могло: писать
+        # «пуста» здесь значило бы соврать ровно тому, кто снял галку.
+        return _with_held(f"Находки не отправлены: согласие снято, писем в очереди {held}",
+                          0)
     parts = [f"Отправлено находок: {sent}"]
     if failed:
         parts.append(f"отклонено: {failed}")
     if isinstance(remaining, int) and remaining:
         parts.append(f"в очереди: {remaining}")
-    return "; ".join(parts)
+    return _with_held("; ".join(parts), held)

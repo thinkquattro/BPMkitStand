@@ -287,6 +287,12 @@ class CompanionRunner:
         # Отказ, случившийся вне отдельного цикла (нечитаемый конфиг, сбой самого
         # планировщика). Наружу уходит только через `status()`.
         self._last_error = ""
+        # Обратный проход очереди находок — ОДИН на пробуждение (GAP-413). Метка
+        # пробуждения и исход первого прохода: второй несущий цикл того же
+        # пробуждения берёт исход отсюда, а не зовёт поставку повторно.
+        self._wake_token = 0
+        self._candidates_wake_token = -1
+        self._candidates_outcome: Optional[dict] = None
 
     # -- настройки ---------------------------------------------------------------------
     def _load_settings_from_config(self):
@@ -438,6 +444,16 @@ class CompanionRunner:
             self._state.save()
             return {"applied": False, "reason": "error", "detail": str(exc)}
 
+    def _begin_wake(self) -> None:
+        """Новое пробуждение планировщика — сбрасывает счётчик попутчиков (GAP-413).
+
+        Ограничение «один проход очереди находок» относится к ПРОБУЖДЕНИЮ, а не к
+        жизни процесса: иначе диспетчер, проживший неделю, разгрузил бы очередь
+        ровно один раз. Зовётся под `self._run_lock` — и `run_due`, и `run_cycle`
+        берут его до любой работы.
+        """
+        self._wake_token += 1
+
     def _sync_candidates(self, settings) -> Optional[dict]:
         """Обратный проход: разгрузка локальной очереди находок вендору
         (GAP-260, GAP-248 п.2 «автоматический flush очереди сабмишенов»).
@@ -457,14 +473,34 @@ class CompanionRunner:
         Отказ здесь НЕ роняет несущую операцию — ровно как у кукбука: не
         уехали находки — не повод объявить неудачей синхронизацию паттернов
         или проверку релиза, которые уже отработали.
+
+        ОДИН ПРОХОД ЗА ПРОБУЖДЕНИЕ (GAP-413). Попутчик висит на ДВУХ несущих
+        циклах — паттернах и релизах, — и когда сроки обоих наступают в одну
+        секунду (после старта диспетчера это ровно так: первый тик общий),
+        поставку просили разгрузить очередь ДВАЖДЫ. Цена двойного прохода не
+        косметическая: это два запуска внешнего процесса CLI и две серии
+        сетевых попыток по ОДНИМ И ТЕМ ЖЕ письмам — с точки зрения приёмника
+        неотличимо от повтора, с точки зрения пользователя — лишняя минута
+        тика. Второй вызов в пределах пробуждения возвращает исход первого с
+        пометкой `reused`: вернуть `None` или пустой словарь было бы хуже
+        дефекта — в состоянии и в UI появился бы «пустой» результат цикла,
+        неотличимый от «очередь не разгружалась вовсе».
         """
+        if self._candidates_wake_token == self._wake_token:
+            previous = dict(self._candidates_outcome or {})
+            previous["reused"] = True
+            return previous
+
+        self._candidates_wake_token = self._wake_token
         try:
-            return candidates.flush(self._state, settings)
+            outcome = candidates.flush(self._state, settings)
         except Exception as exc:  # noqa: BLE001
             # Широко и сознательно, по той же причине, что в `_sync_cookbook`.
             self._state.mark("candidates", "error", str(exc))
             self._save_state()
-            return {"flushed": False, "reason": "error", "detail": str(exc)}
+            outcome = {"flushed": False, "reason": "error", "detail": str(exc)}
+        self._candidates_outcome = dict(outcome) if isinstance(outcome, dict) else outcome
+        return outcome
 
     def _run_patterns(self, session, settings) -> dict:
         result = patterns.sync(session.client, self._state, session.ctx, settings)
@@ -593,6 +629,7 @@ class CompanionRunner:
             now = self._monotonic()
             # Срок сдвигается в любом случае, включая отказ: иначе ручной прогон оставил бы
             # цикл «просроченным», и фоновый поток немедленно повторил бы ту же работу.
+            self._begin_wake()
             self._schedule(cycle, settings, now)
             return self._run_one(cycle, settings, session=None, force=force)
 
@@ -605,6 +642,7 @@ class CompanionRunner:
         """
         settings = self.settings()
         with self._run_lock:
+            self._begin_wake()
             now = self._monotonic()
             due = [cycle for cycle in RUN_ORDER if self._runtime[cycle].deadline <= now]
             for cycle in due:

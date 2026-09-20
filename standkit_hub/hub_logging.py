@@ -42,6 +42,11 @@ LOGGER_NAME = "standkit_hub"
 
 LOG_FILE_NAME = "hub.log"
 
+#: Шаблон ЗАПАСНОГО файла лога — на случай, когда общий повернуть не удалось
+#: (GAP-414, см. `GuardedRotatingFileHandler`). pid в имени делает файл
+#: собственностью ОДНОГО процесса: повернуть его больше некому помешать.
+LOG_FILE_PID_TEMPLATE = "hub.{pid}.log"
+
 # 2 МБ × 5 — заведомо больше любого разумного разбора и заведомо меньше
 # «файл съел диск у человека, который про диспетчер забыл».
 MAX_BYTES = 2 * 1024 * 1024
@@ -81,6 +86,96 @@ def level_from_env(default: int = DEFAULT_LEVEL, environ=None) -> int:
         return int(value)
     named = logging.getLevelName(value.upper())
     return named if isinstance(named, int) else default
+
+
+#: Что случилось с ротацией за жизнь процесса (GAP-414). Читается `rotation_state()`;
+#: тесты и разбор инцидента смотрят сюда, а не в stderr, которого у диспетчера нет.
+_ROTATION_STATE = {"failures": 0, "detail": "", "fallback_path": None}
+
+
+def rotation_state() -> dict:
+    """Копия состояния ротации: {"failures": int, "detail": str, "fallback_path": Path|None}.
+
+    Нужна ровно потому, что `logging` по построению ГЛУШИТ отказ обработчика
+    (`Handler.handleError` пишет в stderr, а у процесса под `pythonw.exe`
+    stderr нет). Без этого счётчика «ротация не сработала» невозможно ни
+    увидеть, ни проверить тестом — а именно так дефект GAP-414 и прожил.
+    """
+    return dict(_ROTATION_STATE)
+
+
+def reset_rotation_state() -> None:
+    """Обнуляет счётчик (тесты; повторная настройка в одном процессе)."""
+    _ROTATION_STATE.update({"failures": 0, "detail": "", "fallback_path": None})
+
+
+class GuardedRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """Ротация, которая НЕ МОЖЕТ провалиться молча (GAP-414).
+
+    ЗАЧЕМ. Диспетчер перезапускается с повышением прав (`elevated`-путь), и в
+    окне перезапуска файл `hub.log` держат ДВА процесса. На Windows
+    переименование занятого файла невозможно, поэтому `doRollover()` падает
+    `OSError`; `logging` ловит это в `handleError` и пишет в stderr — которого
+    у процесса под `pythonw.exe` нет. Наружу: ротация отказала, никто не узнал,
+    файл растёт без предела — то есть отказала ровно та гарантия, ради которой
+    модуль и написан («неограниченный файл однажды становится второй аварией
+    поверх первой»).
+
+    ЧТО ДЕЛАЕМ ВМЕСТО МОЛЧАНИЯ. Отказ считается (`rotation_state()`), И процесс
+    переходит на СВОЙ файл `hub.<pid>.log`: pid в имени снимает саму причину
+    конфликта — этот файл держит один владелец, и повернуть его больше некому
+    помешать. Причина переключения пишется ПЕРВОЙ СТРОКОЙ в новый файл, иначе
+    разбирающий инцидент не поймёт, почему записи оборвались в одном файле и
+    продолжились в другом.
+
+    Второй отказ (не удалось даже открыть запасной файл) не роняет процесс:
+    логирование остаётся без файла, но диспетчер живёт — приоритет тот же, что
+    у `setup_logging`.
+    """
+
+    def doRollover(self) -> None:  # noqa: N802 - имя из stdlib
+        try:
+            super().doRollover()
+        except OSError as exc:
+            _ROTATION_STATE["failures"] += 1
+            _ROTATION_STATE["detail"] = str(exc)
+            self._switch_to_pid_file(exc)
+
+    def _switch_to_pid_file(self, exc: BaseException) -> None:
+        fallback = Path(self.baseFilename).parent / LOG_FILE_PID_TEMPLATE.format(pid=os.getpid())
+        if Path(self.baseFilename) == fallback:
+            # Уже на своём файле, и он тоже не повернулся — дальше идти некуда;
+            # факт посчитан выше, продолжаем писать в него же.
+            return
+        try:
+            if self.stream:
+                self.stream.close()
+                self.stream = None  # type: ignore[assignment]
+            self.baseFilename = str(fallback)
+            self.stream = self._open()
+        except OSError:
+            # Запасной файл не открылся — остаёмся без файла, но процесс живёт.
+            self.stream = None  # type: ignore[assignment]
+            return
+        _ROTATION_STATE["fallback_path"] = fallback
+        log = logger()
+        setattr(log, "_standkit_log_path", fallback)
+        record = logging.LogRecord(
+            LOGGER_NAME, logging.WARNING, __file__, 0,
+            "ротация общего файла лога не удалась (%s) — этот процесс (pid %s) "
+            "продолжает писать в собственный файл %s; общий файл держит другой "
+            "процесс диспетчера (перезапуск с повышением прав)",
+            (exc, os.getpid(), fallback), None)
+        try:
+            self.stream.write(self.format(record) + self.terminator)
+            self.flush()
+        except Exception:  # noqa: BLE001 - объяснение не имеет права уронить запись
+            pass
+
+
+def pid_log_path(explicit_dir: "Optional[Path | str]" = None) -> Path:
+    """Путь запасного (pid-именованного) файла лога — см. `GuardedRotatingFileHandler`."""
+    return resolve_log_dir(explicit_dir) / LOG_FILE_PID_TEMPLATE.format(pid=os.getpid())
 
 
 def logger() -> logging.Logger:
@@ -151,7 +246,7 @@ def setup_logging(*, log_dir: "Optional[Path | str]" = None,
     path = resolve_log_path(log_dir)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.handlers.RotatingFileHandler(
+        handler = GuardedRotatingFileHandler(
             path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8")
     except OSError:
         # Каталог занят файлом, нет прав, диск полон — молча остаёмся без

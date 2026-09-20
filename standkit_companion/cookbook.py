@@ -76,6 +76,11 @@ _VERSION_SCAN_BYTES = 64 * 1024
 
 #: Потолок документа. Тот же порядок, что у приёмника издателя: документ —
 #: самодостаточный HTML (~200 КБ), 8 МБ — запас, но не безлимит.
+#:
+#: GAP-414: до 20.09.2026 константа была ОБЪЯВЛЕНА И НИ РАЗУ НЕ ИСПОЛЬЗОВАНА —
+#: `sync` тянул документ любого размера. Теперь применяется ДВАЖДЫ и fail-closed:
+#: по обещанному размеру из `/meta` (до сети) и по фактически прочитанному
+#: (`client.download(max_bytes=...)`) — заголовку сервера доверять нельзя.
 MAX_COOKBOOK_BYTES = 8 * 1024 * 1024
 
 
@@ -229,10 +234,17 @@ def sync(client, state, ctx, *, config_dir: Optional[Path] = None, force: bool =
     HTML-документ никем не держится, применяется атомарной заменой и не требует
     ни остановки MCP, ни перезапуска Claude Desktop — разделять тут нечего.
 
-    Порядок fail-closed: скачали во временный файл рядом с целью -> проверили
-    подпись -> проверили, что внутри есть та самая версия -> атомарно
-    заменили. Любой отказ раньше последнего шага оставляет прежний документ
-    нетронутым.
+    Порядок fail-closed: проверили обещанный размер -> скачали во временный
+    файл рядом с целью (с потолком по факту) -> проверили подпись -> проверили,
+    что внутри есть та самая версия -> атомарно заменили. Любой отказ раньше
+    последнего шага оставляет прежний документ нетронутым.
+
+    ПОТОЛОК И ВРЕМЕННЫЙ ФАЙЛ (GAP-414). `MAX_COOKBOOK_BYTES` применяется здесь,
+    а не остаётся декларацией: размер сверяется ДО скачивания (обещание `/meta`)
+    и ВО ВРЕМЯ (`max_bytes` транспорта — сервер может обещать одно, а отдавать
+    другое). Скачивание при этом перенесено ВНУТРЬ `try`: до фикса оно стояло
+    выше блока уборки, и любой отказ транспорта оставлял `.part` в профиле
+    пользователя навсегда — файл, который никто больше не удалит и не дочитает.
     """
     cb = state.cookbook
     result = check(client, state, ctx, config_dir=config_dir)
@@ -249,13 +261,26 @@ def sync(client, state, ctx, *, config_dir: Optional[Path] = None, force: bool =
             kind="signature_not_available",
         )
 
+    promised = result.get("size_bytes")
+    try:
+        promised_int = int(promised) if promised is not None else None
+    except (TypeError, ValueError):
+        promised_int = None
+    if promised_int is not None and promised_int > MAX_COOKBOOK_BYTES:
+        raise ChannelError(
+            f"Кукбук обещан размером {promised_int} байт при потолке "
+            f"{MAX_COOKBOOK_BYTES} — документ не скачивается, прежняя инструкция цела",
+            kind="too_large",
+        )
+
     target = cookbook_path(config_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + ".part")
 
-    downloaded = client.download(COOKBOOK_PREFIX, tmp,
-                                 expected_size=result.get("size_bytes"))
     try:
+        downloaded = client.download(COOKBOOK_PREFIX, tmp,
+                                     expected_size=promised,
+                                     max_bytes=MAX_COOKBOOK_BYTES)
         sidecar = _fetch_sidecar(client)
         pubkey_raw = signature.decode_pubkey(getattr(ctx, "artifact_pubkey", ""))
         verified = signature.verify_artifact(

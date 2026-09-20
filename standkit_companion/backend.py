@@ -467,8 +467,26 @@ class BackendClient:
     def download(self, path: str, dest, *, authorized: bool = True,
                  resume_from: int = 0, etag: Optional[str] = None,
                  expected_size: Optional[int] = None,
-                 chunk_size: int = 1024 * 1024) -> dict:
+                 chunk_size: int = 1024 * 1024,
+                 max_bytes: Optional[int] = None) -> dict:
         """Скачать файл в `dest` потоком, при необходимости — с докачкой.
+
+        `max_bytes` — потолок артефакта, fail-closed (GAP-414). `None` (по
+        умолчанию) — потолка нет, прежнее поведение. Когда он задан, проверок
+        ДВЕ, и обе обязательны:
+
+        * по ОБЪЯВЛЕННОЙ длине — отказ ДО открытия приёмника: тянуть на
+          пользовательский канал файл, который мы всё равно отвергнем, незачем,
+          а уже лежащий рядом рабочий файл не имеет права пострадать от чужого
+          превышения;
+        * по ФАКТИЧЕСКИ прочитанному — потому что заголовку верить нельзя:
+          `Content-Length` может отсутствовать (chunked), быть занижен или
+          солгать. Проверка только по заголовку — это кап, который снимается
+          одной строкой на стороне сервера.
+
+        Превышение в потоке — не «почти скачали»: огрызок удаляется, иначе он
+        останется на диске пользователя и (в режиме докачки) будет вечно
+        продолжаться до того же превышения.
 
         Три решения, каждое из-за конкретного способа испортить файл:
 
@@ -520,8 +538,28 @@ class BackendClient:
                     detail=f"Content-Length: 0, ожидалось {expected} байт",
                 )
 
+            cap = _int_or_none(max_bytes)
+            if cap is not None:
+                promised = declared if declared is not None else expected
+                already = resume_from if resumed else 0
+                if promised is not None and (already + promised) > cap:
+                    raise ChannelError(
+                        "Файл больше разрешённого потолка — он не скачивается",
+                        kind="too_large",
+                        http_status=status,
+                        detail=f"объявлено {already + promised} байт, потолок {cap}",
+                    )
+
             mode = "ab" if resumed else "wb"
-            written = _stream_to_file(resp, dest, mode=mode, chunk_size=chunk_size)
+            try:
+                written = _stream_to_file(resp, dest, mode=mode, chunk_size=chunk_size,
+                                          max_bytes=cap, already=resume_from if resumed else 0)
+            except ChannelError as exc:
+                if exc.kind == "too_large":
+                    # Огрызок сверх потолка на диске не остаётся: докачивать его
+                    # некуда, а место он займёт (см. докстринг).
+                    _unlink_quietly(dest)
+                raise
         finally:
             try:
                 resp.close()
@@ -611,13 +649,19 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
-def _stream_to_file(resp, dest: Path, *, mode: str, chunk_size: int) -> int:
+def _stream_to_file(resp, dest: Path, *, mode: str, chunk_size: int,
+                    max_bytes: Optional[int] = None, already: int = 0) -> int:
     """Переливание тела ответа в файл кусками. Возвращает число ЗАПИСАННЫХ байт.
 
     Файл открывается лениво — на первом непустом куске (см. п.2 докстринга `download`).
     Если данных не пришло вовсе, приёмник НЕ трогается здесь вообще: решение «это пустой
     файл» или «это отказ отдачи» принимает `download`, у которого есть `expected_size`.
     Создать пустышку тут же значило бы обнулить рабочий бинарь ещё до проверки.
+
+    `max_bytes` — потолок, считаемый по ФАКТИЧЕСКИ прочитанному (`already` —
+    сколько уже лежит от прошлой докачки). Превышение обрывает чтение СРАЗУ,
+    на первом же куске за чертой: дочитывать тело, которое мы всё равно
+    отвергнем, значит платить за отказ трафиком пользователя.
     """
     handle = None
     written = 0
@@ -644,6 +688,13 @@ def _stream_to_file(resp, dest: Path, *, mode: str, chunk_size: int) -> int:
                     detail=_clip(str(exc)),
                 ) from None
             written += len(chunk)
+            if max_bytes is not None and (already + written) > int(max_bytes):
+                raise ChannelError(
+                    "Файл больше разрешённого потолка — скачивание прервано",
+                    kind="too_large",
+                    detail=f"прочитано не меньше {already + written} байт, "
+                           f"потолок {int(max_bytes)}",
+                )
     finally:
         if handle is not None:
             try:
