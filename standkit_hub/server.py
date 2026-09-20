@@ -69,6 +69,7 @@ from standkit import __version__ as _standkit_version
 from standkit import lifecycle as _lifecycle
 from standkit import logs as _logs
 from standkit import platform as _platform
+from standkit.adopt import parse_tasklist_csv as _parse_tasklist_csv
 from standkit.hosting import HostingError, IisElevationError
 from standkit.lifecycle import AdoptionRequired, AdoptionUnavailable, LifecycleError
 from standkit.models import HostKind, ProbeState, Stand, Transport
@@ -3648,6 +3649,53 @@ class _IdleShutdownWatcher:
         self._server.request_self_shutdown()
 
 
+def _process_name(pid) -> str:
+    """Имя процесса по pid, best-effort. Пустая строка — не определили.
+
+    Диагностика, и только: любой отказ (нет такого процесса, нет прав, нет
+    `tasklist`, экзотическая платформа) — пустая строка, НИКОГДА исключение.
+    Уронить перехват стоп-запроса из-за того, что не удалось назвать
+    инициатора, было бы обменом работающей функции на подпись к ней.
+    """
+    try:
+        value = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    try:
+        if os.name == "nt":
+            proc = _platform.run_console(
+                ["tasklist", "/FI", f"PID eq {value}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5)
+            return _parse_tasklist_csv(proc.stdout or "", value)
+        return Path(f"/proc/{value}/comm").read_text(encoding="utf-8").strip()
+    except Exception:  # noqa: BLE001 - см. докстринг: диагностика не роняет перехват
+        return ""
+
+
+def _requester_label(request: dict) -> str:
+    """«Кто просил» для строки лога перехвата (GAP-413).
+
+    ЧТО БЫЛО. Читатель спрашивал у запроса поля ``by``/``source``, которых
+    писатель (`instance.write_stop_request`) не кладёт НИКОГДА: он пишет
+    ``requester_pid``. В логе поэтому стояло «инициатор=не указан» при ЛЮБОМ
+    перехвате — разобрать, кто погасил диспетчер (мастер установщика,
+    `hub-stop`, перехват порта другим экземпляром, чужой процесс), было нечем,
+    хотя нужное число лежало в том же файле.
+
+    Имя процесса рядом с pid обязательно: к моменту разбора инцидента
+    инициатор давно мёртв, и голое число в логе не отвечает ни на один вопрос.
+    Имя не определилось — печатается один pid, а не «не указан»: это разные
+    факты.
+    """
+    pid = request.get("requester_pid")
+    if pid in (None, ""):
+        return "не указан"
+    name = _process_name(pid)
+    return f"pid={pid} ({name})" if name else f"pid={pid}"
+
+
 class _StopRequestWatcher:
     """
     Фоновый поток, слушающий файл-запрос остановки (``standkit_hub.instance``,
@@ -3715,7 +3763,7 @@ class _StopRequestWatcher:
                     continue
                 _log.info(
                     "получен стоп-запрос (возраст %.1f с, инициатор=%s) — завершаемся",
-                    age, request.get("by") or request.get("source") or "не указан")
+                    age, _requester_label(request))
                 self._trigger_stop()
                 return
             self._stop_event.wait(self._poll_interval)

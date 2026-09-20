@@ -97,7 +97,12 @@ class FakeClient:
         raise AssertionError(f"неожиданный JSON-запрос: {path}")
 
     def download(self, path, dest, *, authorized=True, resume_from=0, etag=None,
-                 expected_size=None, chunk_size=1 << 20) -> dict:
+                 expected_size=None, chunk_size=1 << 20, max_bytes=None) -> dict:
+        # `max_bytes` — потолок документа (GAP-414): двойник обязан принимать
+        # тот же набор параметров, что и настоящий транспорт, иначе он
+        # «согласен» с прошлой версией кода, а не с текущей (класс 43 lessons).
+        assert max_bytes == cookbook.MAX_COOKBOOK_BYTES, (
+            "поток кукбука обязан передавать транспорту свой потолок")
         self.calls.append(("GET-FILE", path))
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
