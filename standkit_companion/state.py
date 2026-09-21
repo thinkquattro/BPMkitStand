@@ -64,6 +64,10 @@ def _default_state() -> dict:
             "since_id": None,
             "seeded": False,
             "root": "",
+            # GAP-437: размер поставочной базы, посчитанный при seed (см.
+            # `patterns.seed_override_root`/`patterns._count_shipped_patterns`). `None` —
+            # размер ещё не считался ЧЕСТНО (не «база пуста»).
+            "shipped_count": None,
             "last_run_at": None,
             "last_status": "never",
             "last_detail": "",
@@ -81,6 +85,16 @@ def _default_state() -> dict:
             "current": None,
             "restart_required": False,
             "history": [],
+            # GAP-447: что реально работает СЕЙЧАС (маркер `mcp_runtime.json`), отдельно
+            # от того, что канал СЧИТАЕТ установленным (`current`) — до перезапуска это два
+            # разных факта. `None` — маркера ни разу не было видно.
+            "running_version": None,
+            "running_started_at": None,
+            # GAP-442: состав обновления и известные проблемы (`GET /v1/version/latest`),
+            # попутный запрос при проверке релиза — см. `releases._update_release_notes`.
+            "release_notes_version": None,
+            "release_notes": [],
+            "known_issues": [],
         },
         # GAP-361: узкий поток кукбука. Отдельная секция, а не поле внутри
         # `releases`, — по той же причине, по которой отдельный модуль
@@ -240,6 +254,8 @@ class CompanionState:
         staged = rel.get("staged") or {}
         current = rel.get("current") or {}
         applied = pat.get("applied") or []
+        shipped_count = pat.get("shipped_count")
+        total_available = (int(shipped_count) + len(applied)) if shipped_count is not None else None
         return {
             "patterns": {
                 "applied_count": len(applied),
@@ -253,6 +269,12 @@ class CompanionState:
                 "root": pat.get("root"),
                 "seeded": bool(pat.get("seeded")),
                 "cursor": {"since": pat.get("since"), "since_id": pat.get("since_id")},
+                # GAP-437: размер поставочной базы (см. `patterns.seed_override_root`) и
+                # честная ОЦЕНКА фактически доступной базы (поставочная + применённая
+                # дельта). `None` у обоих — размер поставочной базы ещё не посчитан, и
+                # выдумывать его нельзя (см. докстринг `_default_state`).
+                "shipped_count": shipped_count,
+                "total_available": total_available,
             },
             "releases": {
                 "last_check_at": rel.get("last_check_at"),
@@ -265,6 +287,16 @@ class CompanionState:
                 "restart_required": bool(rel.get("restart_required")),
                 "rollback_available": bool(rel.get("history")),
                 "resume_bytes": (rel.get("partial") or {}).get("bytes"),
+                # GAP-447: версия и момент старта РЕАЛЬНО работающего процесса (маркер
+                # `mcp_runtime.json`), отдельно от того, что канал считает установленным
+                # (`current_version` выше). `None` — маркера не видно.
+                "running_version": rel.get("running_version"),
+                "running_started_at": rel.get("running_started_at"),
+                # GAP-442: состав обновления/известные проблемы, попутный запрос
+                # `GET /v1/version/latest` при проверке релиза.
+                "release_notes_version": rel.get("release_notes_version"),
+                "release_notes": list(rel.get("release_notes") or []),
+                "known_issues": list(rel.get("known_issues") or []),
             },
             "cookbook": {
                 "last_check_at": cb.get("last_check_at"),

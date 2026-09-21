@@ -1136,6 +1136,15 @@
             <div class="upd-restart" id="upd-restart-note" hidden>
               <strong>Перезапустите Claude Desktop</strong><span id="upd-restart-detail">, чтобы начала работать новая версия: перезагрузка плагина MCP-сервер заново не поднимает.</span>
             </div>
+            <!-- GAP-442: свёрнутый по умолчанию спойлер состава обновления. -->
+            <details class="upd-whatsnew" id="upd-whatsnew" hidden>
+              <summary id="upd-whatsnew-summary">Что нового</summary>
+              <ul class="upd-whatsnew-list" id="upd-whatsnew-notes"></ul>
+              <div class="upd-whatsnew-issues" id="upd-whatsnew-issues" hidden>
+                <div class="upd-whatsnew-issues-title">Известные проблемы</div>
+                <ul class="upd-whatsnew-issues-list" id="upd-whatsnew-issues-list"></ul>
+              </div>
+            </details>
           </div>
           <div class="upd-action">
             <button type="button" id="upd-install-btn" data-companion-action="apply_update">Установить</button>
