@@ -2405,22 +2405,57 @@
     node.hidden = !text;
   }
 
+  // Четыре РАЗНЫЕ состояния канала паттернов (GAP-437) — раньше причина была видна
+  // только при `cycle.halted`/`status === "error"`, а пустая (успешная!) дельта и
+  // «ни разу не отрабатывал» выглядели ОДИНАКОВО, как «ещё не синхронизировались».
   function renderPatternsRow(status) {
     const block = patternsBlock(status);
     const summary = (status && status.patterns) || {};
+    const cycle = ((status && status.cycles) || {}).patterns || {};
+    const metaEl = byId("upd-patterns-meta");
+
+    // 1. Остановлен/ошибка — причина видна ВСЕГДА, не только при этих двух условиях.
+    const failed = !!cycle.halted || block.status === "error";
+    if (failed) {
+      metaEl.textContent = "Синхронизация паттернов остановлена";
+      setDetail("upd-patterns-detail",
+        cycle.halted ? (cycle.halt_reason || "повторы остановлены до вмешательства")
+                     : (String(block.detail || "") || "ошибка синхронизации"));
+      return;
+    }
+
+    // 2. Канал ни разу не отрабатывал — честно так и сказать.
+    if (!block.last_run_at) {
+      metaEl.textContent = "Первая синхронизация паттернов ещё не проходила";
+      setDetail("upd-patterns-detail", "");
+      return;
+    }
+
     const version = summary.version || block.latest_version || "";
-    const count = Number(summary.count ?? block.applied_count ?? 0);
+    const appliedCount = Number(summary.count ?? block.applied_count ?? 0);
+    const totalAvailable = block.total_available === null || block.total_available === undefined
+      ? null : Number(block.total_available);
+    const whenChecked = describeMoment(block.last_run_at);
+
+    // 3. Отработал успешно, новых у издателя нет — дельта пустая, это УСПЕХ, а не
+    // «не синхронизировались»: счётчик при этом — фактически доступная база (поставочная
+    // + всё, что применялось раньше), а не дельта последнего тика.
+    if (!appliedCount && !version) {
+      const parts = ["Все паттерны уже внутри BPMkit. Новых не появилось"];
+      if (totalAvailable !== null) parts.push(pluralPatterns(totalAvailable));
+      parts.push(`проверено ${whenChecked}`);
+      metaEl.textContent = parts.join(" · ");
+      setDetail("upd-patterns-detail", "");
+      return;
+    }
+
+    // 4. Отработал, дельта применена.
     const parts = [];
     if (version) parts.push(`Версия базы ${version}`);
-    if (count) parts.push(pluralPatterns(count));
-    parts.push(`обновлено ${describeMoment(block.last_run_at)}`);
-    byId("upd-patterns-meta").textContent = version || count
-      ? parts.join(" · ")
-      : `Паттерны ещё не синхронизировались (${describeMoment(block.last_run_at)})`;
-    const cycle = ((status && status.cycles) || {}).patterns || {};
-    setDetail("upd-patterns-detail",
-      cycle.halted ? (cycle.halt_reason || "повторы остановлены до вмешательства")
-                   : (block.status === "error" ? String(block.detail || "") : ""));
+    parts.push(pluralPatterns(totalAvailable !== null ? totalAvailable : appliedCount));
+    parts.push(`обновлено ${whenChecked}`);
+    metaEl.textContent = parts.join(" · ");
+    setDetail("upd-patterns-detail", "");
   }
 
   function renderMcpRow(status) {
@@ -2462,15 +2497,86 @@
     const note = byId("upd-restart-note");
     note.hidden = !rel.restart_required;
     if (rel.restart_required) {
-      byId("upd-restart-detail").textContent = rel.current_version
-        ? `, чтобы начала работать версия ${rel.current_version}: перезагрузка плагина MCP-сервер заново не поднимает.`
-        : ", чтобы начала работать новая версия: перезагрузка плагина MCP-сервер заново не поднимает.";
+      // GAP-436: если известна версия РЕАЛЬНО работающего процесса (маркер
+      // `mcp_runtime.json`) и она отличается от установленной — прямо это и написать,
+      // а не универсальную фразу «новая версия». Версия процесса неизвестна (сервер
+      // ни разу не объявился после апгрейда до маркера) — прежний текст.
+      const runningVersion = rel.running_version || "";
+      const installedVersion = rel.current_version || "";
+      byId("upd-restart-detail").textContent =
+        runningVersion && installedVersion && runningVersion !== installedVersion
+          ? `: сейчас работает версия ${runningVersion}, а установлена ${installedVersion} — ` +
+            `перезагрузка плагина MCP-сервер заново не поднимает.`
+          : installedVersion
+            ? `, чтобы начала работать версия ${installedVersion}: перезагрузка плагина MCP-сервер заново не поднимает.`
+            : ", чтобы начала работать новая версия: перезагрузка плагина MCP-сервер заново не поднимает.";
     }
+
+    renderWhatsNew(status);
 
     // Фактическая версия MCP — единая функция-источник правды (см.
     // renderMcpVersion): current из канала — один из двух источников, вызов
     // после его обновления актуализирует и «О программе», и статус-строку.
     renderMcpVersion();
+  }
+
+  /** Свёрнутый по умолчанию спойлер «Что нового в X.Y.Z» в карточке MCP-сервера
+   * (GAP-442). Раскрытие — нативным `<details>`, состояние раскрытия не обязано
+   * переживать перезагрузку страницы и здесь не сохраняется. */
+  function renderWhatsNew(status) {
+    const rel = releasesBlock(status);
+    const box = byId("upd-whatsnew");
+    if (!box) return;
+
+    const staged = rel.staged_version || "";
+    const current = rel.current_version || "";
+    const targetVersion = staged || current;
+    const notesVersion = rel.release_notes_version || "";
+    const notes = Array.isArray(rel.release_notes) ? rel.release_notes : [];
+    const issues = Array.isArray(rel.known_issues) ? rel.known_issues : [];
+
+    // Нотсы — ТОЛЬКО когда они точно про целевую версию (staged, если есть, иначе
+    // установленную): бэкенд всегда отдаёт `release_notes` про свою «latest», и если она
+    // разошлась с тем, что видит канал доставки, показать её текст значило бы выдумать
+    // состав чужой версии.
+    const showNotes = !!targetVersion && !!notesVersion &&
+      String(notesVersion) === String(targetVersion) && notes.length > 0;
+    // Известные проблемы сервер уже отфильтровал по УСТАНОВЛЕННОЙ версии (`current` в
+    // запросе) — показываем их независимо от совпадения с `notesVersion`.
+    const showIssues = issues.length > 0;
+
+    if (!showNotes && !showIssues) {
+      box.hidden = true;
+      return;
+    }
+
+    const summary = byId("upd-whatsnew-summary");
+    if (summary) summary.textContent = `Что нового в ${targetVersion || notesVersion}`;
+
+    const notesEl = byId("upd-whatsnew-notes");
+    if (notesEl) {
+      notesEl.innerHTML = "";
+      notes.forEach((line) => {
+        const li = document.createElement("li");
+        li.textContent = String(line);
+        notesEl.appendChild(li);
+      });
+      notesEl.hidden = !showNotes;
+    }
+
+    const issuesBox = byId("upd-whatsnew-issues");
+    const issuesEl = byId("upd-whatsnew-issues-list");
+    if (issuesEl) {
+      issuesEl.innerHTML = "";
+      issues.forEach((line) => {
+        const li = document.createElement("li");
+        li.textContent = String(line);
+        issuesEl.appendChild(li);
+      });
+    }
+    if (issuesBox) issuesBox.hidden = !showIssues;
+
+    box.hidden = false;
   }
 
   function renderCompanionStatus(status) {

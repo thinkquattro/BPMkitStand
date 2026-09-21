@@ -59,7 +59,9 @@
 """
 from __future__ import annotations
 
+import json
 import re
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -86,6 +88,7 @@ __all__ = [
     "rollback",
     "prune_backups",
     "staged_info",
+    "read_runtime_marker",
 ]
 
 #: Подкаталог скачанного, но ещё не применённого бинаря.
@@ -315,6 +318,159 @@ def _resolve_target(version) -> tuple:
 
 
 # ======================================================================================
+# Маркер работающего процесса MCP (GAP-436)
+# ======================================================================================
+#: Имя файла маркера — одинаковое на обеих ОС.
+_RUNTIME_MARKER_FILENAME = "mcp_runtime.json"
+
+#: Каталог маркера на POSIX. НЕ `bpmkit_config_dir()` (там `$XDG_CONFIG_HOME/BPMkit`) —
+#: контракт маркера зафиксирован серверной веткой (BPMkit/server) раньше этого модуля, и
+#: путь у него СВОЙ: `~/.bpmkit/mcp_runtime.json`. Переопределять точку контракта в
+#: одностороннем порядке нельзя — разойдись пути, маркер не нашёлся бы НИ НА ОДНОЙ
+#: не-Windows машине.
+_RUNTIME_MARKER_POSIX_DIRNAME = ".bpmkit"
+
+
+def _runtime_marker_path() -> Path:
+    """Путь файла-маркера работающего процесса MCP.
+
+    Windows: `%APPDATA%\\BPMkit\\mcp_runtime.json` — та же папка, что и у самого
+    Companion (`bpmkit_config_dir()`), потому что там же лежит `companion-state.json` и
+    туда же пишет клиентский MCP. На прочих ОС — `~/.bpmkit/mcp_runtime.json` (см.
+    докстринг константы `_RUNTIME_MARKER_POSIX_DIRNAME` про то, почему НЕ
+    `bpmkit_config_dir()`).
+    """
+    if sys.platform == "win32":
+        return bpmkit_config_dir() / _RUNTIME_MARKER_FILENAME
+    return Path.home() / _RUNTIME_MARKER_POSIX_DIRNAME / _RUNTIME_MARKER_FILENAME
+
+
+def read_runtime_marker() -> Optional[dict]:
+    """Прочитать маркер работающего процесса MCP, best-effort.
+
+    `None` — маркера нет, ПО ЛЮБОЙ причине: файла не существует (старый сервер, который
+    ещё ни разу не перезапускался после апгрейда с GAP-436), битый JSON, нет прав на
+    чтение, каталог недоступен. Это НЕ ошибка канала обновлений — маркер пишет чужой
+    процесс, best-effort, и его отсутствие ничего не доказывает (кроме того, что сверить
+    «какая версия реально работаетһ сейчас нечем).
+
+    Формат — контракт серверной ветки (GAP-436): `{"version": str, "started_at":
+    ISO-8601 UTC с суффиксом "Z", "pid": int, "frozen": bool, "binary": str}`. Запись без
+    `version`/`started_at` считается отсутствующей: остальные поля справочные, а без этих
+    двух сверить нечего.
+    """
+    path = _runtime_marker_path()
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    version = str(data.get("version") or "").strip()
+    started_at = str(data.get("started_at") or "").strip()
+    if not version or not started_at:
+        return None
+    return {
+        "version": version,
+        "started_at": started_at,
+        "pid": data.get("pid"),
+        "frozen": bool(data.get("frozen")),
+        "binary": str(data.get("binary") or ""),
+    }
+
+
+def _reconcile_restart_required(state) -> None:
+    """Снять вечную плашку «перезапустите», когда рабочий процесс это уже подтвердил
+    (GAP-436). Раньше `restart_required` выставлялся в `True` подменой файла
+    (`apply_staged`/`rollback`) и не снимался НИГДЕ — плашка висела и после честного
+    перезапуска, потому что канал не имел способа узнать, что MCP-сервер поднялся заново.
+
+    Условие снятия — ВСЕ три сразу, иначе флаг не трогается (ни в одну, ни в другую
+    сторону — поднимает его только сама подмена):
+
+    1. маркер вообще есть (сервер хоть раз объявил о себе после апгрейда до версии,
+       которая его пишет);
+    2. `started_at` маркера СТРОГО позже `applied_at` последней подмены — сравнение
+       лексикографическое, ЧТО КОРРЕКТНО: обе метки — `utc_now_iso()`, один и тот же
+       секундно-точный формат `%Y-%m-%dT%H:%M:%SZ`. Без этого условия старый маркер (от
+       процесса, поднятого ДО обновления) совпал бы версией случайно и снял бы плашку,
+       хотя перезапуска не было;
+    3. версия маркера совпадает с версией, которую канал считает установленной
+       (`state.releases["current"]["version"]`) — сравнение через `compare_versions`, а не
+       строкой: `"1.1.90"` и `"1.1.90.0"` в маркере и в `current` не обязаны совпадать
+       посимвольно.
+
+    Заодно каждый вызов обновляет `running_version`/`running_started_at` в состоянии — это
+    отдельный от `restart_required` факт («что сейчас реально работает»), и UI показывает
+    его даже когда условия снятия не выполнены (расхождение версий — само по себе полезная
+    информация, см. `standkit_hub/web/app.js::renderMcpRow`).
+    """
+    rel = state.releases
+    marker = read_runtime_marker()
+    if marker is None:
+        rel["running_version"] = None
+        rel["running_started_at"] = None
+        return
+
+    rel["running_version"] = marker["version"]
+    rel["running_started_at"] = marker["started_at"]
+
+    if not rel.get("restart_required"):
+        return
+
+    current = rel.get("current") or {}
+    applied_at = str(current.get("applied_at") or "").strip()
+    installed_version = str(current.get("version") or "").strip()
+    if not applied_at or not installed_version:
+        return
+    if marker["started_at"] <= applied_at:
+        return
+    if compare_versions(marker["version"], installed_version) != 0:
+        return
+    rel["restart_required"] = False
+
+
+# ======================================================================================
+# Нотсы и известные проблемы (GAP-442)
+# ======================================================================================
+#: `GET /v1/version/latest` — эндпоинт БЕЗ авторизации (`BPMkit-backend/app/routers/
+#: version.py`), не под `CONTENT_PREFIX`: он не про доставку файла, а про то, что о нём
+#: сказать. `current` в query — версия, для которой сервер отфильтрует `known_issues`;
+#: `release_notes` в ответе — ВСЕГДА про версию `latest` бэкенда (симметрия файла
+#: `version_info.json`, но не симметрия фильтрации — так устроен сам эндпоинт).
+_VERSION_INFO_PATH = "/v1/version/latest"
+
+
+def _update_release_notes(state, client, current_version: Optional[str]) -> None:
+    """Подтянуть состав обновления и известные проблемы — попутно к проверке релиза,
+    ЛУЧШЕЕ СТАРАНИЕ (GAP-442).
+
+    Факт «есть ли новая версия» первичен, «что в ней нового» — нет: недоступность этого
+    эндпоинта (сеть, бэкенд лежит, у издателя не настроен `version_info_file` — 404) НЕ
+    имеет права уронить проверку обновления, поэтому исключение ЛЮЁОГО типа (не только
+    `ChannelError`) здесь проглатывается молча, а результат просто остаётся тем, что был
+    (пустым — на первом тике). Отдельно от логики `check()` намеренно: смысл «что нового»
+    вторичен по отношению к «есть ли новое», и падение одного не должно маскировать успех
+    другого.
+    """
+    rel = state.releases
+    params = {"current": current_version} if current_version else None
+    try:
+        payload, _headers = client.get_json(_VERSION_INFO_PATH, params=params,
+                                            authorized=False)
+    except Exception:  # noqa: BLE001 - попутный запрос не имеет права уронить проверку
+        return
+    if not isinstance(payload, dict):
+        return
+    notes = payload.get("release_notes")
+    issues = payload.get("known_issues")
+    rel["release_notes_version"] = str(payload.get("latest") or "").strip() or None
+    rel["release_notes"] = [str(item) for item in notes] if isinstance(notes, list) else []
+    rel["known_issues"] = [str(item) for item in issues] if isinstance(issues, list) else []
+
+
+# ======================================================================================
 # Проверка обновления
 # ======================================================================================
 def check(client, state, ctx) -> dict:
@@ -334,6 +490,11 @@ def check(client, state, ctx) -> dict:
     """
     rel = state.releases
     current = _current_version(state, ctx)
+
+    # GAP-436/GAP-442: локальная сверка маркера и попутный запрос нотсов — ДО сетевого
+    # похода за самим релизом и НЕЗАВИСИМО от его исхода (см. докстринги обеих функций).
+    _reconcile_restart_required(state)
+    _update_release_notes(state, client, current)
 
     try:
         headers = client.head(f"{RELEASES_PREFIX}/{LATEST}")

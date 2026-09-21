@@ -321,6 +321,26 @@ def _write_if_changed(path: Path, text: str) -> bool:
 # --------------------------------------------------------------------------------------
 # Seed: перенос поставочного дерева в override-корень
 # --------------------------------------------------------------------------------------
+def _count_shipped_patterns(shipped_root: Any) -> Optional[int]:
+    """Сколько файлов лежит в поставочной базе паттернов (GAP-437) — честный, но
+    ПРИБЛИЖЁННЫЙ счётчик: считает файлы дерева, а не «паттерны» по строгому определению
+    читателя (обычно это одно и то же, но не гарантия — среди файлов есть и служебные,
+    вроде самого индекса). `None` — корень не задан или не читается: счётчик тогда просто
+    НЕ показывается (см. `state.py::CompanionState.summary`), а не врёт нулём — ноль
+    читался бы как «поставочная база пуста», а не как «не смогли посчитать».
+    """
+    text = str(shipped_root or "").strip()
+    if not text:
+        return None
+    src = Path(text)
+    if not src.is_dir():
+        return None
+    try:
+        return sum(1 for item in src.rglob("*") if item.is_file())
+    except OSError:
+        return None
+
+
 def seed_override_root(shipped_root: Any, override_root: Any, *,
                        force: bool = False) -> dict:
     """Скопировать поставочную базу паттернов в override-корень.
@@ -335,11 +355,18 @@ def seed_override_root(shipped_root: Any, override_root: Any, *,
     `dev/patterns_index.md`. Если он есть, повторный seed НЕ выполняется: файлы могли быть
     правлены руками, и затирать их каждым тиком нельзя. `force=True` — осознанное
     восстановление из поставки.
+
+    Ключ `shipped_count` результата (GAP-437) — размер поставочной базы, посчитанный ЗДЕСЬ
+    и ВСЕГДА, независимо от `skipped`: пропуск seed'а (обычный тик, индекс уже валиден) не
+    должен означать «размер неизвестен» — иначе состояние канала теряло бы счётчик на
+    каждом тике, кроме самого первого.
     """
     override = Path(override_root)
     index = override / DEV_SUBDIR / INDEX_NAME
+    shipped_count = _count_shipped_patterns(shipped_root)
     if index.is_file() and not force:
-        return {"copied": 0, "skipped": True, "root": str(override)}
+        return {"copied": 0, "skipped": True, "root": str(override),
+                "shipped_count": shipped_count}
 
     copied = 0
     src = Path(shipped_root) if str(shipped_root or "").strip() else None
@@ -372,7 +399,8 @@ def seed_override_root(shipped_root: Any, override_root: Any, *,
     if not index.is_file():
         _write_text(index, _EMPTY_INDEX)
 
-    return {"copied": copied, "skipped": False, "root": str(override)}
+    return {"copied": copied, "skipped": False, "root": str(override),
+            "shipped_count": shipped_count}
 
 
 # --------------------------------------------------------------------------------------
@@ -663,6 +691,10 @@ def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext"
     require_signature = bool(getattr(settings, "require_pattern_signature", False))
 
     seed = seed_override_root(shipped_root, override_root)
+    # GAP-437: сохраняем размер поставочной базы, только если он посчитан честно —
+    # `None` (корень не задан/не читается) не должен затирать ранее известное значение.
+    if seed.get("shipped_count") is not None:
+        block["shipped_count"] = seed["shipped_count"]
 
     # Курсор берём из состояния и двигаем ЛОКАЛЬНО: в состояние он попадёт только после
     # успешного прохода — иначе отброшенная по целостности страница «съела» бы дельту.
