@@ -2197,6 +2197,64 @@ span.value-has-reason {
   color: var(--bpmkit-unknown);
 }
 
+/* «Что нового» — свёрнутый по умолчанию спойлер состава обновления (GAP-442). */
+.upd-whatsnew {
+  margin-top: 10px;
+  font-size: 12.5px;
+}
+
+.upd-whatsnew[hidden] {
+  display: none;
+}
+
+.upd-whatsnew summary {
+  cursor: pointer;
+  color: var(--bpmkit-primary);
+  font-weight: 600;
+  list-style: none;
+}
+
+.upd-whatsnew summary::-webkit-details-marker {
+  display: none;
+}
+
+.upd-whatsnew summary::before {
+  content: "▸ ";
+}
+
+.upd-whatsnew[open] summary::before {
+  content: "▾ ";
+}
+
+.upd-whatsnew-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--bpmkit-muted);
+  line-height: 1.5;
+}
+
+.upd-whatsnew-issues {
+  margin-top: 8px;
+}
+
+.upd-whatsnew-issues[hidden] {
+  display: none;
+}
+
+.upd-whatsnew-issues-title {
+  font-weight: 600;
+  color: var(--bpmkit-unknown);
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.upd-whatsnew-issues-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--bpmkit-muted);
+  line-height: 1.5;
+}
+
 .updates-footer {
   align-items: center;
   gap: 8px;
