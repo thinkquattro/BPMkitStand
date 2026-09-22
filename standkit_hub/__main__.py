@@ -205,6 +205,35 @@ def _warn_if_run_dir_outside_profile(run_dir: Path) -> None:
         )
 
 
+def _cmd_hub_stop(state_file: Path, run_dir: Path) -> int:
+    """CLI ``--hub-stop`` (GAP-445): останавливает диспетчер, работающий в ЭТОМ профиле,
+    штатно (``_instance.stop_running_instance`` -- без убийства дерева процессов, живые
+    стенды не трогает) и ПЕРЕД остановкой печатает ``HUB_SESSION=<id>`` -- номер сеанса
+    служб терминалов (WinAPI ``ProcessIdToSessionId``, ``standkit.platform.current_session_id``)
+    ОСТАНАВЛИВАЕМОГО процесса, снятый из файла состояния (``HubInstanceState.session_id``),
+    а НЕ у текущего процесса (у него своего диспетчера нет -- этот вызов его и не поднимает).
+
+    Установщик (``bpmkit_installer.iss``) и человек, читающий ``/LOG``/``setup_cli.log``
+    после честного отказа «диспетчер запущен в другом сеансе» (GAP-445 (а)), используют эту
+    строку, чтобы понять, В КАКОМ сеансе диспетчер работал -- остановить его там руками, если
+    штатная остановка (``--hub-stop``, вызывается уже ИЗ ТОГО сеанса) недоступна.
+
+    Диспетчера в этом профиле нет (файла состояния нет либо записанный в нём процесс уже
+    мёртв) -- честный отказ, ``HUB_SESSION=`` не печатается вовсе (называть нечего)."""
+    state = _instance.read_state(state_file)
+    if state is None:
+        print("[standkit-hub] диспетчер не запущен (файл состояния не найден или устарел)")
+        return 1
+    session_label = state.session_id if state.session_id is not None else "unknown"
+    print(f"HUB_SESSION={session_label}")
+    ok, reason = _instance.stop_running_instance(state, run_dir=run_dir)
+    if not ok:
+        print(f"[standkit-hub] не удалось остановить диспетчер: {reason}")
+        return 1
+    print(f"[standkit-hub] диспетчер (pid={state.pid}) остановлен")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="standkit-gui",
@@ -249,6 +278,15 @@ def main(argv: list[str] | None = None) -> int:
         "--uninstall-shortcut",
         action="store_true",
         help="удалить ранее созданный ярлык дашборда и выйти (без запуска сервера)",
+    )
+    parser.add_argument(
+        "--hub-stop",
+        action="store_true",
+        help=(
+            "остановить работающий в ЭТОМ профиле диспетчер штатно и выйти, не поднимая "
+            "свой HTTP-сервер -- печатает HUB_SESSION=<id> (номер сеанса служб терминалов "
+            "остановленного процесса, ProcessIdToSessionId) перед остановкой, GAP-445"
+        ),
     )
     parser.add_argument(
         "--takeover",
@@ -400,6 +438,9 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = config.resolve_run_dir()
     _warn_if_run_dir_outside_profile(run_dir)
     state_file = _instance.state_path(run_dir)
+
+    if args.hub_stop:
+        return _cmd_hub_stop(state_file, run_dir)
 
     # Сессия от предыдущего экземпляра (перезапуск с правами администратора):
     # файл одноразовый и протухающий, поэтому «не прочитали» — штатный исход,
