@@ -2464,22 +2464,36 @@
     const latest = rel.known_latest || "";
     const staged = rel.staged_version || "";
     const hasNew = !!(latest && current && String(latest) !== String(current));
+    // GAP-463: издатель объявил, что версия `latest` ставится установщиком — канал её
+    // никогда не подготовит (`staged` для неё не появится, см.
+    // `standkit_companion.releases.stage`), поэтому смотрим на флаг, а не на `staged`.
+    const installerRequired = hasNew && !!rel.requires_installer;
 
     const avail = byId("upd-mcp-avail");
     avail.hidden = !(hasNew || staged);
-    if (!avail.hidden) avail.textContent = `доступна ${staged || latest}`;
+    if (!avail.hidden) {
+      avail.textContent = installerRequired ? `нужен установщик ${latest}` : `доступна ${staged || latest}`;
+    }
 
     const parts = [];
     parts.push(current ? `Установлено ${current}` : "Установленная версия неизвестна");
-    if (staged) parts.push(`скачано ${staged}`);
+    if (installerRequired) parts.push(`требуется установщик ${latest}`);
+    else if (staged) parts.push(`скачано ${staged}`);
     else if (hasNew) parts.push(`доступно ${latest}`);
     else if (current) parts.push("это последняя версия");
     if (rel.last_check_at) parts.push(`проверено ${describeMoment(rel.last_check_at)}`);
     byId("upd-mcp-meta").textContent = parts.join(" · ");
 
-    byId("upd-mcp-desc").textContent = staged
-      ? "Новая версия скачана и проверена. После установки перезапустите Claude Desktop — иначе продолжит работать прежняя версия."
-      : "Новая версия проверяется и скачивается заранее; подмена файла происходит только по вашей команде.";
+    // GAP-463: тихим обновлением эту версию доставить нельзя — текст говорит об этом
+    // прямо, вместо обычного «скачивается заранее»/«скачана и проверена». Ссылку на
+    // скачивание не обещаем: в снимке канала достоверного адреса поставки нет — только
+    // общее «у издателя», как и в остальном тексте диспетчера (см. `COMPANION_ACTION_REASONS`,
+    // "издатель" в описании циклов).
+    byId("upd-mcp-desc").textContent = installerRequired
+      ? `Версия ${latest} ставится установщиком — тихим обновлением её доставить нельзя. Скачайте новую поставку у издателя BPMkit и запустите установку.`
+      : staged
+        ? "Новая версия скачана и проверена. После установки перезапустите Claude Desktop — иначе продолжит работать прежняя версия."
+        : "Новая версия проверяется и скачивается заранее; подмена файла происходит только по вашей команде.";
 
     setDetail("upd-mcp-detail", rel.status === "error" ? String(rel.detail || "") : "");
 
@@ -2530,15 +2544,21 @@
 
     const staged = rel.staged_version || "";
     const current = rel.current_version || "";
-    const targetVersion = staged || current;
+    const latest = rel.known_latest || "";
+    const hasNew = !!(latest && current && String(latest) !== String(current));
+    // GAP-463: версия с установщиком никогда не станет `staged` (канал её не готовит —
+    // см. `renderMcpRow`), но нотсы про НЕЁ пользователю нужны ровно тогда, когда он
+    // читает «нужен установщик»: это ответ на «ради чего идти за установщиком».
+    const installerRequired = hasNew && !!rel.requires_installer;
+    const targetVersion = installerRequired ? latest : (staged || current);
     const notesVersion = rel.release_notes_version || "";
     const notes = Array.isArray(rel.release_notes) ? rel.release_notes : [];
     const issues = Array.isArray(rel.known_issues) ? rel.known_issues : [];
 
-    // Нотсы — ТОЛЬКО когда они точно про целевую версию (staged, если есть, иначе
-    // установленную): бэкенд всегда отдаёт `release_notes` про свою «latest», и если она
-    // разошлась с тем, что видит канал доставки, показать её текст значило бы выдумать
-    // состав чужой версии.
+    // Нотсы — ТОЛЬКО когда они точно про целевую версию (staged/установщик, если есть,
+    // иначе установленную): бэкенд всегда отдаёт `release_notes` про свою «latest», и
+    // если она разошлась с тем, что видит канал доставки, показать её текст значило бы
+    // выдумать состав чужой версии.
     const showNotes = !!targetVersion && !!notesVersion &&
       String(notesVersion) === String(targetVersion) && notes.length > 0;
     // Известные проблемы сервер уже отфильтровал по УСТАНОВЛЕННОЙ версии (`current` в
@@ -2603,6 +2623,26 @@
     updateStatuslinePatterns(status);
   }
 
+  // GAP-463: почему «Установить» недоступна, когда причина не «нечего ставить», а
+  // «эту версию тихо не поставить» — тот же класс отказа, что `ChannelError(kind=
+  // "requires_installer")` у канала, только сформулированный для кнопки, а не для лога.
+  // Статическая `COMPANION_ACTION_REASONS` не подходит: для `apply_update` там уже есть
+  // текст на случай «ничего не скачано», и он неверен, когда файл как раз ЕСТЬ, но
+  // именно эту версию канал не подменит никогда (см. `releases.staged_requires_installer`).
+  function actionUnavailableReason(action, status) {
+    if (action === "apply_update" || action === "stage_update") {
+      const rel = releasesBlock(status);
+      const latest = rel.known_latest || "";
+      const current = rel.current_version || "";
+      const hasNew = !!(latest && current && String(latest) !== String(current));
+      if (hasNew && rel.requires_installer) {
+        return "Эта версия ставится установщиком — тихая доставка невозможна. " +
+          "Скачайте новую поставку у издателя BPMkit и запустите установку.";
+      }
+    }
+    return COMPANION_ACTION_REASONS[action] || "Сейчас действие недоступно";
+  }
+
   function updateCompanionActions(status) {
     const allowed = (status && status.actions) || {};
     const enabled = !status || status.enabled !== false;
@@ -2615,7 +2655,7 @@
       } else if (!enabled) {
         btn.title = COMPANION_DISABLED_REASON;
       } else if (allowed[action] !== true) {
-        btn.title = COMPANION_ACTION_REASONS[action] || "Сейчас действие недоступно";
+        btn.title = actionUnavailableReason(action, status);
       } else {
         btn.title = "";
       }
