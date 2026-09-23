@@ -309,6 +309,65 @@ def current_user_name() -> Optional[str]:
         return None
 
 
+def _configure_session_id_winapi(kernel32) -> None:
+    """``argtypes``/``restype`` для ``ProcessIdToSessionId`` (GAP-445) --
+    вынесена отдельно для тестируемости на Linux заглушками, тем же приёмом,
+    что ``_configure_sid_winapi``/``_configure_process_time_winapi``."""
+    from ctypes import wintypes
+
+    kernel32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, wintypes.PDWORD]
+    kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
+
+
+def current_session_id(pid: Optional[int] = None) -> Optional[int]:
+    """
+    Номер сеанса служб терминалов (Terminal Services session id) процесса
+    ``pid`` (по умолчанию -- ТЕКУЩЕГО процесса), через WinAPI
+    ``ProcessIdToSessionId`` (GAP-445).
+
+    ЗАЧЕМ. Именованный мьютекс диспетчера (``standkit_hub.mutex.HUB_MUTEX_NAME``)
+    и Windows SID (``current_user_sid`` выше) отвечают на РАЗНЫЕ вопросы:
+    мьютекс -- «есть ли диспетчер В ЭТОМ сеансе рабочего стола», SID -- «под
+    какой учётной записью». Ни один не отвечает на «в КАКОМ сеансе (RDP,
+    сеанс 0, вторая учётка на той же машине) работает диспетчер, которого я
+    вижу занимающим порт 8770, но чей мьютекс я НЕ вижу» -- установщик
+    (``bpmkit_installer.iss``, ``CheckForMutexes``/``HubMutexRunning``)
+    опрашивает мьютекс ТОЛЬКО в своём сеансе (без ``Global\\``-префикса,
+    решение владельца 21.09.2026 -- сеансовая модель мьютекса остаётся), и
+    расхождение «порт занят, мьютекс не виден» означает ровно это: диспетчер
+    жив, но в ДРУГОМ сеансе. ``ProcessIdToSessionId`` -- единственный публичный
+    WinAPI-вызов, который называет сеанс ЛЮБОГО живого pid на машине без
+    открытия хендла процесса (в отличие от ``OpenProcess``/токена выше) --
+    работает даже для процесса другого пользователя, если у вызывающего есть
+    право видеть сам pid (``tasklist``/``netstat -ano`` его уже показали).
+
+    ``standkit_hub.instance.HubInstanceState.session_id`` хранит РЕЗУЛЬТАТ
+    этого вызова для СВОЕГО процесса -- второй, независимый от мьютекса
+    источник «в каком сеансе я живу», который устанавливающий читает из
+    файла состояния хаба (``standkit-hub.json``) рядом с ``pid``.
+
+    ``None`` -- не Windows либо ЛЮБОЙ сбой (WinAPI недоступен, чужой pid не
+    виден и т.п.): честное «не знаю», а не 0 (сеанс 0 -- РЕАЛЬНЫЙ, отличимый
+    результат: служба/RDP-сессия без интерактивного рабочего стола).
+    """
+    if sys.platform != "win32":
+        return None
+    target_pid = int(pid) if pid is not None else os.getpid()
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _configure_session_id_winapi(kernel32)
+
+        session_id = wintypes.DWORD(0)
+        if not kernel32.ProcessIdToSessionId(wintypes.DWORD(target_pid), ctypes.byref(session_id)):
+            return None
+        return int(session_id.value)
+    except Exception:
+        return None
+
+
 def _configure_process_time_winapi(kernel32) -> None:
     """
     ``argtypes``/``restype`` для ``OpenProcess``/``GetProcessTimes``/

@@ -38,7 +38,14 @@ from pathlib import Path
 from typing import Optional
 
 from standkit import __version__ as _standkit_version
-from standkit.platform import ProcessError, is_alive, process_create_time, stop, wait_for_exit
+from standkit.platform import (
+    ProcessError,
+    current_session_id,
+    is_alive,
+    process_create_time,
+    stop,
+    wait_for_exit,
+)
 from standkit_hub.elevation import ReparseGuardError, ensure_not_reparse
 
 STATE_FILE_NAME = "standkit-hub.json"
@@ -85,6 +92,18 @@ class HubInstanceState:
     # отсутствие поля в старом файле состояния — та же обратная совместимость,
     # что у ``user_sid``.
     process_create_time: Optional[float] = None
+    # Номер сеанса служб терминалов (Terminal Services session id, GAP-445),
+    # прочитанный WinAPI ``ProcessIdToSessionId`` (см.
+    # ``standkit.platform.current_session_id``) в момент записи файла --
+    # ВТОРОЙ, независимый от именованного мьютекса (``standkit_hub.mutex``,
+    # сеансовый, без "Global\\") источник «в каком сеансе живёт диспетчер».
+    # Установщик (``bpmkit_installer.iss``) читает ЭТО поле вместе с ``pid``,
+    # когда порт 8770 занят, а мьютекс СВОЕГО сеанса не виден -- расхождение
+    # означает «диспетчер работает в другом сеансе», а это поле называет,
+    # в каком именно. None -- не Windows либо не удалось определить (та же
+    # обратная совместимость со старыми записями без этого поля, что у
+    # ``user_sid``/``process_create_time``).
+    session_id: Optional[int] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -94,6 +113,7 @@ class HubInstanceState:
         elevated = data.get("elevated")
         user_sid = data.get("user_sid")
         create_time = data.get("process_create_time")
+        session_id = data.get("session_id")
         return cls(
             pid=int(data["pid"]),
             host=str(data.get("host", "127.0.0.1")),
@@ -103,6 +123,7 @@ class HubInstanceState:
             started_at=float(data.get("started_at", 0.0)),
             user_sid=str(user_sid) if user_sid else None,
             process_create_time=float(create_time) if create_time is not None else None,
+            session_id=int(session_id) if session_id is not None else None,
         )
 
 
@@ -479,4 +500,7 @@ def current_state(
         started_at=time.time(),
         user_sid=user_sid,
         process_create_time=process_create_time(os.getpid()),
+        # GAP-445: второй источник «в каком сеансе я живу» рядом с мьютексом --
+        # см. докстринг HubInstanceState.session_id.
+        session_id=current_session_id(os.getpid()),
     )
