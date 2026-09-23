@@ -137,6 +137,10 @@ def test_run_action_apply_installer_launches_silently(tmp_path, popen_calls):
     args = popen_calls[0]
     assert args[0].endswith(FILENAME)
     assert "/VERYSILENT" in args and "/SUPPRESSMSGBOXES" in args and "/NORESTART" in args
+    # Журнал Inno Setup — единственный внятный след отказа тихой установки.
+    log_args = [a for a in args if a.startswith("/LOG=")]
+    assert len(log_args) == 1 and log_args[0].endswith("installer_setup.log")
+    assert result["log"].endswith("installer_setup.log")
     assert Path(ctx.binary_path).read_bytes() == b"stary binar 4.0.0", (
         "установщик применяется ЗАПУСКОМ, бинарь MCP канал не подменяет")
     launched = runner.status()["installer"]["launched"]

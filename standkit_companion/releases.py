@@ -1700,9 +1700,15 @@ def apply_installer(state, ctx, *, target: Optional[str] = None) -> dict:
     # дочерний процесс мигнул бы чёрным окном). Лог установщика — рядом со стейджингом,
     # НЕ теряется между тиками (используется при диагностике «установка не завершилась»).
     log_path = companion_workdir(ctx) / "installer_install.log"
+    # GAP-279: Inno Setup — GUI-процесс, в stdout он не пишет ничего; настоящий журнал
+    # установки (почему отказал: запущенный MCP-сервер, занятый диспетчер и т.п.) даёт
+    # только ключ /LOG. Именно этот путь UI показывает человеку, если диспетчер после
+    # установки не перезапустился.
+    setup_log = companion_workdir(ctx) / "installer_setup.log"
     try:
         pid = spawn_hidden(
-            [str(src), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+            [str(src), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+             f"/LOG={setup_log}"],
             cwd=src.parent, log_path=log_path)
     except ProcessError as exc:
         cause = exc.__cause__
@@ -1729,7 +1735,8 @@ def apply_installer(state, ctx, *, target: Optional[str] = None) -> dict:
         "pid": pid,
         "launched_at": launched_at,
         "key_id": verified.get("key_id"),
-        "log": str(log_path),
+        "log": str(setup_log),
+        "stdout_log": str(log_path),
     }
     state.mark("releases", "ok",
                f"Установщик {record.get('version') or ''} запущен (pid={pid}) — "
@@ -1744,7 +1751,8 @@ def apply_installer(state, ctx, *, target: Optional[str] = None) -> dict:
         "path": str(src),
         "key_id": verified.get("key_id"),
         "launched_at": launched_at,
-        "log": str(log_path),
+        "log": str(setup_log),
+        "stdout_log": str(log_path),
         "reason": "installer_launched",
     }
 
