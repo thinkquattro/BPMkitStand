@@ -83,7 +83,7 @@ RUN_ORDER = ("revocations", "patterns", "releases")
 #: Явные действия человека. Имена — те же, что у ключей `available_actions`, чтобы UI не
 #: переводил «что разрешено» в «что вызвать» через свою таблицу соответствия.
 ACTIONS = ("sync_patterns", "check_update", "stage_update", "apply_update",
-           "rollback", "refresh_revocations")
+           "rollback", "refresh_revocations", "stage_installer", "apply_installer")
 
 #: Доля интервала, на которую срок «гуляет» в обе стороны (см. п.2 докстринга модуля).
 JITTER_FRACTION = 0.10
@@ -200,7 +200,15 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
     staged = False
     history = False
     staged_requires_installer = False
+    installer_staged = False
     if state is not None:
+        try:
+            # GAP-279: «Установить обновление» установщиком — только когда подготовленный
+            # и проверенный установщик ЛЕЖИТ на диске (та же логика «запись без файла —
+            # нечего применять», что у `apply_update`).
+            installer_staged = releases.installer_status(state)["staged"] is not None
+        except (OSError, AttributeError, TypeError, KeyError):
+            installer_staged = False
         try:
             staged = releases.staged_info(state) is not None
             history = bool(state.releases.get("history"))
@@ -218,6 +226,8 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
         "apply_update": enabled and staged and not staged_requires_installer,
         "rollback": enabled and history,
         "refresh_revocations": enabled,
+        "stage_installer": enabled,
+        "apply_installer": enabled and installer_staged,
     }
 
 
@@ -540,13 +550,39 @@ class CompanionRunner:
         """
         check = releases.check(session.client, self._state, session.ctx)
         staged = None
+        installer = None
         if (check.get("available") and not check.get("requires_installer")
                 and bool(getattr(settings, "auto_stage_release", False))):
             staged = releases.stage(session.client, self._state, session.ctx,
                                     check.get("target") or "latest")
-        return {"check": check, "staged": staged,
+        if (check.get("available") and check.get("requires_installer")
+                and bool(getattr(settings, "auto_stage_release", False))):
+            # GAP-279: версия ставится установщиком — заранее скачиваем и проверяем ЕГО
+            # (не запускаем: запуск — только кнопкой человека, SECURITY.md §4.1).
+            installer = self._stage_installer_quietly(session, check)
+        return {"check": check, "staged": staged, "installer": installer,
                 "cookbook": self._sync_cookbook(session),
                 "candidates": self._sync_candidates(settings)}
+
+    def _stage_installer_quietly(self, session, check: dict) -> Optional[dict]:
+        """Попутная подготовка установщика (GAP-279) без права уронить проверку.
+
+        Проверка релиза — главное: её результат (номер новой версии) обязан дойти до
+        человека, даже если установщик не опубликован или не скачался. Поэтому любой
+        отказ канала здесь превращается в запись в результате, а не в исключение (то же
+        рассуждение, что у пропуска `requires_installer` в `_run_releases`)."""
+        wanted = str(check.get("latest") or "")
+        # Установщик — строго той версии, о которой сказала проверка релиза: «latest»
+        # канала установщика мог уйти вперёд/отстать, и предпросмотр «MCP A→B» врал бы.
+        target = wanted or check.get("target") or "latest"
+        existing = releases.installer_status(self._state)["staged"]
+        if existing is not None and wanted and str(existing.get("version") or "") == wanted:
+            return dict(existing, reason="installer_already_staged")
+        try:
+            return releases.stage_installer(session.client, self._state, session.ctx,
+                                            target)
+        except CompanionError as exc:
+            return {"error": exc.to_dict(), "reason": exc.kind}
 
     def _run_revocations(self, session, settings) -> dict:
         return revocations.refresh(session.client, self._state, session.ctx)
@@ -765,7 +801,21 @@ class CompanionRunner:
                         kind="nothing_to_rollback")
                 return releases.rollback(self._state, self._session(settings).ctx,
                                          version=version)
+            if action == "apply_installer":
+                # GAP-279: «Установить обновление» — ЗАПУСК подготовленного установщика
+                # (ADR-0048 п.4/п.5). Сперва «есть ли что ставить», потом контекст — тот
+                # же порядок, что у `apply_update`.
+                if releases.installer_status(self._state)["staged"] is None:
+                    raise ChannelError(
+                        "Подготовленного установщика нет — сначала нажмите «Проверить "
+                        "обновления» (или «Скачать установщик»)",
+                        kind="nothing_staged")
+                return releases.apply_installer(self._state, self._session(settings).ctx,
+                                                target=version)
             session = self._session(settings)
+            if action == "stage_installer":
+                return releases.stage_installer(session.client, self._state, session.ctx,
+                                                version or "latest")
             if action == "sync_patterns":
                 result = patterns.sync(session.client, self._state, session.ctx, settings)
                 if isinstance(result, dict):
@@ -787,11 +837,17 @@ class CompanionRunner:
                 # typed-ошибкой — см. `releases.stage`/`releases.apply_staged`.
                 check = releases.check(session.client, self._state, session.ctx)
                 staged = None
+                installer = None
                 if check.get("available") and not check.get("requires_installer"):
                     staged = releases.stage(session.client, self._state, session.ctx,
                                             check.get("target") or "latest")
+                if check.get("available") and check.get("requires_installer"):
+                    # GAP-279: версию ставит установщик — готовим ЕГО, чтобы кнопка
+                    # «Установить обновление» стала доступна одним нажатием проверки.
+                    installer = self._stage_installer_quietly(session, check)
                 result = dict(check)
                 result["staged"] = staged
+                result["installer"] = installer
                 result["cookbook"] = self._sync_cookbook(session)
                 return result
             if action == "stage_update":
@@ -860,11 +916,20 @@ class CompanionRunner:
             "cycles": cycles,
             "context": self._context_status(settings),
             "actions": available_actions(settings, self._state),
+            # GAP-279: подготовленный/запущенный установщик — для предпросмотра «MCP A→B,
+            # диспетчер C→D» и для страницы, ждущей перезапуска диспетчера установщиком.
+            "installer": self._installer_status(),
             # Сбой вне отдельного цикла (нечитаемый конфиг, отказ диска). Ключ есть всегда
             # и пуст в норме: единственный способ узнать о таком отказе снаружи — статус,
             # потому что фоновый поток не имеет права упасть с ним наружу.
             "last_error": self._last_error,
         }
+
+    def _installer_status(self) -> dict:
+        try:
+            return releases.installer_status(self._state)
+        except Exception:  # noqa: BLE001 - статус не имеет права упасть из-за диска
+            return {"staged": None, "launched": None}
 
     def _context_status(self, settings) -> dict:
         cli = list(self._context_cli)

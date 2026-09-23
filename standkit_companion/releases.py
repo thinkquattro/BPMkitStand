@@ -81,7 +81,7 @@ from pathlib import Path
 from typing import Optional
 
 from standkit.registry import bpmkit_config_dir
-from standkit.platform import ProcessError, spawn_hidden
+from standkit.platform import ProcessError, is_alive, spawn_hidden
 
 from . import fsutil, mcp_mutex, signature
 from .backend import CONTENT_PREFIX
@@ -111,6 +111,8 @@ __all__ = [
     "stage_installer",
     "apply_installer",
     "staged_installer_info",
+    "installer_status",
+    "INSTALLER_ELEVATION_WINERROR",
 ]
 
 #: Подкаталог скачанного, но ещё не применённого бинаря.
@@ -1512,6 +1514,11 @@ def stage_installer(client, state, ctx, version: str = LATEST) -> dict:
         "signed_at": verified.get("signed_at"),
         "target": target,
         "staged_at": utc_now_iso(),
+        # GAP-279 (предпросмотр «диспетчер C→D»): версия BPMkitStand внутри установщика,
+        # если издатель её сообщил в `/meta` (необязательное поле). Нет поля — `None`,
+        # и UI честно говорит «диспетчер обновится из комплекта установщика», а не
+        # выдумывает номер.
+        "standkit_version": _optional_meta_version(meta.get("standkit_version")),
         "sidecar": sidecar,
     }
     rel["installer_staged"] = record
@@ -1526,6 +1533,86 @@ def stage_installer(client, state, ctx, version: str = LATEST) -> dict:
     out["reason"] = "installer_staged"
     out["note"] = note
     return out
+
+
+def _optional_meta_version(value) -> Optional[str]:
+    """Необязательная строка версии из `/meta`: только непустая строка разумной длины,
+    всё прочее — `None` (поле приходит от издателя и в UI показывается как есть)."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > 64:
+        return None
+    return value
+
+
+#: Сколько после запуска установщика запись `installer_launched` считается «установка
+#: идёт» (если процесс жив). Страховка от переиспользования pid: через полчаса живой
+#: процесс с тем же номером — почти наверняка уже не наш установщик.
+INSTALLER_RUNNING_WINDOW_SEC = 1800
+
+#: `ERROR_ELEVATION_REQUIRED` (740): Windows отказала запустить исполняемый файл без
+#: повышения прав. Установщик собран с `PrivilegesRequired=lowest`, но при установке
+#: «для всех пользователей» (Program Files) повторный запуск наследует режим прошлой
+#: установки и требует UAC, а `CreateProcess` из непривилегированного хаба UAC не
+#: показывает — только эту ошибку.
+INSTALLER_ELEVATION_WINERROR = 740
+
+
+def installer_status(state, *, now_iso: Optional[str] = None) -> dict:
+    """Карточка канала установщика для `/api/companion/status` (GAP-279): что подготовлено
+    (без сайдкара) и что запущено, с признаком «установщик ещё работает».
+
+    Файл подготовленного установщика проверяется на диске (как `staged_info` у
+    релизного канала): запись без файла — это «нечего устанавливать»."""
+    rel = state.releases
+    staged = staged_installer_info(state)
+    if staged is not None:
+        try:
+            if not Path(str(staged.get("path") or "")).is_file():
+                staged = None
+        except OSError:
+            staged = None
+    launched = rel.get("installer_launched")
+    launched_out = None
+    if isinstance(launched, dict):
+        launched_out = dict(launched)
+        running = False
+        try:
+            pid = int(launched.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid > 0 and _launched_recently(launched.get("launched_at"), now_iso):
+            try:
+                running = bool(is_alive(pid))
+            except Exception:  # noqa: BLE001 - статус не имеет права упасть из-за OS-проверки
+                running = False
+        launched_out["running"] = running
+    return {"staged": staged, "launched": launched_out}
+
+
+def _launched_recently(launched_at, now_iso: Optional[str]) -> bool:
+    from datetime import datetime, timezone
+
+    def _parse(value):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    started = _parse(launched_at)
+    if started is None:
+        return False
+    now = _parse(now_iso) if now_iso else datetime.now(timezone.utc)
+    if now is None:
+        return False
+    return 0 <= (now - started).total_seconds() <= INSTALLER_RUNNING_WINDOW_SEC
 
 
 def staged_installer_info(state) -> Optional[dict]:
@@ -1618,6 +1705,17 @@ def apply_installer(state, ctx, *, target: Optional[str] = None) -> dict:
             [str(src), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
             cwd=src.parent, log_path=log_path)
     except ProcessError as exc:
+        cause = exc.__cause__
+        if getattr(cause, "winerror", None) == INSTALLER_ELEVATION_WINERROR:
+            # GAP-279: прежняя установка сделана «для всех пользователей» — установщику
+            # нужны права администратора, а хаб без них UAC показать не может. Отдельный
+            # kind, чтобы UI предложил понятный выход, а не «локальную ошибку».
+            raise ChannelError(
+                "Установщику нужны права администратора (BPMkit установлен для всех "
+                "пользователей). Перезапустите диспетчер с правами администратора и "
+                f"повторите установку, либо запустите установщик вручную: {src}",
+                kind="elevation_required",
+            ) from None
         raise ChannelError(
             f"Не удалось запустить установщик {src}: {exc}",
             kind="local_io",
@@ -1626,6 +1724,7 @@ def apply_installer(state, ctx, *, target: Optional[str] = None) -> dict:
     launched_at = utc_now_iso()
     rel["installer_launched"] = {
         "version": record.get("version"),
+        "standkit_version": record.get("standkit_version"),
         "path": str(src),
         "pid": pid,
         "launched_at": launched_at,
