@@ -81,6 +81,7 @@ from pathlib import Path
 from typing import Optional
 
 from standkit.registry import bpmkit_config_dir
+from standkit.platform import ProcessError, spawn_hidden
 
 from . import fsutil, mcp_mutex, signature
 from .backend import CONTENT_PREFIX
@@ -105,6 +106,11 @@ __all__ = [
     "staged_info",
     "staged_requires_installer",
     "read_runtime_marker",
+    "INSTALLER_PREFIX",
+    "check_installer",
+    "stage_installer",
+    "apply_installer",
+    "staged_installer_info",
 ]
 
 #: Подкаталог скачанного, но ещё не применённого бинаря.
@@ -122,6 +128,15 @@ RELEASES_PREFIX = f"{CONTENT_PREFIX}/releases"
 
 #: Псевдо-версия в пути — единственный способ скачать релиз, когда номер нечисловой.
 LATEST = "latest"
+
+#: Префикс канала установщика (ADR-0048, GAP-279) — ОТДЕЛЬНЫЙ от RELEASES_PREFIX,
+#: раздельность адреса — часть контракта ADR-0048 п.1/п.3, не деталь реализации.
+INSTALLER_PREFIX = f"{CONTENT_PREFIX}/installer"
+
+#: Имя файла установщика — `bpmkit-setup-<version>.exe`, СОЗНАТЕЛЬНО отличное от
+#: релизного `bpmkit-<version>.<ext>` (см. `app.installer` дословно, репозиторий
+#: BPMkit-backend — тот же шаблон обязан совпасть на обеих сторонах канала).
+_INSTALLER_FILENAME_RE = re.compile(r"^bpmkit-setup-\d+(?:\.\d+)*\.exe$")
 
 #: Суффикс частично скачанного файла. Отдельное имя обязательно: файл без суффикса в
 #: стейджинге означает «проверен и готов к применению», и недокачанный кусок под этим
@@ -901,25 +916,29 @@ def _partial_record(target: str, filename: str, sha256: str,
     }
 
 
-def _resume_offset(rel: dict, part: Path, expected_sha: str, size_bytes: int) -> int:
+def _resume_offset(rel: dict, part: Path, expected_sha: str, size_bytes: int,
+                   *, slot: str = "partial") -> int:
     """Сколько байт уже лежит на диске и можно ли им доверять.
 
     Докачка разрешена, если частичный файл существует И (записи о нём нет ЛИБО она про этот
     же релиз). Расхождение sha означает «релиз перевыложили» — кусок удаляется, качаем с
     нуля. Кусок больше объявленного размера — тоже мусор.
-    """
+
+    `slot` (ADR-0048/GAP-279) — ключ состояния для записи о недокачанном файле: релизный
+    поток использует `"partial"` (умолчание, поведение НЕ меняется), поток установщика —
+    `"installer_partial"` (свой слот, НЕ пересекается с релизным)."""
     existing = _size_on_disk(part)
     if existing <= 0:
         return 0
-    partial = rel.get("partial") or {}
+    partial = rel.get(slot) or {}
     known_sha = _norm_hex(partial.get("sha256"))
     if known_sha and known_sha != expected_sha:
         _unlink_quietly(part)
-        rel["partial"] = None
+        rel[slot] = None
         return 0
     if size_bytes and existing > size_bytes:
         _unlink_quietly(part)
-        rel["partial"] = None
+        rel[slot] = None
         return 0
     return existing
 
@@ -1267,6 +1286,367 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
         "restart_required": True,
         "message": RESTART_MESSAGE,
         "reason": "applied",
+    }
+
+
+# ======================================================================================
+# Канал установщика (ADR-0048, GAP-279, 23.09.2026)
+# ======================================================================================
+#
+# Узкий отдельный поток по образцу канала релизов — СВОЙ адрес (INSTALLER_PREFIX), СВОЙ
+# слот состояния (`rel["installer_staged"]`, releases["staged"] не трогается вовсе), но
+# ПРИНЦИПИАЛЬНО другое "apply": установщик не ПОДМЕНЯЕТ бинарь, а ЗАПУСКАЕТСЯ (ADR-0048
+# п.4/п.5). `_ensure_artifact_applicable` (GAP-415, выше) уже отказывает применить файл с
+# именем установщика через `apply_staged` -- этот блок даёт ему ЗАКОННЫЙ путь вместо
+# запрещённого.
+#
+# Три гарда, все ДО запуска процесса:
+#   1. `kind` сайдкара ОБЯЗАН быть "installer" (`signature.verify_artifact(...,
+#      expected_kind="installer")`, ADR-0048 п.2/п.4) -- симметрично серверной проверке
+#      `app.installer.signature_of` (BPMkit-backend): у канала установщика нет легаси
+#      сайдкаров без поля, послабления "отсутствует -> подразумевается" здесь НЕТ (в
+#      отличие от `stage()`/`apply_staged` выше, где отсутствие трактуется как "server"
+#      ради обратной совместимости с уже опубликованными релизами);
+#   2. имя файла обязано подходить под `_INSTALLER_FILENAME_RE`
+#      (`bpmkit-setup-<version>.exe`) -- та же защита, что у `_ensure_artifact_applicable`,
+#      но на СВОЁМ канале: сервер публикует установщик под этим шаблоном, файл с любым
+#      другим именем в этом слоте -- признак путаницы каналов, не гипотетика;
+#   3. PE-заголовок `MZ` -- установщик тоже исполняемый Windows-файл, и переименованный
+#      архив с "правильным" именем не должен пройти молча (тот же принцип, что у GAP-212).
+
+
+def _fetch_installer_meta(client, target: str) -> dict:
+    payload, _headers = client.get_json(f"{INSTALLER_PREFIX}/{target}/meta")
+    if not isinstance(payload, dict):
+        raise ChannelError(
+            "Метаданные установщика пришли не объектом JSON — обновление не применяется",
+            kind="bad_response",
+        )
+    return payload
+
+
+def _fetch_installer_sidecar(client, target: str) -> dict:
+    payload, _headers = client.get_json(f"{INSTALLER_PREFIX}/{target}/signature")
+    if not isinstance(payload, dict):
+        raise ChannelError(
+            "Сайдкар подписи установщика пришёл не объектом JSON — обновление не применяется",
+            kind="signature_not_available",
+        )
+    return payload
+
+
+def check_installer(client, version: str = LATEST) -> dict:
+    """Дешёвая проверка «есть ли опубликованный установщик» — `GET .../meta`, БЕЗ
+    скачивания тела. `404 installer not configured` (издатель не выложил установщик
+    для этой версии, ЛИБО канал вовсе не сконфигурирован на бэкенде) превращается в
+    typed-отказ `installer_not_available` — штатный молчаливый пропуск, не ошибка
+    (симметрично `release not configured` у `check()` выше)."""
+    target, note = _resolve_target(version)
+    try:
+        meta = _fetch_installer_meta(client, target)
+    except ChannelError as exc:
+        if exc.kind == "http_error" and exc.http_status == 404:
+            raise ChannelError(
+                "Установщик для этой версии не опубликован издателем",
+                kind="installer_not_available",
+            ) from None
+        raise
+    meta["note"] = note
+    return meta
+
+
+def stage_installer(client, state, ctx, version: str = LATEST) -> dict:
+    """Скачать установщик в стейджинг и полностью его проверить (сайдкар, `kind`,
+    PE-заголовок). Дословный порядок шагов `stage()` выше (meta → signed → pubkey →
+    скачивание с докачкой → размер/sha256 → сайдкар → атомарное переименование), с
+    единственным содержательным отличием — обязательный `expected_kind="installer"`
+    при проверке подписи (ADR-0048 п.2/п.4) и своё имя слота состояния
+    (`rel["installer_staged"]`, НЕ трогает `rel["staged"]` релизного канала)."""
+    rel = state.releases
+    target, note = _resolve_target(version)
+
+    meta = _fetch_installer_meta(client, target)
+    filename = _safe_filename(meta.get("filename"))
+    if not _INSTALLER_FILENAME_RE.match(filename):
+        raise ChannelError(
+            f"Издатель выложил файл {filename!r} с именем, не подходящим под шаблон "
+            f"установщика bpmkit-setup-<version>.exe — обновление не применяется "
+            f"(ADR-0048 п.3).",
+            kind="artifact_kind_mismatch",
+        )
+    expected_sha = _norm_hex(meta.get("sha256"))
+    if not _SHA256_RE.match(expected_sha):
+        raise ChannelError(
+            "Метаданные установщика не содержат корректной контрольной суммы sha256 — "
+            "обновление не применяется",
+            kind="bad_response",
+        )
+    size_bytes = _int_or_none(meta.get("size_bytes")) or 0
+    meta_version = str(meta.get("version") or "").strip()
+    signed_flag = bool(meta.get("signed"))
+
+    if not signed_flag:
+        raise ChannelError(
+            f"Сервер не подтвердил подпись установщика {filename} (signed: false) — "
+            f"файл не скачивается и не применяется",
+            kind="signature_not_available",
+        )
+
+    pubkey_raw = signature.decode_pubkey(getattr(ctx, "artifact_pubkey", ""))
+
+    staging = _staging_dir(ctx) / "installer"
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ChannelError(
+            f"Не удалось создать каталог подготовки установщика {staging}: {exc}",
+            kind="local_io",
+        ) from None
+    part = staging / (filename + PART_SUFFIX)
+
+    resume_from = _resume_offset(rel, part, expected_sha, size_bytes, slot="installer_partial")
+
+    resumed = False
+    if size_bytes and resume_from == size_bytes:
+        resumed = True
+    else:
+        try:
+            result = client.download(f"{INSTALLER_PREFIX}/{target}", part,
+                                     resume_from=resume_from,
+                                     expected_size=size_bytes or None)
+        except ChannelError as exc:
+            if exc.kind == "range_invalid":
+                rel["installer_partial"] = None
+                state.save()
+                raise
+            rel["installer_partial"] = _partial_record(target, filename, expected_sha, size_bytes, part)
+            state.save()
+            raise
+        resumed = bool(isinstance(result, dict) and result.get("resumed"))
+
+    actual_size = _size_on_disk(part)
+
+    if size_bytes and actual_size < size_bytes:
+        rel["installer_partial"] = _partial_record(target, filename, expected_sha, size_bytes, part)
+        state.save()
+        raise ChannelError(
+            f"Файл установщика скачан не полностью: {actual_size} из {size_bytes} байт — "
+            f"докачаем на следующей проверке",
+            kind="offline",
+        )
+    if size_bytes and actual_size > size_bytes:
+        _unlink_quietly(part)
+        rel["installer_partial"] = None
+        state.save()
+        raise ChannelError(
+            f"Размер скачанного установщика больше объявленного ({actual_size} против "
+            f"{size_bytes} байт) — данные отброшены",
+            kind="integrity_mismatch",
+        )
+
+    try:
+        actual_sha = fsutil.sha256_file(part)
+    except OSError as exc:
+        raise ChannelError(
+            f"Не удалось посчитать контрольную сумму скачанного установщика {part}: {exc}",
+            kind="local_io",
+        ) from None
+    if actual_sha != expected_sha:
+        _unlink_quietly(part)
+        rel["installer_partial"] = None
+        state.save()
+        raise ChannelError(
+            f"Контрольная сумма скачанного установщика не сошлась с метаданными "
+            f"(ожидался sha256 …{expected_sha[-8:]}, получен …{actual_sha[-8:]}) — "
+            f"данные отброшены",
+            kind="integrity_mismatch",
+        )
+
+    try:
+        sidecar = _fetch_installer_sidecar(client, target)
+        verified = signature.verify_artifact(
+            part, sidecar, pubkey_raw,
+            expected_name=filename, expected_sha256=expected_sha,
+            expected_kind="installer")
+    except ChannelError:
+        rel["installer_partial"] = _partial_record(target, filename, expected_sha, size_bytes, part)
+        state.save()
+        raise
+
+    try:
+        with open(part, "rb") as fh:
+            head = fh.read(len(_PE_MAGIC))
+    except OSError as exc:
+        raise ChannelError(
+            f"Скачанный установщик {part} не читается ({exc}) — обновление не применяется.",
+            kind="local_io",
+        ) from None
+    if head != _PE_MAGIC:
+        _unlink_quietly(part)
+        rel["installer_partial"] = None
+        state.save()
+        raise ChannelError(
+            f"Скачанный файл {filename} не является исполняемым Windows-файлом "
+            f"(нет PE-заголовка MZ) — обновление не применяется.",
+            kind="artifact_type_mismatch",
+        )
+
+    final = staging / filename
+    try:
+        fsutil.replace_with_retry(part, final)
+    except OSError as exc:
+        raise ChannelError(
+            f"Не удалось поместить проверенный установщик в стейджинг ({final}): {exc}",
+            kind="local_io",
+        ) from None
+    _cleanup_staging(staging, keep=final.name)
+
+    record = {
+        "version": meta_version or (target if target != LATEST else ""),
+        "filename": filename,
+        "path": str(final),
+        "sha256": actual_sha,
+        "size_bytes": actual_size,
+        "signed": True,
+        "key_id": verified.get("key_id"),
+        "signed_at": verified.get("signed_at"),
+        "target": target,
+        "staged_at": utc_now_iso(),
+        "sidecar": sidecar,
+    }
+    rel["installer_staged"] = record
+    rel["installer_partial"] = None
+    detail = (f"Установщик {record['version'] or 'latest'} подготовлен и проверен; "
+              f"установка — по явной команде пользователя")
+    state.mark("releases", "ok", (note + ". " if note else "") + detail)
+    state.save()
+
+    out = {key: value for key, value in record.items() if key != "sidecar"}
+    out["resumed"] = resumed
+    out["reason"] = "installer_staged"
+    out["note"] = note
+    return out
+
+
+def staged_installer_info(state) -> Optional[dict]:
+    """Карточка подготовленного установщика для UI/CLI — сайдкар наружу не отдаётся
+    (симметрично `staged_info` выше)."""
+    record = state.releases.get("installer_staged")
+    if not isinstance(record, dict):
+        return None
+    return {key: value for key, value in record.items() if key != "sidecar"}
+
+
+def apply_installer(state, ctx, *, target: Optional[str] = None) -> dict:
+    """ЗАПУСТИТЬ подготовленный установщик (ADR-0048 п.4/п.5) — НЕ подменить им
+    файл. Решение владельца 19.09.2026: тихая установка, но кнопку нажимает
+    человек (SECURITY.md §4.1 не нарушается — см. ADR-0048 «Решение» п.5): этот
+    вызов — явное действие пользователя из CLI/UI, после предпросмотра версий,
+    точно так же, как `apply_staged` вызывается только явной командой.
+
+    Порядок проверок, все ДО запуска процесса (тот же fail-closed принцип, что
+    у `apply_staged`):
+      1. подготовленный установщик вообще есть (`nothing_staged`);
+      2. `kind` сайдкара — ПОВТОРНО, ЗАНОВО, тем же путём, что при `stage_installer`
+         (между подготовкой и запуском проходит время, файл в стейджинге могли
+         подменить — та же логика, что перепроверка подписи в `apply_staged`);
+      3. PE-заголовок MZ (файл на диске за это время не подменили на нечто другое);
+      4. установленный публичный ключ ещё соответствует ожидаемому (переиспользуется
+         тот же сайдкар, сохранённый при подготовке).
+
+    Установщик запускается В ФОНЕ (`standkit.platform.spawn_hidden`, НЕ `subprocess.run` — вызывающая
+    сторона не обязана ждать конца Inno Setup) с флагами тихой установки; он сам
+    останавливает и поднимает хаб (ADR-0048 п.7, GAP-276 п.1) и обновляет MCP/скиллы —
+    канал здесь его только ЗАПУСКАЕТ, дальше это ответственность установщика."""
+    rel = state.releases
+    record = rel.get("installer_staged")
+    if not isinstance(record, dict) or not record.get("path"):
+        raise ChannelError(
+            "Подготовленного установщика нет — сначала выполните проверку и подготовку "
+            "обновления",
+            kind="nothing_staged",
+        )
+    if target is not None and str(record.get("version") or "") != str(target):
+        raise ChannelError(
+            f"Подготовлен установщик версии {record.get('version')!r}, а запрошено "
+            f"применение версии {target!r} — подготовьте нужную версию заново",
+            kind="nothing_staged",
+        )
+
+    src = Path(record["path"])
+    if not src.is_file():
+        rel["installer_staged"] = None
+        state.save()
+        raise ChannelError(
+            f"Подготовленный установщик исчез с диска ({src}) — подготовьте обновление "
+            f"заново",
+            kind="nothing_staged",
+        )
+
+    sidecar = record.get("sidecar")
+    pubkey_raw = signature.decode_pubkey(getattr(ctx, "artifact_pubkey", ""))
+    verified = signature.verify_artifact(
+        src, sidecar, pubkey_raw,
+        expected_name=record.get("filename"), expected_sha256=record.get("sha256"),
+        expected_kind="installer")
+
+    try:
+        with open(src, "rb") as fh:
+            head = fh.read(len(_PE_MAGIC))
+    except OSError as exc:
+        raise ChannelError(
+            f"Подготовленный установщик {src.name} не читается ({exc}) — установка не "
+            f"запущена.",
+            kind="local_io",
+        ) from None
+    if head != _PE_MAGIC:
+        raise ChannelError(
+            f"Подготовленный установщик {src.name} потерял PE-заголовок — установка не "
+            f"запущена, обратитесь к издателю.",
+            kind="artifact_type_mismatch",
+        )
+
+    # Тихий фоновый запуск БЕЗ консольного окна — через `standkit.platform.spawn_hidden`,
+    # ЕДИНУЮ точку запуска процессов пакета (GAP-138): голый `subprocess.Popen` вне
+    # `standkit/platform.py` запрещён и стережётся `tests/test_no_window.py` статически
+    # (родитель — `pythonw.exe`/служба без своей консоли, и без CREATE_NO_WINDOW каждый
+    # дочерний процесс мигнул бы чёрным окном). Лог установщика — рядом со стейджингом,
+    # НЕ теряется между тиками (используется при диагностике «установка не завершилась»).
+    log_path = companion_workdir(ctx) / "installer_install.log"
+    try:
+        pid = spawn_hidden(
+            [str(src), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+            cwd=src.parent, log_path=log_path)
+    except ProcessError as exc:
+        raise ChannelError(
+            f"Не удалось запустить установщик {src}: {exc}",
+            kind="local_io",
+        ) from None
+
+    launched_at = utc_now_iso()
+    rel["installer_launched"] = {
+        "version": record.get("version"),
+        "path": str(src),
+        "pid": pid,
+        "launched_at": launched_at,
+        "key_id": verified.get("key_id"),
+        "log": str(log_path),
+    }
+    state.mark("releases", "ok",
+               f"Установщик {record.get('version') or ''} запущен (pid={pid}) — "
+               f"MCP, диспетчер и скиллы обновит он сам; диспетчер перезапустится "
+               f"автоматически (ADR-0048).")
+    state.save()
+
+    return {
+        "launched": True,
+        "version": record.get("version"),
+        "pid": pid,
+        "path": str(src),
+        "key_id": verified.get("key_id"),
+        "launched_at": launched_at,
+        "log": str(log_path),
+        "reason": "installer_launched",
     }
 
 

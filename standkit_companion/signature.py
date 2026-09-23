@@ -188,7 +188,8 @@ def _tail(digest: str, size: int = 8) -> str:
 
 def verify_artifact(path: PathLike, sidecar: dict, pubkey_raw: bytes, *,
                     expected_name: Optional[str] = None,
-                    expected_sha256: Optional[str] = None) -> dict:
+                    expected_sha256: Optional[str] = None,
+                    expected_kind: Optional[str] = None) -> dict:
     """Полная fail-closed проверка скачанного артефакта по его сайдкару.
 
     Возвращает `{'key_id', 'signed_at', 'sha256', 'size'}` — то, что вызывающий кладёт в
@@ -233,6 +234,23 @@ def verify_artifact(path: PathLike, sidecar: dict, pubkey_raw: bytes, *,
             f"Сайдкар подписи выписан на другой файл: в сайдкаре {sidecar['artifact']!r}, "
             f"ожидался {expected_name!r}",
             kind="signature_not_available",
+        )
+
+    # --- 3б. Роль артефакта внутри подписи (ADR-0048 п.2/п.4, GAP-279) ----------------
+    # `expected_kind` передаётся ТОЛЬКО потоком установщика (см. releases.py::
+    # stage_installer/apply_installer) — обычный релизный поток его не передаёт вовсе
+    # (`None`), и эта проверка для него не выполняется, поведение НЕ меняется (сайдкары
+    # релизов на проде на 23.09.2026 поля `kind` могут не нести, см. докстринг
+    # `app.releases.signature_of`, dev-репо BPMkit-backend). Когда `expected_kind` ЗАДАН
+    # (`"installer"`), сравнение СТРОГОЕ: отсутствующее поле тоже отказ, БЕЗ послабления
+    # «подразумевается server» -- у канала установщика легаси-сайдкаров не существует
+    # (симметрично серверной проверке `app.installer.signature_of`). Это и есть клиентский
+    # отказ «kind не совпал с ожидаемым» из ADR-0048 п.4 -- ДО касания диска установщиком.
+    if expected_kind is not None and sidecar.get("kind") != expected_kind:
+        raise ChannelError(
+            f"Сайдкар подписи выписан для роли {sidecar.get('kind')!r}, ожидалась "
+            f"{expected_kind!r} — артефакт не применяется (ADR-0048)",
+            kind="artifact_kind_mismatch",
         )
 
     # --- 4. Размер --------------------------------------------------------------------
