@@ -56,6 +56,21 @@
 означает «докачаем», `integrity_mismatch` — «данные испорчены, начнём заново»,
 `artifact_signature_invalid` — «повторять бессмысленно, зовите человека». Один общий
 «ошибка обновления» превратил бы подмену бинаря в мигающую сетевую ошибку.
+
+**6. `requires_installer` (GAP-463) останавливает `stage`/`apply_staged` РАНЬШЕ, чем
+успевает начаться скачивание или подмена.** Канал подменяет РОВНО ОДИН файл — бинарь
+сервера; блок запуска в конфиге хоста, требования рантайма и состав поставки вне
+бинаря он не трогает вовсе. Издатель, объявивший в `GET /v1/version/latest`
+(попутный запрос `_update_release_notes`, симметрично `release_notes`/`known_issues`)
+`requires_installer: true` для версии `release_notes_version`, тем самым говорит:
+эту версию тихой подменой поставить нельзя. Тот же принцип, что у `signed: false`
+(п.3) — отказ ДО скачивания, а не после: клиент, который сначала качает и только
+потом решает, что делать с файлом, тратит трафик пользователя на артефакт, который
+и так не будет применён. Планировщик (`runner._run_releases`) и опция
+«check_update» (GAP-241) читают тот же признак и просто НЕ вызывают `stage` —
+без исключения: это не отказ автоматики, а штатный пропуск шага, тем не менее
+явная команда `stage_update`/`apply_update` человека получает честный typed-отказ
+(`kind="requires_installer"`), а не молчание.
 """
 from __future__ import annotations
 
@@ -88,6 +103,7 @@ __all__ = [
     "rollback",
     "prune_backups",
     "staged_info",
+    "staged_requires_installer",
     "read_runtime_marker",
 ]
 
@@ -468,6 +484,38 @@ def _update_release_notes(state, client, current_version: Optional[str]) -> None
     rel["release_notes_version"] = str(payload.get("latest") or "").strip() or None
     rel["release_notes"] = [str(item) for item in notes] if isinstance(notes, list) else []
     rel["known_issues"] = [str(item) for item in issues] if isinstance(issues, list) else []
+    # GAP-463: поле — булево для `latest` ВСЕГДА (контракт бэкенда, симметрично
+    # `release_notes`). `is True` — намеренно строгая проверка ТИПА, а не истинности:
+    # отсутствие поля (`None`), отсутствие записи для `latest` (эндпоинт всё равно
+    # отдаёт ключ со значением по умолчанию) и мусор (строка `"true"`, `1`, `{}`) —
+    # всё это ОДНО И ТО ЖЕ «false» по контракту (обратная совместимость со старым
+    # бэкендом, который поля не пришлёт вовсе). `bool(1)`/`bool("false")` здесь дали
+    # бы `True` на мусоре — ровно то, чего контракт запрещает.
+    rel["requires_installer"] = payload.get("requires_installer") is True
+
+
+def _flagged_version_requires_installer(rel: dict, version: str) -> bool:
+    """`True`, если `version` — ТА САМАЯ версия, для которой издатель поднял
+    `requires_installer` (GAP-463). Общая проверка `stage`/`apply_staged`/
+    `staged_requires_installer` — три места должны видеть ОДНО решение, а не разные
+    сравнения версий.
+
+    Флаг в состоянии — булев и БЕЗ версии внутри себя (контракт бэкенда: булево для
+    `latest`, см. `_update_release_notes`), поэтому «та самая версия» — это
+    `rel["release_notes_version"]`, снятый ПОПУТНО, тем же запросом. Сравнение —
+    `compare_versions`, не строкой (`"0.310.0"` и `"0.310"` — одна версия).
+
+    Сравнить НЕЧЕМ (пустая `version` или пустой `release_notes_version`) — тоже
+    `True`: канал не вправе истолковать «не знаю» как разрешение подменить бинарь,
+    когда издатель уже сказал «эту тихо не ставь».
+    """
+    if not rel.get("requires_installer"):
+        return False
+    flagged = str(rel.get("release_notes_version") or "").strip()
+    version = str(version or "").strip()
+    if not flagged or not version:
+        return True
+    return compare_versions(version, flagged) == 0
 
 
 # ======================================================================================
@@ -507,6 +555,7 @@ def check(client, state, ctx) -> dict:
             "available": False, "latest": rel.get("known_latest"), "current": current,
             "signed": None, "size_bytes": None, "etag": rel.get("etag"),
             "reason": "not_modified", "target": LATEST, "filename": None, "sha256": None,
+            "requires_installer": bool(rel.get("requires_installer")),
         }
     except ChannelError as exc:
         # 404 БЕЗ разобранного `detail` — не «неизвестная ошибка», а тот же самый
@@ -528,6 +577,7 @@ def check(client, state, ctx) -> dict:
                 "signed": None, "size_bytes": None, "etag": None,
                 "reason": "release_not_configured", "target": LATEST,
                 "filename": None, "sha256": None,
+                "requires_installer": bool(rel.get("requires_installer")),
             }
         raise
 
@@ -567,7 +617,8 @@ def check(client, state, ctx) -> dict:
     rel["known_latest"] = latest or None
     rel["etag"] = etag
 
-    detail = _check_detail(available, reason, latest, current, signed)
+    requires_installer = bool(rel.get("requires_installer"))
+    detail = _check_detail(available, reason, latest, current, signed, requires_installer)
     state.mark("releases", "ok", detail)
     state.save()
 
@@ -583,17 +634,29 @@ def check(client, state, ctx) -> dict:
         "target": target,
         "filename": str(meta.get("filename") or "") or None,
         "sha256": sha256 or None,
+        # GAP-463: та же версия, о которой отчитывается `latest` — установщик или
+        # тихая подмена файла. Читают `runner._run_releases` (гасит авто-стейдж) и
+        # UI хаба (карточка «MCP-сервер BPMkit»).
+        "requires_installer": requires_installer,
     }
 
 
 def _check_detail(available: bool, reason: str, latest: str,
-                  current: Optional[str], signed: bool) -> str:
+                  current: Optional[str], signed: bool,
+                  requires_installer: bool = False) -> str:
     """Человеческая строка исхода проверки для состояния и UI."""
     if reason == "version_unknown_use_latest":
         return ("Издатель не сообщил номер версии релиза — обновление доступно только по "
                 "пути «latest»")
     if not available:
         return f"Установлена актуальная версия ({current or 'неизвестно'})"
+    # GAP-463: проверяется РАНЬШЕ подписи — версия, которая ставится установщиком,
+    # тихой подменой не будет доставлена независимо от того, подтверждена подпись
+    # или нет (сама подпись артефакта тут ни при чём: канал его и не скачает).
+    if requires_installer:
+        return (f"Доступна версия {latest}, но она ставится установщиком — тихим "
+                f"обновлением её доставить нельзя. Скачайте новую поставку и "
+                f"запустите установку")
     if not signed:
         return (f"Доступна версия {latest}, но её подпись сервером не подтверждена — "
                 f"обновление не будет скачано")
@@ -610,6 +673,10 @@ def stage(client, state, ctx, version: str = "latest", *,
     Порядок шагов не произволен — сначала всё, что позволяет НЕ качать десятки мегабайт:
 
     1. `/meta` (дёшево) → имя, размер, sha256, `signed`;
+    1б. `requires_installer` (GAP-463) у версии, которую называет `/meta`, → отказ
+        **до** скачивания, ещё раньше проверки подписи: версия, которую издатель велел
+        ставить установщиком, каналом не доставляется независимо от того, подписана
+        она или нет;
     2. `signed: false` → отказ **до** скачивания. Это не «издатель забыл подписать», а
        «подпись этого файла не подтверждена» (сервер сверяет сайдкар с файлом);
     3. публичный ключ из поставки (`ctx.artifact_pubkey`) → плейсхолдер/пусто даёт
@@ -647,6 +714,24 @@ def stage(client, state, ctx, version: str = "latest", *,
     size_bytes = _int_or_none(meta.get("size_bytes")) or 0
     meta_version = str(meta.get("version") or "").strip()
     signed_flag = bool(meta.get("signed"))
+
+    # --- 1б. Установщик (GAP-463): ещё раньше «signed», не тратим трафик вовсе ----------
+    # Издатель объявил `requires_installer: true` для версии `release_notes_version`
+    # (попутный запрос `_update_release_notes`, всегда ходит раньше сетевого похода за
+    # самим релизом — см. `check`). Совпадение версий сравнивается ЧИСЛОМ
+    # (`compare_versions`), а не строкой: `meta_version` приходит из `/meta` ЭТОГО
+    # похода, `release_notes_version` — из отдельного эндпоинта, и лишний ноль в
+    # хвосте одной из них не должен превратить совпадающие версии в разные. Если
+    # сверить нечем (сервер не назвал номер ни там, ни там) — отказ тоже: канал не
+    # имеет права положиться на «наверное, это другая версия» там, где издатель уже
+    # сказал «эту тихо не ставь».
+    if _flagged_version_requires_installer(rel, meta_version or target):
+        raise ChannelError(
+            f"Версия {meta_version or target} ставится установщиком — обновление "
+            f"не скачивается и не применяется каналом. Скачайте новую поставку и "
+            f"запустите установку",
+            kind="requires_installer",
+        )
 
     # --- 2. Подпись не подтверждена сервером: не тратим трафик вовсе --------------------
     if not signed_flag and not allow_unsigned:
@@ -882,6 +967,23 @@ def staged_info(state) -> Optional[dict]:
     return {key: value for key, value in record.items() if key != "sidecar"}
 
 
+def staged_requires_installer(state) -> bool:
+    """Подготовленный файл — та самая версия, которую издатель объявил ставящейся
+    установщиком (GAP-463)? Только для `available_actions`/UI: решает, гасить ли
+    кнопку «Установить» заранее, а не после честного отказа `apply_staged`.
+
+    `staged_info` при этом НЕ вызывается и файл на диске никак не трогает — это
+    отдельный, более дешёвый вопрос («можно ли ЭТО применить»), а не «есть ли что
+    применять» (за это отвечает `staged_info`, и вызывающий обязан проверить его
+    первым — см. `runner.available_actions`).
+    """
+    rel = state.releases
+    record = rel.get("staged")
+    if not isinstance(record, dict):
+        return False
+    return _flagged_version_requires_installer(rel, str(record.get("version") or ""))
+
+
 # ======================================================================================
 # Применение
 # ======================================================================================
@@ -983,6 +1085,12 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
     месте нетронутой, а наружу уходит `local_io` с текстом, прямо говорящим, что надо
     закрыть Claude Desktop.
 
+    **Ещё раньше — GAP-463.** Прежде мьютекса и подписи — гонка «версию объявили
+    установщиком уже ПОСЛЕ того, как файл лёг в стейджинг» (штатный путь эту версию
+    туда и не пустит, см. `stage`, шаг «1б»). Подготовленный файл при этом не трогается
+    и не отзывается: подпись доказана, данные целы, единственная причина отказа —
+    политика доставки, а не порча.
+
     **До бэкапа и до любой мутации (GAP-161)** — две дополнительные проверки, ОБЕ
     fail-fast (отказывают раньше, backup/подмена не трогаются) и не заменяют, а
     дополняют друг друга и финальный `replace_with_retry`:
@@ -1024,6 +1132,25 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
         raise ChannelError(
             f"Подготовленный файл обновления не найден ({src}) — подготовьте его заново",
             kind="nothing_staged",
+        )
+
+    # --- GAP-463, проверка 0: установщик — РАНЬШЕ мьютекса и подписи ---------------------
+    # `stage` (см. её докстринг, шаг «1б») уже отказывает СКАЧИВАТЬ версию с флагом —
+    # то есть в обычном ходе канала этот код мёртв: файл с таким флагом просто не
+    # окажется в `staged`. Проверка здесь — не дублирование, а защита от ГОНКИ: между
+    # `stage` (файл подготовлен, флага ещё не было) и нажатием «Установить» издатель
+    # мог объявить `requires_installer` для этой самой версии. `staged_info`
+    # (см. её докстринг) файл при этом НЕ трогает и НЕ удаляет — незачем: подпись
+    # уже проверена, данные не испорчены, применить их нельзя ровно по ЭТОЙ причине,
+    # и она может исчезнуть так же, как появилась (издатель снял флаг).
+    staged_version = str(record.get("version") or "").strip()
+    if _flagged_version_requires_installer(rel, staged_version):
+        raise ChannelError(
+            f"Версия {staged_version or 'обновления'} ставится установщиком — "
+            f"подмена бинаря каналом запрещена. Подготовленный файл сохранён, "
+            f"установленная версия не тронута. Скачайте новую поставку и "
+            f"запустите установку",
+            kind="requires_installer",
         )
 
     # --- GAP-161, проверка 1: детект по именованному мьютексу сервера (Windows) ----------

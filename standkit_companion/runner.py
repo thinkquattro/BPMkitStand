@@ -187,24 +187,35 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
     Наличие подготовленного обновления проверяется `releases.staged_info` (то есть ФАЙЛОМ
     на диске, а не записью в состоянии): антивирус мог унести `.exe` в карантин, и запись
     без файла — это «нечего применять».
+
+    `apply_update` дополнительно гасится, когда подготовленный файл — это именно ТА
+    версия, которую издатель объявил ставящейся установщиком (GAP-463, гонка описана в
+    докстринге `releases.apply_staged`): кнопка не должна обещать действие, которое
+    `run_action` всё равно honest-но отклонит. `stage_update` НЕ гасится здесь заранее —
+    в отличие от `apply_update` он не привязан к одной версии (им адресуются к конкретной
+    произвольной версии, включая версии СТАРШЕ или младше флагового latest), и решение
+    принимает сама `releases.stage` в момент вызова, когда версия уже известна.
     """
     enabled = bool(getattr(settings, "enabled", False))
     staged = False
     history = False
+    staged_requires_installer = False
     if state is not None:
         try:
             staged = releases.staged_info(state) is not None
             history = bool(state.releases.get("history"))
+            staged_requires_installer = staged and releases.staged_requires_installer(state)
         except (OSError, AttributeError, TypeError):
             # Недоступный/непрочитанный диск не имеет права уронить ответ статуса: в этом
             # случае честно «действие недоступно».
             staged = False
             history = False
+            staged_requires_installer = False
     return {
         "sync_patterns": enabled,
         "check_update": enabled,
         "stage_update": enabled,
-        "apply_update": enabled and staged,
+        "apply_update": enabled and staged and not staged_requires_installer,
         "rollback": enabled and history,
         "refresh_revocations": enabled,
     }
@@ -518,10 +529,19 @@ class CompanionRunner:
         останавливается перед этой чертой: скачанный файл лежит в стейджинге, ничего в
         поставке не тронуто, и до нажатия кнопки продолжает работать прежняя версия.
         Отдельный регресс-тест проверяет, что планировщик `apply_staged` не трогает.
+
+        GAP-463: `requires_installer` гасит автостейдж ТЕМ ЖЕ способом, что и
+        `available` — условием, а не исключением. `releases.stage` и сама отказала бы
+        typed-ошибкой, но она НЕ retriable (`errors.KIND_TITLES`), и просочись это
+        исключение сюда, `_execute` пометил бы весь цикл `releases` остановленным
+        (`runtime.halted`) — то есть заодно заглушил бы и саму ПРОВЕРКУ обновлений,
+        которая тут ни при чём и обязана продолжать тикать (мало ли, издатель снимет
+        флаг с этой версии или выпустит другую, без него).
         """
         check = releases.check(session.client, self._state, session.ctx)
         staged = None
-        if check.get("available") and bool(getattr(settings, "auto_stage_release", False)):
+        if (check.get("available") and not check.get("requires_installer")
+                and bool(getattr(settings, "auto_stage_release", False))):
             staged = releases.stage(session.client, self._state, session.ctx,
                                     check.get("target") or "latest")
         return {"check": check, "staged": staged,
@@ -757,9 +777,17 @@ class CompanionRunner:
                 # церемонией: ни одно из них не подменяет бинарь — скачанный файл лежит в
                 # стейджинге до явного «Применить» (SECURITY.md §4.1). Отдельное действие
                 # `stage_update` остаётся рабочим: им адресуются к КОНКРЕТНОЙ версии.
+                #
+                # GAP-463: найденную версию с `requires_installer` эта опортунистическая
+                # подготовка тоже пропускает — БЕЗ исключения, тем же способом, что и
+                # планировщик (`_run_releases`). Причина та же: «Проверить обновление» —
+                # это в первую очередь ПРОВЕРКА, и её результат (номер новой версии, нотсы)
+                # обязан дойти до человека, а не потеряться за отказом попутного стейджа.
+                # Явное `stage_update`/`apply_update` эту же версию по-прежнему отклонит
+                # typed-ошибкой — см. `releases.stage`/`releases.apply_staged`.
                 check = releases.check(session.client, self._state, session.ctx)
                 staged = None
-                if check.get("available"):
+                if check.get("available") and not check.get("requires_installer"):
                     staged = releases.stage(session.client, self._state, session.ctx,
                                             check.get("target") or "latest")
                 result = dict(check)

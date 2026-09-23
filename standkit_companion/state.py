@@ -95,6 +95,13 @@ def _default_state() -> dict:
             "release_notes_version": None,
             "release_notes": [],
             "known_issues": [],
+            # GAP-463: издатель объявил, что версия `release_notes_version` ставится
+            # ТОЛЬКО установщиком (`requires_installer` в `GET /v1/version/latest`,
+            # булево, СИММЕТРИЧНО остальным полям попутного запроса выше). `False` —
+            # значение по умолчанию и единственно верная трактовка отсутствия поля,
+            # отсутствия записи для `latest` и мусора в поле (обратная совместимость
+            # со старым бэкендом — см. докстринг `releases._update_release_notes`).
+            "requires_installer": False,
         },
         # GAP-361: узкий поток кукбука. Отдельная секция, а не поле внутри
         # `releases`, — по той же причине, по которой отдельный модуль
@@ -297,6 +304,11 @@ class CompanionState:
                 "release_notes_version": rel.get("release_notes_version"),
                 "release_notes": list(rel.get("release_notes") or []),
                 "known_issues": list(rel.get("known_issues") or []),
+                # GAP-463: `True` — обновление до `release_notes_version` ставится
+                # установщиком, канал его не стейджит и не подменяет им бинарь (см.
+                # `releases.stage`/`releases.apply_staged`); UI диспетчера не должен
+                # предлагать тихую установку в этом состоянии.
+                "requires_installer": bool(rel.get("requires_installer")),
             },
             "cookbook": {
                 "last_check_at": cb.get("last_check_at"),
