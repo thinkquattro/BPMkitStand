@@ -380,6 +380,7 @@
       // истекла/отозвана) приходит отдельным снимком — см. renderAboutUpdates.
       renderAboutUpdates(data.edition);
       checkVersionSkew(hubVersion);
+      reportInstallOutcome();
     } catch (e) {
       el.textContent = `ошибка: ${describeApiError(e)}`;
     }
@@ -2310,6 +2311,9 @@
     apply_update: "/api/companion/apply-update",
     rollback: "/api/companion/rollback",
     refresh_revocations: "/api/companion/revocations",
+    // GAP-279 (ADR-0048): установщик как артефакт обновления.
+    stage_installer: "/api/companion/stage-installer",
+    apply_installer: "/api/companion/apply-installer",
   };
 
   // Подпись занятой кнопки: «Обновляем…» честнее универсального «Подождите» —
@@ -2319,6 +2323,8 @@
     check_update: "Проверяем…",
     apply_update: "Устанавливаем…",
     rollback: "Откатываем…",
+    stage_installer: "Скачиваем установщик…",
+    apply_installer: "Запускаем установщик…",
   };
 
   const COMPANION_ACTION_DONE = {
@@ -2326,6 +2332,8 @@
     check_update: "Проверка обновлений выполнена",
     apply_update: "MCP обновлён",
     rollback: "Откат выполнен",
+    stage_installer: "Установщик скачан и проверен",
+    apply_installer: "Установщик запущен",
   };
 
   // Почему действие сейчас недоступно. Кнопка не прячется — она выключается и
@@ -2333,9 +2341,15 @@
   const COMPANION_ACTION_REASONS = {
     apply_update: "Устанавливать нечего: новая версия ещё не скачана",
     rollback: "Откатываться не на что: канал ещё не устанавливал обновлений на этой машине",
+    apply_installer: "Устанавливать нечего: установщик новой версии ещё не скачан — нажмите «Проверить обновления»",
+    stage_installer: "Скачать установщик сейчас нельзя",
   };
   const COMPANION_DISABLED_REASON =
     "Канал обновлений выключен в настройках (Настройки → Обновления)";
+
+  // Фоновый опрос статуса канала (GAP-279): статус дешёвый (без запуска CLI), тики
+  // канала — часы, поэтому раз в 5 минут достаточно для уведомления.
+  const COMPANION_BACKGROUND_POLL_MS = 300000;
 
   let companionAvailable = true;
   let companionBusy = false;
@@ -2387,15 +2401,422 @@
     const rel = releasesBlock(status);
     if (rel.restart_required) return true;
     if (rel.staged_version) return true;
+    if (pendingInstaller(status)) return true;
     const latest = rel.known_latest;
     const current = rel.current_version;
     return !!(latest && current && String(latest) !== String(current));
   }
 
   function renderUpdatesBadge(status) {
+    const news = companionHasNews(status);
     const badge = byId("updates-badge");
-    if (!badge) return;
-    badge.hidden = !companionHasNews(status);
+    if (badge) badge.hidden = !news;
+    // GAP-279: фолбэк без разрешения на уведомления — бейдж плюс заголовок вкладки
+    // «(1) Диспетчер…»: вкладку видно в панели браузера, даже когда она не активна.
+    renderDocumentTitle(news);
+  }
+
+  let baseDocumentTitle = null;
+
+  function renderDocumentTitle(news) {
+    if (baseDocumentTitle === null) {
+      baseDocumentTitle = String(document.title || "").replace(/^\(\d+\)\s*/, "");
+    }
+    const wanted = news ? `(1) ${baseDocumentTitle}` : baseDocumentTitle;
+    if (document.title !== wanted) document.title = wanted;
+  }
+
+  // --- установщик как артефакт обновления (GAP-279, ADR-0048) ---
+  //
+  // «Установить обновление» не подменяет bpmkit.exe, а ЗАПУСКАЕТ подписанный
+  // установщик целиком (MCP + диспетчер + скиллы + документация) тихо. Установщик
+  // сам останавливает диспетчер и поднимает его заново — эта страница в этот момент
+  // теряет связь, ждёт новый процесс и перезагружается, показывая новую версию.
+
+  const INSTALL_WAIT_MS = 600000; // 10 минут: установка с обновлением скиллов не мгновенна
+  const INSTALL_POLL_MS = 2000;
+  // Сколько ждать, прежде чем считать «установщик уже завершился, а диспетчер жив»
+  // провалом: процесс установщика стартует не мгновенно, и первые секунды его
+  // `running` может ещё не отражать.
+  const INSTALL_EXIT_GRACE_MS = 15000;
+  // Новый диспетчер отвечает, но эта вкладка — от прежней сессии (401). Новый процесс
+  // сам открывает дашборд в новой вкладке и ставит cookie сессии; ждём её столько.
+  const INSTALL_SESSION_WAIT_MS = 30000;
+  const INSTALL_PENDING_KEY = "standkit-install-pending";
+  const INSTALL_CLOSE_APPS_NOTE =
+    "Закройте Claude Desktop (и другие приложения, где подключён BPMkit) — иначе " +
+    "установщик не сможет заменить MCP-сервер. Диспетчер остановится и поднимется сам, " +
+    "запущенные стенды продолжат работать; эта страница переподключится.";
+
+  function installerBlock(status) {
+    return (status && status.installer) || {};
+  }
+
+  /** Подготовленный установщик, который ещё есть смысл ставить (его версия — не та,
+   * что уже установлена), либо null. */
+  function pendingInstaller(status) {
+    const staged = installerBlock(status).staged;
+    if (!staged || !staged.version) return null;
+    const current = releasesBlock(status).current_version || "";
+    if (current && String(current) === String(staged.version)) return null;
+    return staged;
+  }
+
+  function installerPreviewText(status, staged) {
+    const rel = releasesBlock(status);
+    const mcpFrom = rel.current_version || "неизвестно";
+    const hubFrom = hubVersion || "неизвестно";
+    const hubTo = staged.standkit_version || "версия из комплекта установщика";
+    return `MCP ${mcpFrom} → ${staged.version}, диспетчер ${hubFrom} → ${hubTo}.`;
+  }
+
+  function renderInstallerRow(status) {
+    const staged = pendingInstaller(status);
+    const rel = releasesBlock(status);
+    const latest = rel.known_latest || "";
+    const current = rel.current_version || "";
+    const hasNew = !!(latest && current && String(latest) !== String(current));
+    const installerRequired = hasNew && !!rel.requires_installer;
+
+    const installBtn = byId("upd-installer-btn");
+    if (installBtn) {
+      installBtn.hidden = !staged;
+      if (staged && !companionBusy && installBtn.dataset.idleLabel === undefined) {
+        installBtn.textContent = `Установить обновление ${staged.version}`;
+      }
+    }
+    // Установщик готов, а тихая подмена бинаря этой версии недоступна (GAP-463) —
+    // две кнопки «Установить» рядом только путали бы: остаётся одна, установщиком.
+    const replaceBtn = byId("upd-install-btn");
+    if (replaceBtn) {
+      replaceBtn.hidden = !!staged && ((status && status.actions) || {}).apply_update !== true;
+    }
+    const stageBtn = byId("upd-installer-stage-btn");
+    if (stageBtn) stageBtn.hidden = !(installerRequired && !staged);
+
+    const preview = byId("upd-installer-preview");
+    if (preview) {
+      preview.hidden = !staged;
+      if (staged) preview.textContent = installerPreviewText(status, staged);
+    }
+    if (staged) {
+      byId("upd-mcp-desc").textContent =
+        `Установщик ${staged.version} скачан и проверен: он обновит MCP-сервер, диспетчер, ` +
+        "скиллы и документацию. " + INSTALL_CLOSE_APPS_NOTE;
+    }
+
+    const launched = installerBlock(status).launched;
+    if (launched && launched.running) {
+      setDetail("upd-installer-detail",
+        `Установщик ${launched.version || ""} выполняется — диспетчер перезапустится сам.`);
+    } else {
+      setDetail("upd-installer-detail", "");
+    }
+  }
+
+  function showInstallOverlay(text, hint, closable) {
+    const overlay = byId("install-overlay");
+    if (!overlay) return;
+    byId("install-overlay-text").textContent = text;
+    const hintEl = byId("install-overlay-hint");
+    hintEl.textContent = hint || "";
+    hintEl.hidden = !hint;
+    const footer = byId("install-overlay-footer");
+    if (footer) footer.hidden = !closable;
+    overlay.hidden = false;
+  }
+
+  function hideInstallOverlay() {
+    const overlay = byId("install-overlay");
+    if (overlay) overlay.hidden = true;
+  }
+
+  /** Опрос хаба ТОЛЬКО cookie сессии, без заголовка токена этой вкладки: после
+   * перезапуска токен вкладки устарел, а cookie мог уже обновить новый процесс,
+   * открывший дашборд в новой вкладке. "ok" | "unauthorized" | "down". */
+  async function probeHubByCookie() {
+    try {
+      const resp = await fetch("/api/version", { credentials: "same-origin", cache: "no-store" });
+      if (resp.ok) return "ok";
+      if (resp.status === 401) return "unauthorized";
+      return "down";
+    } catch (e) {
+      return "down";
+    }
+  }
+
+  function rememberPendingInstall(status, staged) {
+    try {
+      sessionStorage.setItem(INSTALL_PENDING_KEY, JSON.stringify({
+        mcpFrom: releasesBlock(status).current_version || "",
+        mcpTo: staged.version || "",
+        hubFrom: hubVersion || "",
+        at: Date.now(),
+      }));
+    } catch (e) {
+      // Приватный режим/запрет хранилища — итог просто не будет показан тостом.
+    }
+  }
+
+  /** После перезагрузки страницы новым диспетчером — сказать, что поменялось. */
+  function reportInstallOutcome() {
+    let pending = null;
+    try {
+      pending = JSON.parse(sessionStorage.getItem(INSTALL_PENDING_KEY) || "null");
+      sessionStorage.removeItem(INSTALL_PENDING_KEY);
+    } catch (e) {
+      pending = null;
+    }
+    if (!pending || !hubVersion) return;
+    if (pending.hubFrom && pending.hubFrom === hubVersion) {
+      toast(`Диспетчер перезапущен, но его версия прежняя (${hubVersion}) — проверьте журнал установки`);
+      return;
+    }
+    toast(`Обновление установлено: диспетчер ${pending.hubFrom || "?"} → ${hubVersion}` +
+      (pending.mcpTo ? `, MCP → ${pending.mcpTo}. Перезапустите Claude Desktop.` : "."));
+  }
+
+  async function waitForInstallerRestart(launch) {
+    const logHint = launch && launch.log ? `Журнал установки: ${launch.log}` : "";
+    showInstallOverlay(
+      "Идёт установка обновления. Диспетчер остановится и поднимется заново — страница переподключится сама.",
+      INSTALL_CLOSE_APPS_NOTE,
+      false
+    );
+    const startedAt = Date.now();
+    const deadline = startedAt + INSTALL_WAIT_MS;
+    let oldHubGone = false;
+    let unauthorizedSince = 0;
+    while (Date.now() < deadline) {
+      await sleep(INSTALL_POLL_MS);
+      if (!oldHubGone) {
+        try {
+          const st = await apiGet("/api/companion/status");
+          const launched = installerBlock(st).launched;
+          if (launched && launched.running === false && Date.now() - startedAt > INSTALL_EXIT_GRACE_MS) {
+            showInstallOverlay(
+              "Установщик завершился, а диспетчер не перезапускался — обновление, скорее всего, не установлено.",
+              "Частая причина — открытый Claude Desktop (MCP-сервер занят). Закройте его и повторите «Установить обновление». " +
+                (launched.log ? `Журнал установки: ${launched.log}` : logHint),
+              true
+            );
+            return;
+          }
+        } catch (e) {
+          // Обрыв связи — старый диспетчер остановлен установщиком: ждём новый.
+          // 401 — отвечает уже НОВЫЙ процесс (старая сессия ему не известна).
+          if (isNetworkError(e) || (e && e.status === 401)) oldHubGone = true;
+        }
+        continue;
+      }
+      const probe = await probeHubByCookie();
+      if (probe === "ok") {
+        window.location.reload();
+        return;
+      }
+      if (probe === "unauthorized") {
+        if (!unauthorizedSince) unauthorizedSince = Date.now();
+        if (Date.now() - unauthorizedSince > INSTALL_SESSION_WAIT_MS) {
+          showInstallOverlay(
+            "Обновление установлено, диспетчер перезапущен — он открылся в новой вкладке браузера.",
+            "Эту вкладку можно закрыть. Если новой вкладки нет — откройте дашборд ярлыком «BPMkit — диспетчер стендов».",
+            true
+          );
+          return;
+        }
+      }
+    }
+    showInstallOverlay(
+      "Не дождались перезапуска диспетчера после установки.",
+      (logHint ? logHint + ". " : "") + "Откройте дашборд ярлыком «BPMkit — диспетчер стендов» и проверьте версию в «О программе».",
+      true
+    );
+  }
+
+  async function installUpdateFlow(btn) {
+    if (companionBusy) return;
+    const status = lastCompanionStatus;
+    const staged = pendingInstaller(status);
+    const errorEl = byId("updates-error");
+    errorEl.textContent = "";
+    if (!staged) {
+      errorEl.textContent = COMPANION_ACTION_REASONS.apply_installer;
+      return;
+    }
+    const confirmed = await styledConfirm(
+      "Установить обновление",
+      `${installerPreviewText(status, staged)} ${INSTALL_CLOSE_APPS_NOTE}`,
+      "Установить"
+    );
+    if (!confirmed) return;
+    companionBusy = true;
+    setButtonBusy(btn, COMPANION_ACTION_BUSY.apply_installer);
+    updateCompanionActions(null);
+    let launched = null;
+    try {
+      const data = await apiSend("POST", COMPANION_ACTION_PATHS.apply_installer,
+        { version: staged.version });
+      launched = (data && data.result) || {};
+      rememberPendingInstall(status, staged);
+    } catch (e) {
+      errorEl.textContent = describeApiError(e);
+    } finally {
+      companionBusy = false;
+      clearButtonBusy(btn);
+    }
+    if (launched) {
+      closeUpdatesDialog();
+      await waitForInstallerRestart(launched);
+    }
+    await refreshCompanionStatus({ quiet: true });
+  }
+
+  // --- уведомления браузера об обновлениях (GAP-279) ---
+  //
+  // Разрешение браузера спрашивается ТОЛЬКО по действию человека — переключателем
+  // «Настройки → Обновления»; сам выбор хранится в браузере (это удобство конкретного
+  // зрителя, а не настройка диспетчера). Каждое событие показывается один раз:
+  // «найдено обновление X» и «X скачано, готово к установке».
+
+  const NOTIFY_PREF_KEY = "standkit-updates-notify";
+  const NOTIFY_SEEN_KEY = "standkit-updates-notified";
+  const NOTIFY_SEEN_LIMIT = 20;
+
+  function notificationsSupported() {
+    return typeof window.Notification === "function";
+  }
+
+  function notificationsWanted() {
+    try {
+      return localStorage.getItem(NOTIFY_PREF_KEY) === "1";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function setNotificationsWanted(on) {
+    try {
+      localStorage.setItem(NOTIFY_PREF_KEY, on ? "1" : "0");
+    } catch (e) {
+      // Хранилище недоступно — переключатель просто не переживёт перезагрузку.
+    }
+  }
+
+  function renderNotifyToggle(message) {
+    const toggle = byId("updates-notify-toggle");
+    const note = byId("updates-notify-note");
+    if (!toggle) return;
+    const supported = notificationsSupported();
+    const permission = supported ? window.Notification.permission : "unsupported";
+    toggle.disabled = !supported;
+    toggle.checked = supported && permission === "granted" && notificationsWanted();
+    let text = message || "";
+    if (!text) {
+      if (!supported) text = "Этот браузер не поддерживает уведомления — о новой версии скажут бейдж на кнопке «Обновления» и заголовок вкладки.";
+      else if (permission === "denied") text = "Уведомления для этой страницы запрещены в настройках браузера — работают бейдж и заголовок вкладки.";
+      else if (!toggle.checked) text = "Без уведомлений о новой версии скажут бейдж на кнопке «Обновления» и заголовок вкладки «(1) …».";
+    }
+    if (note) {
+      note.textContent = text;
+      note.hidden = !text;
+    }
+  }
+
+  function setupUpdateNotifications() {
+    const toggle = byId("updates-notify-toggle");
+    if (!toggle) return;
+    renderNotifyToggle();
+    toggle.addEventListener("change", async () => {
+      if (!toggle.checked) {
+        setNotificationsWanted(false);
+        renderNotifyToggle();
+        return;
+      }
+      if (!notificationsSupported()) {
+        renderNotifyToggle();
+        return;
+      }
+      let permission = window.Notification.permission;
+      if (permission === "default") {
+        try {
+          permission = await window.Notification.requestPermission();
+        } catch (e) {
+          permission = "denied";
+        }
+      }
+      if (permission !== "granted") {
+        setNotificationsWanted(false);
+        renderNotifyToggle("Браузер не разрешил уведомления — о новой версии скажут бейдж и заголовок вкладки.");
+        return;
+      }
+      setNotificationsWanted(true);
+      renderNotifyToggle("Уведомления включены.");
+      if (lastCompanionStatus) maybeNotifyUpdates(lastCompanionStatus);
+    });
+  }
+
+  function notifiedKeys() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(NOTIFY_SEEN_KEY) || "[]");
+      return Array.isArray(raw) ? raw : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function markNotified(key) {
+    try {
+      const keys = notifiedKeys().filter((k) => k !== key);
+      keys.push(key);
+      localStorage.setItem(NOTIFY_SEEN_KEY, JSON.stringify(keys.slice(-NOTIFY_SEEN_LIMIT)));
+    } catch (e) {
+      // см. setNotificationsWanted
+    }
+  }
+
+  /** События уведомлений по снимку канала: найдено обновление / готово к установке. */
+  function updateNotificationEvents(status) {
+    const rel = releasesBlock(status);
+    const current = rel.current_version || "";
+    const latest = rel.known_latest || "";
+    const events = [];
+    if (latest && current && String(latest) !== String(current)) {
+      events.push({
+        key: `found:${latest}`,
+        title: "BPMkit: найдено обновление",
+        body: `Доступна версия ${latest} (установлена ${current}).`,
+      });
+    }
+    const installer = pendingInstaller(status);
+    const ready = installer ? installer.version : (rel.staged_version || "");
+    if (ready && String(ready) !== String(current)) {
+      events.push({
+        key: `ready:${ready}`,
+        title: "BPMkit: обновление готово к установке",
+        body: `Версия ${ready} скачана и проверена. Откройте «Обновления» в диспетчере стендов.`,
+      });
+    }
+    return events;
+  }
+
+  function maybeNotifyUpdates(status) {
+    if (!notificationsSupported() || !notificationsWanted()) return;
+    if (window.Notification.permission !== "granted") return;
+    const seen = notifiedKeys();
+    updateNotificationEvents(status).forEach((evt) => {
+      if (seen.includes(evt.key)) return;
+      markNotified(evt.key);
+      try {
+        const n = new window.Notification(evt.title, { body: evt.body, tag: `bpmkit-${evt.key}` });
+        n.onclick = () => {
+          window.focus();
+          openUpdatesDialog();
+          n.close();
+        };
+      } catch (e) {
+        // Браузер отказал показать (например, политика) — остаются бейдж и заголовок.
+      }
+    });
   }
 
   function setDetail(id, text) {
@@ -2526,6 +2947,7 @@
             : ", чтобы начала работать новая версия: перезагрузка плагина MCP-сервер заново не поднимает.";
     }
 
+    renderInstallerRow(status);
     renderWhatsNew(status);
 
     // Фактическая версия MCP — единая функция-источник правды (см.
@@ -2615,6 +3037,7 @@
     renderMcpRow(status);
     renderUpdatesBadge(status);
     updateCompanionActions(status);
+    maybeNotifyUpdates(status);
 
     const rel = releasesBlock(status);
     byId("updates-checked-at").textContent = rel.last_check_at
@@ -2736,8 +3159,14 @@
 
   function setupUpdatesDialog() {
     document.querySelectorAll("[data-companion-action]").forEach((btn) => {
-      btn.addEventListener("click", () => runCompanionAction(btn.dataset.companionAction, btn));
+      // «Установить обновление» установщиком — свой сценарий: предпросмотр версий,
+      // подтверждение, ожидание перезапуска диспетчера (GAP-279).
+      btn.addEventListener("click", () => (btn.dataset.companionAction === "apply_installer"
+        ? installUpdateFlow(btn)
+        : runCompanionAction(btn.dataset.companionAction, btn)));
     });
+    const installOverlayCloseBtn = byId("install-overlay-close-btn");
+    if (installOverlayCloseBtn) installOverlayCloseBtn.addEventListener("click", hideInstallOverlay);
     byId("btn-updates").addEventListener("click", openUpdatesDialog);
     byId("updates-close-btn").addEventListener("click", closeUpdatesDialog);
     byId("updates-close-footer-btn").addEventListener("click", closeUpdatesDialog);
@@ -3969,6 +4398,12 @@
     // так бейдж «есть новая версия / нужен перезапуск» может зажечься на кнопке
     // в шапке у человека, который в окно не заглядывает.
     refreshCompanionStatus({ quiet: true });
+    // GAP-279: редкий фоновый опрос канала — иначе уведомление «найдено обновление»
+    // и заголовок вкладки срабатывали бы только при открытом окне «Обновления».
+    setInterval(() => {
+      if (companionAvailable && !updatesDialogIsOpen()) refreshCompanionStatus({ quiet: true });
+    }, COMPANION_BACKGROUND_POLL_MS);
+    setupUpdateNotifications();
     // Лицензия — тоже сразу: баннер «истекает через 3 дня» обязан появиться до
     // того, как человек что-то нажмёт, а не после захода в настройки.
     refreshLicense();

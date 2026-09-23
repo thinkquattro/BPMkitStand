@@ -583,6 +583,9 @@ class CompanionRunner:
                                             target)
         except CompanionError as exc:
             return {"error": exc.to_dict(), "reason": exc.kind}
+        except Exception as exc:  # noqa: BLE001 - попутный шаг не роняет проверку релиза
+            return {"error": {"kind": "unknown", "detail": f"{type(exc).__name__}: {exc}"},
+                    "reason": "unknown"}
 
     def _run_revocations(self, session, settings) -> dict:
         return revocations.refresh(session.client, self._state, session.ctx)
