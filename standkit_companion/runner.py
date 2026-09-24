@@ -54,7 +54,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import __version__, candidates, context, cookbook, patterns, releases, revocations
+from . import (__version__, candidates, context, cookbook, hub_channel, patterns,
+              releases, revocations, skills_channel)
 from .backend import BackendClient
 from .errors import ChannelError, CompanionError, ContextUnavailable, NotModified
 from .state import STATE_FILE_NAME, CompanionState
@@ -83,7 +84,12 @@ RUN_ORDER = ("revocations", "patterns", "releases")
 #: Явные действия человека. Имена — те же, что у ключей `available_actions`, чтобы UI не
 #: переводил «что разрешено» в «что вызвать» через свою таблицу соответствия.
 ACTIONS = ("sync_patterns", "check_update", "stage_update", "apply_update",
-           "rollback", "refresh_revocations", "stage_installer", "apply_installer")
+           "rollback", "refresh_revocations", "stage_installer", "apply_installer",
+           # GAP-523/GAP-288: два новых узких потока (ADR-0048) — диспетчер (kind=hub)
+           # и скиллы/плагин (kind=skills). Оба — ТОЛЬКО явные действия человека, ни один
+           # не тикает планировщиком (симметрично apply_update/rollback, см. run_action).
+           "check_hub", "stage_hub", "apply_hub",
+           "check_skills", "stage_skills", "apply_skills")
 
 #: Доля интервала, на которую срок «гуляет» в обе стороны (см. п.2 докстринга модуля).
 JITTER_FRACTION = 0.10
@@ -201,6 +207,8 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
     history = False
     staged_requires_installer = False
     installer_staged = False
+    hub_staged = False
+    skills_staged = False
     if state is not None:
         try:
             # GAP-279: «Установить обновление» установщиком — только когда подготовленный
@@ -219,6 +227,17 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
             staged = False
             history = False
             staged_requires_installer = False
+        try:
+            # GAP-523: кнопка «Установить обновление диспетчера» — только когда
+            # подготовленный exe ЛЕЖИТ на диске (та же логика «запись без файла —
+            # нечего применять», что у apply_update/apply_installer выше).
+            hub_staged = hub_channel.staged_hub_info(state) is not None
+        except (OSError, AttributeError, TypeError, KeyError):
+            hub_staged = False
+        try:
+            skills_staged = skills_channel.staged_skills_info(state) is not None
+        except (OSError, AttributeError, TypeError, KeyError):
+            skills_staged = False
     return {
         "sync_patterns": enabled,
         "check_update": enabled,
@@ -228,6 +247,16 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
         "refresh_revocations": enabled,
         "stage_installer": enabled,
         "apply_installer": enabled and installer_staged,
+        # GAP-523: «Проверить»/«Скачать» доступны всегда при включённом канале
+        # (frozen-only отказ — честный typed-отказ из stage_hub/apply_self_update,
+        # а не заранее погашенная кнопка: pip-режим тоже имеет право нажать
+        # «Проверить», просто получит карточку PyPI, а не exe-стейджинг).
+        "check_hub": enabled,
+        "stage_hub": enabled,
+        "apply_hub": enabled and hub_staged,
+        "check_skills": enabled,
+        "stage_skills": enabled,
+        "apply_skills": enabled and skills_staged,
     }
 
 
@@ -815,7 +844,47 @@ class CompanionRunner:
                         kind="nothing_staged")
                 return releases.apply_installer(self._state, self._session(settings).ctx,
                                                 target=version)
+            if action == "apply_hub":
+                # GAP-523: тот же порядок, что apply_installer — «есть ли что
+                # применять» раньше контекста лицензии.
+                if hub_channel.staged_hub_info(self._state) is None:
+                    raise ChannelError(
+                        "Подготовленного диспетчера нет — сначала нажмите «Проверить "
+                        "обновления диспетчера»",
+                        kind="nothing_staged")
+                return hub_channel.apply_self_update(self._state, self._session(settings).ctx)
+            if action == "apply_skills":
+                if skills_channel.staged_skills_info(self._state) is None:
+                    raise ChannelError(
+                        "Подготовленных скиллов/плагина нет — сначала нажмите "
+                        "«Проверить обновления скиллов»",
+                        kind="nothing_staged")
+                return skills_channel.apply_skills(self._state, self._session(settings).ctx)
+            if action == "check_hub" and not hub_channel.is_frozen_hub():
+                # GAP-523: pip-режим проверяется через PyPI, БЕЗ лицензионного
+                # конверта — резолв контекста (запуск CLI) здесь только лишний
+                # процесс. exe-режим по-прежнему идёт общим путём ниже (сессия).
+                return hub_channel.check_hub_pypi()
             session = self._session(settings)
+            if action == "check_hub":
+                return hub_channel.check_hub(session.client, self._state, version or "latest")
+            if action == "stage_hub":
+                return hub_channel.stage_hub(session.client, self._state, session.ctx,
+                                             version or "latest")
+            if action == "check_skills":
+                result = skills_channel.check_skills(session.client, self._state, session.ctx,
+                                                     version or "latest")
+                # Полный детект клиентов (CLI `setup detect-clients`) — только по
+                # ЭТОМУ явному действию, не по пассивному опросу status() (см.
+                # докстринг `skills_channel.install_summary_lite`).
+                try:
+                    result["install"] = skills_channel.install_summary(session.ctx)
+                except Exception:  # noqa: BLE001 - проверка не должна упасть из-за детекта
+                    result["install"] = None
+                return result
+            if action == "stage_skills":
+                return skills_channel.stage_skills(session.client, self._state, session.ctx,
+                                                   version or "latest")
             if action == "stage_installer":
                 return releases.stage_installer(session.client, self._state, session.ctx,
                                                 version or "latest")
@@ -922,6 +991,10 @@ class CompanionRunner:
             # GAP-279: подготовленный/запущенный установщик — для предпросмотра «MCP A→B,
             # диспетчер C→D» и для страницы, ждущей перезапуска диспетчера установщиком.
             "installer": self._installer_status(),
+            # GAP-523/GAP-288: карточки «Диспетчер стендов» и «Скиллы и плагин».
+            "hub": self._hub_status(),
+            "skills": self._skills_status(),
+            "install": self._install_summary(),
             # Сбой вне отдельного цикла (нечитаемый конфиг, отказ диска). Ключ есть всегда
             # и пуст в норме: единственный способ узнать о таком отказе снаружи — статус,
             # потому что фоновый поток не имеет права упасть с ним наружу.
@@ -933,6 +1006,30 @@ class CompanionRunner:
             return releases.installer_status(self._state)
         except Exception:  # noqa: BLE001 - статус не имеет права упасть из-за диска
             return {"staged": None, "launched": None}
+
+    def _hub_status(self) -> dict:
+        try:
+            return hub_channel.hub_status(self._state)
+        except Exception:  # noqa: BLE001 - статус не имеет права упасть из-за диска
+            return {"mode": None, "frozen": hub_channel.is_frozen_hub(), "staged": None}
+
+    def _skills_status(self) -> dict:
+        try:
+            return skills_channel.skills_status(self._state)
+        except Exception:  # noqa: BLE001 - статус не имеет права упасть из-за диска
+            return {"installed": None, "known_latest": None, "staged": None}
+
+    def _install_summary(self) -> dict:
+        """`{app_dir, plugin_dir, clients}` для карточки скиллов — дешёвая версия
+        (`skills_channel.install_summary_lite`, БЕЗ резолва лицензии и БЕЗ
+        запуска CLI), она же единственная, которую вызывает частый опрос
+        `status()`. Полную версию с детектом клиентов через CLI
+        (`skills_channel.install_summary`) явное действие получает как часть
+        своего собственного отчёта — не отсюда."""
+        try:
+            return skills_channel.install_summary_lite()
+        except Exception:  # noqa: BLE001 - статус не имеет права упасть из-за диска
+            return {"app_dir": None, "plugin_dir": None, "clients": []}
 
     def _context_status(self, settings) -> dict:
         cli = list(self._context_cli)

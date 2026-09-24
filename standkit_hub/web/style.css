@@ -2253,6 +2253,28 @@ span.value-has-reason {
   color: var(--bpmkit-unknown);
 }
 
+/* GAP-523: команда pip для карточки «Диспетчер стендов» в pip-режиме — сам
+   pip диспетчер не запускает, только показывает команду и кнопку «Копировать». */
+.upd-pip {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.upd-pip[hidden] {
+  display: none;
+}
+
+.upd-pip code {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bpmkit-surface-2, rgba(127, 127, 127, 0.12));
+  font-size: 12.5px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
 /* «Что нового» — свёрнутый по умолчанию спойлер состава обновления (GAP-442). */
 .upd-whatsnew {
   margin-top: 10px;

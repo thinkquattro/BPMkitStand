@@ -374,6 +374,12 @@ LAZY_IMPORT_ALLOWLIST = {
         "цикл server ↔ hosting",
     "standkit_hub/__main__.py:main -> standkit_hub.elevated_op":
         "одноразовый режим «выполнить и выйти» до всякого bind/mutex",
+    "standkit_hub/__main__.py:main -> standkit_hub.self_update":
+        "тот же одноразовый режим «выполнить и выйти» (--apply-self-update, "
+        "GAP-523) до всякого bind/mutex — помощник самообновления диспетчера",
+    "standkit_hub/server.py:make_handler._api_hub_open_folder -> standkit_companion.skills_channel":
+        "редакция без канала обновлений — штатная поставка (тот же случай, "
+        "что у _is_companion_error чуть выше)",
     "standkit_companion/runner.py:_load_settings_from_config -> standkit_hub.config":
         "хаб импортирует канал МЯГКО (try/except ImportError) — встречный импорт "
         "на уровне модуля замкнул бы кольцо при старте хаба",

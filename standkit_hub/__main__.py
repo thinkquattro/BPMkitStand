@@ -339,6 +339,28 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="имя стенда для --elevated-op",
     )
+    parser.add_argument(
+        "--apply-self-update",
+        action="store_true",
+        help=(
+            "режим ПОМОЩНИКА самообновления диспетчера (GAP-523) — внутренний флаг, "
+            "которым hub_channel.apply_self_update запускает ЗАСТЕЙДЖЕННЫЙ exe поверх "
+            "работающего; ждёт выхода --wait-pid, подменяет --target собой, запускает "
+            "его и выходит, без bind порта и без остального старта"
+        ),
+    )
+    parser.add_argument(
+        "--target",
+        default=None,
+        help="путь к exe, который нужно подменить (только с --apply-self-update)",
+    )
+    parser.add_argument(
+        "--wait-pid",
+        type=int,
+        default=None,
+        help="pid процесса, чьего выхода нужно дождаться перед подменой (только с "
+             "--apply-self-update)",
+    )
     args = parser.parse_args(argv)
 
     # Лог поднимаем ПЕРВЫМ делом после разбора аргументов — до mutex/bind/
@@ -353,6 +375,21 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLevelName(_log.level),
         _hub_logging.LOG_LEVEL_ENV, os.environ.get(_hub_logging.LOG_LEVEL_ENV) or "не задана",
     )
+
+    if args.apply_self_update:
+        # GAP-523: ДО preload/mutex/bind/state — тот же принцип, что у
+        # --elevated-op ниже: одноразовый процесс "выполнить и выйти", HTTP-
+        # сервер ему не нужен вовсе, и открывать порт/мьютекс вторым
+        # экземпляром, пока СТАРЫЙ (--wait-pid) ещё жив, было бы конфликтом на
+        # пустом месте. Логирование уже поднято строкой выше — помощник
+        # обязан оставить след в том же файле, что и обычный старт.
+        from standkit_hub import self_update as _self_update
+
+        if not args.target or not args.wait_pid:
+            print("[standkit-hub] --apply-self-update требует --target и --wait-pid")
+            return 1
+        return _self_update.run_self_update_helper(
+            target=args.target, wait_pid=args.wait_pid)
 
     # Необработанное исключение обязано остаться в логе, а не исчезнуть вместе
     # с невидимым stderr: без этого «диспетчер просто пропал» — всё, что

@@ -135,6 +135,35 @@ def _default_state() -> dict:
             "etag": None,
             "revoked_ids": [],
         },
+        # GAP-523: узкий поток самообновления диспетчера (kind=hub). Своя
+        # секция, а не поле `releases` — предмет другой (бинарь диспетчера,
+        # не бинарь MCP), свой стейджинг, свой цикл "подготовлено/запущено".
+        "hub": {
+            "last_check_at": None,
+            "last_status": "never",
+            "last_detail": "",
+            "known_latest": None,
+            # "exe" — самообновляемая сборка (frozen), "pip" — pip-установка
+            # (канал только показывает команду), None — режим ещё не
+            # определялся (до первой проверки).
+            "mode": None,
+            "staged": None,
+            "partial": None,
+            "self_update_launched": None,
+        },
+        # GAP-288: узкий поток скиллов/плагина (kind=skills). Установленная
+        # версия — не тут, а в маркере `%APPDATA%\\BPMkit\\skills\\installed.json`
+        # (источник правды делят все процессы, включая CLI); здесь — только
+        # то, что канал сам скачал/применил в ЭТОМ пробуждении.
+        "skills": {
+            "last_check_at": None,
+            "last_status": "never",
+            "last_detail": "",
+            "known_latest": None,
+            "staged": None,
+            "partial": None,
+            "installed": None,
+        },
     }
 
 
@@ -224,6 +253,14 @@ class CompanionState:
         return self.data["cookbook"]
 
     @property
+    def hub(self) -> dict:
+        return self.data["hub"]
+
+    @property
+    def skills(self) -> dict:
+        return self.data["skills"]
+
+    @property
     def candidates(self) -> dict:
         return self.data["candidates"]
 
@@ -258,6 +295,8 @@ class CompanionState:
         rel = self.releases
         rev = self.revocations
         cb = self.cookbook
+        hub = self.hub
+        skl = self.skills
         staged = rel.get("staged") or {}
         current = rel.get("current") or {}
         applied = pat.get("applied") or []
@@ -323,5 +362,21 @@ class CompanionState:
                 "status": rev.get("last_status"),
                 "detail": rev.get("last_detail"),
                 "revoked_count": len(rev.get("revoked_ids") or []),
+            },
+            "hub": {
+                "last_check_at": hub.get("last_check_at"),
+                "status": hub.get("last_status"),
+                "detail": hub.get("last_detail"),
+                "known_latest": hub.get("known_latest"),
+                "mode": hub.get("mode"),
+                "staged_version": (hub.get("staged") or {}).get("version"),
+            },
+            "skills": {
+                "last_check_at": skl.get("last_check_at"),
+                "status": skl.get("last_status"),
+                "detail": skl.get("last_detail"),
+                "known_latest": skl.get("known_latest"),
+                "staged_version": (skl.get("staged") or {}).get("version"),
+                "installed_version": (skl.get("installed") or {}).get("version"),
             },
         }

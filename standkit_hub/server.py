@@ -735,13 +735,25 @@ COMPANION_ACTION_ROUTES = {
     # поднимает диспетчер. Только явное действие человека — планировщик сюда не ходит.
     "/api/companion/stage-installer": "stage_installer",
     "/api/companion/apply-installer": "apply_installer",
+    # GAP-523/GAP-288 (ADR-0048): два новых узких потока — диспетчер (kind=hub,
+    # самообновление exe) и скиллы/плагин (kind=skills). «Проверить» экономит
+    # трафик, «скачать» полностью проверяет подпись/kind, «применить» — только
+    # явное действие человека (SECURITY.md §4.1); планировщик сюда не ходит.
+    "/api/companion/check-hub": "check_hub",
+    "/api/companion/stage-hub": "stage_hub",
+    "/api/companion/apply-hub": "apply_hub",
+    "/api/companion/check-skills": "check_skills",
+    "/api/companion/stage-skills": "stage_skills",
+    "/api/companion/apply-skills": "apply_skills",
 }
 
 #: Действия, которые умеют адресоваться к конкретной версии (тело
 #: ``{"version": "0.307.0"}``). Для остальных поле в теле игнорируется — молча,
 #: потому что лишний ключ в JSON не повод отказать пользователю в операции.
 COMPANION_VERSION_ACTIONS = frozenset({"stage_update", "rollback",
-                                       "stage_installer", "apply_installer"})
+                                       "stage_installer", "apply_installer",
+                                       "check_hub", "stage_hub",
+                                       "check_skills", "stage_skills"})
 
 #: ``CompanionError.kind`` → HTTP-код. Смысл группировки, а не «все ошибки 500»:
 #:
@@ -770,6 +782,14 @@ COMPANION_ERROR_STATUS = {
     # запустить — оба противоречат текущему состоянию, а не «отказ бэкенда».
     "installer_not_available": 409,
     "elevation_required": 409,
+    # GAP-523/GAP-288: симметрично installer_not_available — версия/файл ещё
+    # не опубликованы издателем, противоречит текущему состоянию бэкенда, не
+    # отказ канала.
+    "hub_not_available": 409,
+    "skills_not_available": 409,
+    # GAP-523: pip-установка не умеет подменить себя — запрос корректен, но
+    # противоречит РЕЖИМУ установки (тоже конфликт состояния, не отказ сети).
+    "self_update_unsupported": 409,
 }
 COMPANION_ERROR_STATUS_DEFAULT = 502
 
@@ -2228,6 +2248,41 @@ def make_handler(
 
         # --- API: штатный выход и перезапуск диспетчера (Д-3 / GAP-276) ---
 
+        def _api_hub_open_folder(self) -> None:
+            """``POST /api/hub/open-folder`` — открыть каталог поставки на
+            хосте в файловом менеджере (GAP-288: кнопка «Открыть папку» у
+            карточки «Скиллы и плагин»).
+
+            Единственная сегодня допустимая цель — ``{"target": "plugin"}``
+            (папка `.plugin`-файлов для ручной загрузки в Claude Desktop/
+            Cowork, `skills_channel.PLUGIN_DIRNAME`). Список целей ФИКСИРОВАН
+            намеренно — открытие произвольного пути, присланного клиентом,
+            было бы способом заставить диспетчер открыть Проводником что
+            угодно на диске пользователя. Расширять список — только новой
+            строкой соответствия, никогда не принимать путь из тела запроса.
+            """
+            if not companion_available():
+                self._send_json(503, {"error": COMPANION_UNAVAILABLE_MESSAGE})
+                return
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            target = str(body.get("target") or "").strip()
+            if target != "plugin":
+                self._send_json(400, {"error": "неизвестная цель open-folder: "
+                                                f"{target!r} (допустимо: 'plugin')"})
+                return
+            try:
+                from standkit_companion import skills_channel as _skills_channel
+                plugin_dir = _skills_channel.bpmkit_config_dir() / _skills_channel.PLUGIN_DIRNAME
+            except Exception as exc:  # noqa: BLE001 - канал не имеет права уронить хаб
+                self._send_json(500, {"error": f"Не удалось определить папку плагина: "
+                                                f"{type(exc).__name__}: {exc}"})
+                return
+            result = logs_browser.open_folder(plugin_dir)
+            self._send_json(200 if result.ok else 400,
+                            {"ok": result.ok, "message": result.message, "target": target})
+
         def _api_hub_shutdown(self) -> None:
             """
             ``POST /api/hub/shutdown`` — кнопка «Выход» в шапке и в
@@ -2841,6 +2896,26 @@ def make_handler(
                     "kind": "unknown"})
                 return
 
+            if action == "apply_hub" and isinstance(result, dict) and result.get("launched"):
+                # GAP-523: помощник самообновления диспетчера уже запущен
+                # (`hub_channel.apply_self_update`) и ждёт выхода ЭТОГО pid —
+                # хаб обязан завершиться сам, тем же штатным путём, что
+                # `POST /api/hub/shutdown` (мьютекс первым, дети-стенды живут,
+                # см. докстринг `_api_hub_shutdown`). Ответ уходит клиенту
+                # ДО shutdown — иначе вкладка увидит обрыв соединения вместо
+                # подтверждения запуска обновления.
+                self._send_json(200, {"ok": True, "result": result,
+                                      "status": self._companion_status_dict()})
+                try:
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                        OSError, ValueError):
+                    pass
+                server = self.server
+                if not getattr(server, "self_shutdown_requested", False):
+                    server.request_self_shutdown()
+                return
+
             self._send_json(200, {"ok": True, "result": result,
                                   "status": self._companion_status_dict()})
 
@@ -3050,6 +3125,16 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_hub_shutdown()
+                return
+
+            if path == "/api/hub/open-folder":
+                # GAP-288: открытие фиксированной папки (см. докстринг
+                # _api_hub_open_folder) — та же авторизация мутации, что у
+                # остальных POST /api/hub/*, хотя сама операция ничего не
+                # меняет на диске: она запускает процесс (Проводник).
+                if not self._authorize_mutation():
+                    return
+                self._api_hub_open_folder()
                 return
 
             if path == "/api/hub/restart":

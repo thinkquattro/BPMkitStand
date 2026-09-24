@@ -63,6 +63,14 @@ ACTION_ROUTES = {
     # GAP-279: установщик как артефакт обновления.
     "/api/companion/stage-installer": "stage_installer",
     "/api/companion/apply-installer": "apply_installer",
+    # GAP-523/GAP-288: самообновление диспетчера (kind=hub) и канал скиллов/плагина
+    # (kind=skills) — см. tests/test_hub_server_hub_skills_routes.py.
+    "/api/companion/check-hub": "check_hub",
+    "/api/companion/stage-hub": "stage_hub",
+    "/api/companion/apply-hub": "apply_hub",
+    "/api/companion/check-skills": "check_skills",
+    "/api/companion/stage-skills": "stage_skills",
+    "/api/companion/apply-skills": "apply_skills",
 }
 
 
