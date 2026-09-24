@@ -104,6 +104,15 @@ class HubInstanceState:
     # обратная совместимость со старыми записями без этого поля, что у
     # ``user_sid``/``process_create_time``).
     session_id: Optional[int] = None
+    # Путь к исполняемому файлу процесса (``sys.executable`` — в frozen-сборке
+    # (PyInstaller) это и есть сам ``BPMkit-hub.exe``, см. докстринг
+    # ``standkit_hub.elevation.relaunch_command``; в venv/исходниках —
+    # интерпретатор python(w).exe). GAP-524: нужен ТОЛЬКО для человекочитаемого
+    # сообщения при автоматическом перехвате разных версий («работал
+    # диспетчер <exe>, версия <версия>») — в решении о перехвате не участвует.
+    # None — старый файл состояния без этого поля (обратная совместимость) либо
+    # определить не удалось.
+    executable: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -114,6 +123,7 @@ class HubInstanceState:
         user_sid = data.get("user_sid")
         create_time = data.get("process_create_time")
         session_id = data.get("session_id")
+        executable = data.get("executable")
         return cls(
             pid=int(data["pid"]),
             host=str(data.get("host", "127.0.0.1")),
@@ -123,6 +133,7 @@ class HubInstanceState:
             started_at=float(data.get("started_at", 0.0)),
             user_sid=str(user_sid) if user_sid else None,
             process_create_time=float(create_time) if create_time is not None else None,
+            executable=str(executable) if executable else None,
             session_id=int(session_id) if session_id is not None else None,
         )
 
@@ -269,6 +280,8 @@ def should_takeover(
     we_elevated: Optional[bool],
     explicit: bool = False,
     our_sid: Optional[str] = None,
+    our_version: Optional[str] = None,
+    no_takeover: bool = False,
 ) -> bool:
     """
     Нужно ли новому процессу отобрать порт у работающего.
@@ -282,22 +295,41 @@ def should_takeover(
     пропустила запрос дальше, значит SID совпал (или его нельзя определить
     ни с одной стороны), и здесь решение принято.
 
-    ``our_sid`` — SID ТЕКУЩЕГО (нового) процесса. Если мы elevated, у
-    работающего экземпляра известен ``user_sid``, у нас известен ``our_sid``,
-    и они РАЗЛИЧАЮТСЯ — не перехватываем даже автоматически: значит, кто-то
-    из другой учётной записи запустил (или сам поднял через UAC) свой
-    процесс диспетчера рядом с процессом первого пользователя, и молча
-    останавливать чужой рабочий экземпляр нельзя.
+    ``our_sid`` — SID ТЕКУЩЕГО (нового) процесса. Если он известен, у
+    работающего экземпляра известен ``user_sid``, и они РАЗЛИЧАЮТСЯ — не
+    перехватываем автоматически НИ ПО ОДНОЙ причине (ни по правам, ни по
+    версии): значит, кто-то из другой учётной записи запустил (или сам
+    поднял через UAC) свой процесс диспетчера рядом с процессом первого
+    пользователя, и молча останавливать чужой рабочий экземпляр нельзя.
+
+    ``our_version``/``no_takeover`` — GAP-524. Второй автоматический повод
+    (после «мы elevated, а он нет»): работающий экземпляр — ДРУГОЙ версии,
+    либо версия неизвестна (пустая строка — старый файл состояния без поля
+    ``version``, до этого гэпа). Типичный случай — клиент поставил новый
+    диспетчер поверх старого (обновление через pip или установщик BPMkit):
+    без этого правила новый процесс видел бы ``HubAlreadyRunning`` и молча
+    открывал браузер на СТАРОМ интерфейсе. ``our_version=None`` — вызывающий
+    не передал версию (тесты, не интересующиеся этой веткой) — ветка
+    отключена целиком, прежнее поведение. ``no_takeover=True`` — пользователь
+    явно попросил прежнее поведение флагом ``--no-takeover``: версионный
+    автоперехват не делаем (повышение прав по-прежнему работает — это
+    отдельная, более старая гарантия, отключать её флагом версии не просили).
     """
     if explicit:
         return True
     if running is None:
         return False
-    if we_elevated and our_sid and running.user_sid and our_sid != running.user_sid:
+    if our_sid and running.user_sid and our_sid != running.user_sid:
         return False
-    # Повышение прав — единственный автоматический повод. Обратного (elevated
+    # Повышение прав — первый автоматический повод. Обратного (elevated
     # уступает обычному) не бывает.
-    return bool(we_elevated) and running.elevated is False
+    if bool(we_elevated) and running.elevated is False:
+        return True
+    # Другая версия (или версия неизвестна) — второй автоматический повод
+    # (GAP-524), если не отключён явным --no-takeover.
+    if not no_takeover and our_version and running.version != our_version:
+        return True
+    return False
 
 
 # Допуск (секунды) при сверке времени создания процесса с ``started_at`` из
@@ -491,6 +523,8 @@ def current_state(
     host: str, port: int, *, elevated: Optional[bool], user_sid: Optional[str] = None
 ) -> HubInstanceState:
     """Слепок ТЕКУЩЕГО процесса — то, что пишется в файл состояния сразу после bind'а."""
+    import sys
+
     return HubInstanceState(
         pid=os.getpid(),
         host=host,
@@ -503,4 +537,8 @@ def current_state(
         # GAP-445: второй источник «в каком сеансе я живу» рядом с мьютексом --
         # см. докстринг HubInstanceState.session_id.
         session_id=current_session_id(os.getpid()),
+        # GAP-524: sys.executable — в frozen-сборке (PyInstaller) это сам
+        # BPMkit-hub.exe, в venv/исходниках — python(w).exe; нужен только для
+        # человекочитаемого сообщения при версионном автоперехвате.
+        executable=sys.executable or None,
     )

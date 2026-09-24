@@ -289,13 +289,14 @@
   </div>
   <input id="filter" type="search" placeholder="Поиск: «агент», «IIS», «Redis», «токен»…" autocomplete="off">
   <span id="filterInfo"></span>
-  <button id="docmeta" title="О документе: версия, контакты, история">версия документа 1.4<span class="dmsep"> · </span><br>август 2026</button>
+  <button id="docmeta" title="О документе: версия, контакты, история">версия документа 1.5<span class="dmsep"> · </span><br>сентябрь 2026</button>
   <button id="themeBtn" title="Переключить тему">☀️ Светлая</button>
 </header>
 
 <nav id="chipnav">
   <a href="#about">Обзор</a>
   <a href="#start">Установка</a>
+  <a href="#commands">Команды</a>
   <a href="#dashboard">Дашборд</a>
   <a href="#registry">Реестр стендов</a>
   <a href="#hosting">Виды хостинга</a>
@@ -2635,6 +2636,103 @@ sudo chown -R standkit:standkit /opt/standkit/run /opt/standkit/logs</div></li>
 </section>
 <!-- ▲▲▲ END SECTION: limits ▲▲▲ -->
 
+<!-- ▼▼▼ SECTION: commands ▼▼▼ -->
+<section class="sec" id="commands" data-updated="2026-09">
+<div class="sechead"><span class="num">11</span><h2>Команды диспетчера — шпаргалка</h2></div>
+<div class="secmeta"></div>
+<p class="lead">Всё, что вводится в консоли Windows: установка/обновление pip-пакетом, запуск и остановка
+диспетчера, перехват порта у старого экземпляра, ярлык, где лежит лог. У каждой команды — кнопка
+<b>«копировать»</b> справа от блока (работает в обеих темах документа). Ключи — по реальному
+<code>argparse</code> в <code>standkit_hub/__main__.py</code>; полная таблица ключей запуска — в разделе
+<a href="#start">Установка</a>.</p>
+
+<div class="grid g2">
+  <div class="tile acc">
+    <h3><span class="ico">📦</span>Поставить / обновить</h3>
+    <p class="tmuted">Пакет один — <code>standkit</code>, ставится обычным pip. Обновление той же командой
+    с флагом <code>-U</code> — так же, как в разделе <a href="#start">Установка → «Обновление диспетчера»</a>.</p>
+    <div class="prompt">python -m pip install -U standkit</div>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🔢</span>Конкретная версия / откат</h3>
+    <p class="tmuted">Нужна определённая версия (проверить регресс, откатиться после неудачного обновления) —
+    ставится точным номером вместо <code>-U</code>.</p>
+    <div class="prompt">python -m pip install "standkit==0.12.10"</div>
+    <p class="tmuted" style="margin-top:8px">Проверить, что стоит сейчас (версия, откуда, путь установки):</p>
+    <div class="prompt">python -m pip show standkit</div>
+  </div>
+
+  <div class="tile ok">
+    <h3><span class="ico">▶️</span>Запустить диспетчер</h3>
+    <p class="tmuted">Обычный запуск: слушает <code>127.0.0.1:8770</code>, печатает URL с токеном и открывает
+    браузер. Если консоль не видит команду <code>standkit-hub</code> (скрипт не попал в PATH) — тот же запуск
+    модулем работает всегда.</p>
+    <div class="prompt">standkit-hub</div>
+    <div class="prompt">python -m standkit_hub</div>
+    <p class="tmuted" style="margin-top:8px">Без автооткрытия браузера (headless-сервер, служба):</p>
+    <div class="prompt">standkit-hub --no-browser</div>
+    <p class="tmuted" style="margin-top:8px">Нативное окно вместо браузера (требует
+    <code>pip install "standkit[desktop]"</code> — без пакета хаб предупредит и откроет браузер):</p>
+    <div class="prompt">standkit-hub --desktop</div>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">⏹️</span>Остановить штатно</h3>
+    <p class="tmuted">Останавливает диспетчер, работающий в этом профиле, <b>штатным</b> способом — файл-запрос
+    остановки, не убийство процесса: уже запущенные стенды продолжают работать, живой агент не трогается.</p>
+    <div class="prompt">standkit-hub --hub-stop</div>
+  </div>
+
+  <div class="tile warn">
+    <h3><span class="ico">🔁</span>Перехватить у старого экземпляра</h3>
+    <p class="tmuted">Диспетчер — <b>single-instance</b>: повторный запуск по умолчанию видит уже работающий
+    процесс и просто открывает браузер на нём, второй не поднимает. Явно попросить перехватить порт (старый
+    останавливается штатно тем же файлом-запросом, что и <code>--hub-stop</code>) — например, если после
+    обновления пакета вместо нового интерфейса открылся старый:</p>
+    <div class="prompt">standkit-hub --takeover</div>
+    <p class="tmuted" style="margin-top:8px">С версии, где закрыт GAP-524, это в частом случае не нужно
+    вводить руками: если работающий экземпляр — <b>другой версии</b> (или его версия неизвестна — старый
+    файл состояния без этого поля), новый процесс перехватывает порт САМ, без флага, и пишет в консоль и в
+    лог диспетчера, кто именно был остановлен. Прежнее поведение (молча открыть браузер на старом) —
+    флагом отказа:</p>
+    <div class="prompt">standkit-hub --no-takeover</div>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🖇️</span>Ярлык на рабочий стол</h3>
+    <p class="tmuted">Создаёт (или убирает) ярлык дашборда и сразу выходит — свой HTTP-сервер эти два ключа
+    не поднимают.</p>
+    <div class="prompt">standkit-hub --install-shortcut</div>
+    <div class="prompt">standkit-hub --uninstall-shortcut</div>
+  </div>
+
+  <div class="tile">
+    <h3><span class="ico">📄</span>Где лог диспетчера</h3>
+    <p class="tmuted">Один файл на профиль пользователя, дописывается при каждом старте — туда же уходят
+    предупреждения о перехвате порта (в т.ч. версионном, GAP-524) и необработанные исключения.</p>
+    <div class="prompt">%LOCALAPPDATA%\BPMkit\logs\hub.log</div>
+    <p class="tmuted" style="margin-top:8px">Открыть папку с логом в Проводнике:</p>
+    <div class="prompt">explorer "%LOCALAPPDATA%\BPMkit\logs"</div>
+  </div>
+  <div class="tile">
+    <h3><span class="ico">🤖</span>Агент удалённого стенда</h3>
+    <p class="tmuted">Отдельная команда для хоста самого стенда (не диспетчера) — поднимает headless-агент,
+    которым диспетчер управляет по сети. Все ключи, пошагово — раздел
+    <a href="#remote">Удалённые стенды и агент</a>.</p>
+    <div class="prompt">standkit-agent --help</div>
+  </div>
+</div>
+
+<div class="note">🏷️ <b>Диспетчер поставлен установщиком BPMkit — а не pip?</b> Если на машине уже стоит
+ярлык «BPMkit — диспетчер стендов» и в диспетчере задач виден процесс <code>BPMkit-hub.exe</code> — это
+PyInstaller-сборка из установщика полного MCP-клиента BPMkit, отдельная от свободного <code>pip install
+standkit</code>. <code>pip</code> её <b>не обновляет</b> (это не тот же самый пакет в PATH) — обновление
+только через окно «Обновления» самого MCP-клиента либо переустановкой установщика. Останавливать —
+кнопкой «Выход»/<code>--hub-stop</code> того же диспетчера, а не так:
+<div class="prompt">taskkill /IM BPMkit-hub.exe</div>
+это <b>только</b> если штатный выход не срабатывает — жёсткое завершение не гарантирует, что стенды-дети
+переживут его так же аккуратно, как штатную остановку.</div>
+</section>
+<!-- ▲▲▲ END SECTION: commands ▲▲▲ -->
+
 <footer>
   <svg width="26" height="26" viewBox="0 0 96 96" aria-hidden="true">
     <rect x="4" y="4" width="88" height="88" rx="20" fill="#1a1a1a"/>
@@ -2658,7 +2756,7 @@ sudo chown -R standkit:standkit /opt/standkit/run /opt/standkit/logs</div></li>
       BPMkitStand — о документе
       <button class="mclose" id="modalClose" title="Закрыть">✕</button>
     </h2>
-    <div class="mver">Кукбук диспетчера стендов · версия документа 1.4 · август 2026 · описывает standkit 0.8.x</div>
+    <div class="mver">Кукбук диспетчера стендов · версия документа 1.5 · сентябрь 2026 · описывает standkit 0.12.x</div>
 
     <div class="mrow"><span class="mk">Где лежит</span><span>В поставке — <code>standkit_hub/web/cookbook.html</code> (это статика дашборда, поэтому файл лежит внутри пакета, а не в <code>docs/</code>); открывается кнопкой <b>?</b> в шапке дашборда и работает офлайн</span></div>
     <div class="mrow"><span class="mk">Соседние документы</span><span>Карта всей документации — <code>docs/README.md</code> в репозитории. Отдельно: <code>docs/COOKBOOK_LINUX.md</code> (агент на Linux пошагово) и <code>docs/GAPs/</code> (где сценарий оператора расходился с продуктом и как это закрыли)</span></div>

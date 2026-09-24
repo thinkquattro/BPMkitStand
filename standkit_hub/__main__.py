@@ -120,8 +120,37 @@ def _describe_elevation(value) -> str:
     return "да" if value else "нет"
 
 
+def _is_version_mismatch_takeover(state: "Optional[_instance.HubInstanceState]", *, we_elevated: Optional[bool]) -> bool:
+    """
+    ``True`` — причина перехвата в ``_takeover_running_instance`` (уже решённого
+    ``should_takeover``) была ИМЕННО «другая версия / версия неизвестна» (GAP-524),
+    а не «мы elevated, а он нет». Нужно только для текста сообщения пользователю:
+    оба повода приводят к одинаковому механизму остановки, но объяснение —
+    разное. Elevation-повод проверяется первым, потому что у него приоритет в
+    ``should_takeover`` (см. её докстринг).
+    """
+    if state is None:
+        return False
+    if bool(we_elevated) and state.elevated is False:
+        return False
+    return state.version != _standkit_version
+
+
+def _describe_running_instance(state: "_instance.HubInstanceState") -> str:
+    """Человекочитаемое «что за процесс» для сообщения о версионном автоперехвате (GAP-524)."""
+    version = state.version or "неизвестна"
+    exe = f" ({state.executable})" if state.executable else ""
+    return f"диспетчер{exe}, версия {version}"
+
+
 def _takeover_running_instance(
-    exc: HubAlreadyRunning, state_file: Path, run_dir: Path, *, explicit: bool, our_sid: Optional[str]
+    exc: HubAlreadyRunning,
+    state_file: Path,
+    run_dir: Path,
+    *,
+    explicit: bool,
+    our_sid: Optional[str],
+    no_takeover: bool = False,
 ) -> "tuple[bool, str]":
     """
     Отобрать ли порт у уже работающего диспетчера — и, если да, попросить его
@@ -134,12 +163,21 @@ def _takeover_running_instance(
     случае, иначе — человекочитаемая причина отказа (уходит в
     ``result_file`` вызывающего, а не заменяется обобщённым текстом). Правила
     решения — в ``standkit_hub.instance.should_takeover`` (коротко: явный
-    ``--takeover`` либо «мы elevated, а он нет», за исключением случая, когда
-    работающий экземпляр принадлежит ДРУГОЙ учётной записи — тогда
-    автоматический перехват не делаем, см. GAP-311 п.4).
+    ``--takeover``, «мы elevated, а он нет», либо — GAP-524 — работающий
+    экземпляр ДРУГОЙ версии/версия неизвестна (если не отключено
+    ``--no-takeover``), за исключением случая, когда работающий экземпляр
+    принадлежит ДРУГОЙ учётной записи — тогда автоматический перехват не
+    делаем ни по одной из причин, см. GAP-311 п.4).
     """
     state = _instance.read_state(state_file)
-    if not _instance.should_takeover(state, we_elevated=is_elevated(), explicit=explicit, our_sid=our_sid):
+    if not _instance.should_takeover(
+        state,
+        we_elevated=is_elevated(),
+        explicit=explicit,
+        our_sid=our_sid,
+        our_version=_standkit_version,
+        no_takeover=no_takeover,
+    ):
         return False, ""
 
     if state is None:
@@ -155,9 +193,22 @@ def _takeover_running_instance(
         _log.warning(f"{reason}")
         return False, reason
 
-    _log.warning(f"перехватываю порт {exc.port} у работающего диспетчера "
-        f"(pid {state.pid}, права администратора: {_describe_elevation(state.elevated)})"
-    )
+    # explicit=True (--takeover, кнопка «Перезапустить с правами администратора»)
+    # — решение уже явно принято пользователем, версионное сообщение здесь
+    # было бы вводящим в заблуждение (адресует не ту причину перехвата).
+    version_mismatch = not explicit and _is_version_mismatch_takeover(state, we_elevated=is_elevated())
+    if version_mismatch:
+        # GAP-524: клиент поставил новый диспетчер поверх работающего старого
+        # (pip install -U, установщик BPMkit) — объясняем, что именно
+        # произошло, а не просто «перехватываю порт».
+        _log.warning(
+            f"обнаружен работающий {_describe_running_instance(state)} (pid {state.pid}) — "
+            f"запускается версия {_standkit_version}, старый экземпляр будет остановлен"
+        )
+    else:
+        _log.warning(f"перехватываю порт {exc.port} у работающего диспетчера "
+            f"(pid {state.pid}, права администратора: {_describe_elevation(state.elevated)})"
+        )
     ok, reason = _instance.stop_running_instance(state, run_dir=run_dir, requester_pid=os.getpid())
     if not ok:
         message = reason or f"не удалось остановить процесс {state.pid}"
@@ -168,6 +219,14 @@ def _takeover_running_instance(
         reason = f"порт {exc.port} так и не освободился — перехват отменён"
         _log.warning(f"{reason}")
         return False, reason
+
+    if version_mismatch:
+        message = (
+            f"[standkit-hub] работал {_describe_running_instance(state)} — "
+            f"запущена версия {_standkit_version}, старый остановлен"
+        )
+        print(message)
+        _log.warning(message)
     return True, ""
 
 
@@ -295,6 +354,15 @@ def main(argv: list[str] | None = None) -> int:
             "отобрать порт у уже работающего диспетчера (остановив его) вместо того, чтобы "
             "просто открыть браузер на нём — так себя перезапускает кнопка «Перезапустить "
             "с правами администратора»"
+        ),
+    )
+    parser.add_argument(
+        "--no-takeover",
+        action="store_true",
+        help=(
+            "не отбирать порт автоматически у работающего диспетчера ДРУГОЙ версии "
+            "(GAP-524) — прежнее поведение: молча открыть браузер на старом; "
+            "явный --takeover при этом флаге по-прежнему работает"
         ),
     )
     parser.add_argument(
@@ -507,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
         # экземпляре — пользователь видел ту же ошибку прав, будучи уверен, что
         # всё сделал правильно.
         takeover_ok, takeover_reason = _takeover_running_instance(
-            exc, state_file, run_dir, explicit=args.takeover, our_sid=our_sid
+            exc, state_file, run_dir, explicit=args.takeover, our_sid=our_sid, no_takeover=args.no_takeover
         )
         if takeover_ok:
             # Порт мог освободиться формально (сокет закрыт), но ОС не всегда
