@@ -437,17 +437,17 @@ def test_gap528_chip_helper_and_colors():
     assert ".upd-chip.err" in css and "var(--bpmkit-down)" in css
 
 
-def test_gap528_skills_harnesses_joined_and_link_uses_first_id():
-    """Список харнессов со скиллами — через « · » в статус-строке, ссылка
-    «Скиллы в харнессах» ведёт на якорь первого найденного (дефолт —
-    #harness-claude-code, как задано владельцем)."""
+def test_gap528_skills_harnesses_joined_and_single_howto_link():
+    """Список харнессов со скиллами — через « · » в статус-строке; ссылка на
+    кукбук — ОДНА («как установить плагин и скиллы» → сводный раздел
+    #plugin-skills кукбука BPMkit), правка владельца 24.09.2026."""
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
     html = (_web_dir() / "index.html").read_text(encoding="utf-8")
     assert 'harnesses.map((c) => c.name || c.id).join(" · ")' in js
-    assert '`/bpmkit-cookbook#harness-${firstId || "claude-code"}`' in js
-    assert 'id="upd-skills-harness-link"' in html
-    assert 'id="plugin-install"' not in html  # ссылка внешняя, якорь не в этом файле
-    assert '/bpmkit-cookbook#plugin-install' in html
+    assert 'id="upd-skills-howto-link"' in html
+    assert '/bpmkit-cookbook#plugin-skills' in html
+    assert 'upd-skills-harness-link' not in html and 'upd-skills-harness-link' not in js
+    assert html.count('/bpmkit-cookbook#') >= 1
 
 
 def test_gap528_version_fallback_fields_used_in_ui():
@@ -496,7 +496,7 @@ def test_gap528b_status_column_is_a_dedicated_grid_cell():
         assert needle in html, f"чип {chip_id} обязан лежать в своей колонке .upd-status"
     assert ".upd-status {" in css
     # 4 колонки фиксированной ширины — статус и действия не "плавают".
-    assert "grid-template-columns: 34px minmax(0, 1fr) 124px 136px" in css
+    assert "grid-template-columns: 34px minmax(0, 1fr) 112px 136px" in css
 
 
 def test_gap528b_check_button_moved_to_header_no_footer():

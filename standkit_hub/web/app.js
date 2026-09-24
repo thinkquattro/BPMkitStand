@@ -3389,13 +3389,8 @@
         ? `Открыть папку плагина: ${install.plugin_dir}`
         : "Открыть папку плагина";
     }
-    // GAP-528: ссылка «Скиллы в харнессах» ведёт на якорь первого найденного
-    // харнесса (по умолчанию #harness-claude-code — как в задаче).
-    const harnessLink = byId("upd-skills-harness-link");
-    if (harnessLink) {
-      const firstId = harnesses.length ? String(harnesses[0].id || "").trim() : "";
-      harnessLink.href = `/bpmkit-cookbook#harness-${firstId || "claude-code"}`;
-    }
+    // GAP-528 (правка владельца): одна ссылка «как установить плагин и скиллы» на
+    // сводный раздел кукбука BPMkit (#plugin-skills) — там и плагин, и все харнессы.
 
     const applyBtn = byId("upd-skills-apply-btn");
     if (applyBtn) {
