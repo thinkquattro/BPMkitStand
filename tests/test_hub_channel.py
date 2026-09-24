@@ -28,6 +28,7 @@ import pytest
 from standkit_companion import hub_channel
 from standkit_companion.errors import ChannelError
 from standkit_companion.state import CompanionState
+from standkit_hub import self_version as _self_version
 from tests.test_companion_releases import FakeClient, FakeCtx
 from tests.test_companion_signature import FAKE_SEED, _public_key, _sign
 from standkit_companion import signature as sigmod
@@ -92,6 +93,16 @@ def _frozen_hub(monkeypatch):
     monkeypatch.setattr(hub_channel, "is_frozen_hub", lambda: True)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_pypi_cache():
+    """GAP-528: сетевой поход и кэш `check_hub_pypi` переехали в
+    `standkit_hub.self_version` (кэш там — в памяти ПРОЦЕССА, общий между
+    тестовыми файлами) — сбрасываем до и после каждого теста этого файла."""
+    _self_version.reset_cache()
+    yield
+    _self_version.reset_cache()
+
+
 # ======================================================================================
 # check_hub -- дёшево
 # ======================================================================================
@@ -119,17 +130,66 @@ def test_check_hub_not_configured_is_typed_skip(env):
 
 
 # ======================================================================================
-# check_hub_pypi -- best effort
+# check_hub_pypi -- best effort (GAP-528: сетевой поход теперь в self_version)
 # ======================================================================================
 def test_check_hub_pypi_offline_is_not_an_exception(monkeypatch):
     def _boom(*a, **k):
         raise OSError("сеть недоступна")
 
-    monkeypatch.setattr(hub_channel, "urlopen", _boom)
+    monkeypatch.setattr(_self_version, "urlopen", _boom)
     result = hub_channel.check_hub_pypi()
     assert result["mode"] == "pip"
     assert result["available"] is False
     assert result["reason"] == "offline"
+
+
+def test_check_hub_pypi_reports_update_available(monkeypatch):
+    def _fake(req, timeout=None):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"info": {"version": "999.0.0"}}'
+        return _Resp()
+
+    monkeypatch.setattr(_self_version, "urlopen", _fake)
+    result = hub_channel.check_hub_pypi()
+    assert result["mode"] == "pip"
+    assert result["available"] is True
+    assert result["latest"] == "999.0.0"
+    assert result["reason"] == "update_available"
+    assert result["pip_command"] == "python -m pip install -U standkit"
+
+
+def test_check_hub_pypi_shares_cache_with_self_version_route(monkeypatch):
+    """GAP-528: тот же процессный кэш, что и у `/api/hub/self-version` —
+    явное действие человека (кнопка «Проверить») обязано его освежить, а не
+    просто читать (`check_hub_pypi` вызывает `cached_pypi_latest(force=True)`)."""
+    calls = []
+
+    def _fake(req, timeout=None):
+        calls.append(1)
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"info": {"version": "1.0.0"}}'
+        return _Resp()
+
+    monkeypatch.setattr(_self_version, "urlopen", _fake)
+    _self_version.cached_pypi_latest()  # первичный кэш, как у обычного GET
+    assert calls == [1]
+    hub_channel.check_hub_pypi()
+    assert calls == [1, 1], "check_hub_pypi обязан обойти кэш, а не отдать его как есть"
 
 
 # ======================================================================================

@@ -2135,6 +2135,11 @@ span.value-has-reason {
   max-width: calc(100vw - 32px);
 }
 
+.upd-body {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
 .modal-box-crit .modal-header h2 {
   color: var(--bpmkit-down);
 }
@@ -2143,8 +2148,8 @@ span.value-has-reason {
   display: grid;
   grid-template-columns: 34px 1fr auto;
   gap: 12px;
-  align-items: start;
-  padding: 14px 0;
+  align-items: center;
+  padding: 10px 0;
   border-bottom: 1px solid var(--bpmkit-border);
 }
 
@@ -2222,14 +2227,127 @@ span.value-has-reason {
   display: none;
 }
 
+/* GAP-528: компактная сетка окна «Обновления» по макету владельца
+   (updates_mockup_v2.html) — статус-строка «версия + чип» вместо абзаца
+   описания канала, плюс версия текстом рядом с чипом. */
+.upd-ver {
+  font-size: 12.5px;
+  color: var(--bpmkit-muted);
+}
+
+.upd-status-line {
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--bpmkit-muted);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.upd-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--bpmkit-row-hover);
+  color: var(--bpmkit-muted);
+  white-space: nowrap;
+}
+
+.upd-chip[hidden] {
+  display: none;
+}
+
+/* Зелёный — «актуально»/«последняя»: канал не отстаёт от издателя/PyPI. */
+.upd-chip.ok {
+  color: var(--bpmkit-ok);
+  background: color-mix(in srgb, var(--bpmkit-ok) 14%, transparent);
+}
+
+/* Акцентный (цвет бренда) — «доступна X»: есть что поставить. */
+.upd-chip.new {
+  color: var(--bpmkit-primary-contrast);
+  background: var(--bpmkit-primary);
+}
+
+/* Красный, коротко — отказ проверки/установки; полный текст живёт в title
+   чипа и в .upd-detail ниже, чтобы строка не распухала. */
+.upd-chip.err {
+  color: var(--bpmkit-primary-contrast);
+  background: var(--bpmkit-down);
+}
+
+/* Вторая/третья строка карточки (что нового, ссылки, подсказки о ручной
+   загрузке плагина) — растянута на обе правые колонки грида, чтобы не
+   сбивать выравнивание с кнопками действия. */
+.upd-sub {
+  grid-column: 2 / 4;
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--bpmkit-muted);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.upd-sub[hidden] {
+  display: none;
+}
+
+.upd-sub a {
+  color: var(--bpmkit-primary);
+  text-decoration: none;
+}
+
+.upd-sub a:hover {
+  text-decoration: underline;
+}
+
+/* Плашка бесплатной редакции: платные каналы недоступны без лицензии. */
+.upd-lock {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--bpmkit-border);
+  font-size: 12.5px;
+  color: var(--bpmkit-muted);
+}
+
+.upd-lock a {
+  margin-left: auto;
+  white-space: nowrap;
+  color: var(--bpmkit-primary);
+  text-decoration: none;
+}
+
+.upd-lock a:hover {
+  text-decoration: underline;
+}
+
 .upd-action {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 6px;
 }
 
 .upd-action button[hidden] {
   display: none;
+}
+
+/* Маленькая кнопка-иконка («⧉ pip», «⧉ Копировать») — тот же .secondary, но
+   уже, для строки с командой pip. */
+.upd-icon-btn {
+  padding-left: 9px;
+  padding-right: 9px;
+  white-space: nowrap;
 }
 
 /* Перезапуск после подмены бинаря: узнать об этом пользователь обязан не из
@@ -2277,7 +2395,7 @@ span.value-has-reason {
 
 /* «Что нового» — свёрнутый по умолчанию спойлер состава обновления (GAP-442). */
 .upd-whatsnew {
-  margin-top: 10px;
+  margin-top: 0;
   font-size: 12.5px;
 }
 

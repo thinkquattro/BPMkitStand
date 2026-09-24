@@ -2428,12 +2428,68 @@
     const overlay = byId("updates-overlay");
     if (!overlay) return;
     overlay.hidden = false;
-    refreshCompanionStatus({ quiet: true });
+    // Оба запроса параллельно: платная редакция знает это только ПОСЛЕ ответа
+    // /api/companion/status (503 у свободной), self-version отвечает всегда —
+    // applyUpdatesEditionView разбирает исход обоих.
+    Promise.allSettled([
+      refreshCompanionStatus({ quiet: true }),
+      refreshSelfVersion({ quiet: true }),
+    ]).then(applyUpdatesEditionView);
   }
 
   function closeUpdatesDialog() {
     const overlay = byId("updates-overlay");
     if (overlay) overlay.hidden = true;
+  }
+
+  /** Чип статус-строки: kind — "ok" (зелёный) / "new" (акцентный) / "err"
+   * (красный) / null (нейтральный, без класса). `title` — полный текст на
+   * случай, когда короткая надпись чипа (например «ошибка») режет смысл. */
+  function setChip(id, kind, text, title) {
+    const el = byId(id);
+    if (!el) return;
+    el.hidden = !text;
+    if (!text) return;
+    el.textContent = text;
+    el.className = "upd-chip" + (kind ? ` ${kind}` : "");
+    if (title) el.title = title;
+    else el.removeAttribute("title");
+  }
+
+  /** Какой из двух блоков окна показать: платная редакция (4 канала) или
+   * свободная (одна строка «Диспетчер стендов» по PyPI). Решает по факту
+   * доступности /api/companion/status (companionAvailable), не по лицензии
+   * напрямую — свободная редакция никогда не видит канал издателя вовсе. */
+  function applyUpdatesEditionView() {
+    const paid = !!companionAvailable;
+    const paidRows = byId("upd-paid-rows");
+    const freeRows = byId("upd-free-rows");
+    if (paidRows) paidRows.hidden = !paid;
+    if (freeRows) freeRows.hidden = paid;
+
+    const title = byId("updates-title");
+    if (title) title.textContent = paid ? "Обновления BPMkit" : "Обновления";
+
+    const footerNote = byId("updates-footer-note");
+    if (footerNote) {
+      footerNote.textContent = paid
+        ? "Скачивание — заранее, установка — только по вашей кнопке"
+        : "Проверяется по PyPI, без лицензии";
+    }
+    const checkBtn = byId("updates-check-btn");
+    if (checkBtn) checkBtn.textContent = paid ? "Проверить обновления" : "Проверить";
+
+    const checkedAt = byId("updates-checked-at");
+    if (checkedAt) {
+      if (paid) {
+        const rel = releasesBlock(lastCompanionStatus);
+        checkedAt.textContent = rel.last_check_at ? `проверено ${describeMoment(rel.last_check_at)}` : "";
+      } else if (lastSelfVersion && lastSelfVersion.checked_at) {
+        checkedAt.textContent = `проверено ${describeMoment(lastSelfVersion.checked_at)}`;
+      } else {
+        checkedAt.textContent = "";
+      }
+    }
   }
 
   /** «обновлено 2 ч назад» / «обновлено 08.09.2026 13:40» — по возрасту метки. */
@@ -2460,6 +2516,7 @@
     if (!status) return false;
     const rel = releasesBlock(status);
     if (rel.restart_required) return true;
+    if (rel.update_available) return true;
     if (rel.staged_version) return true;
     if (pendingInstaller(status)) return true;
     const latest = rel.known_latest;
@@ -2467,8 +2524,11 @@
     return !!(latest && current && String(latest) !== String(current));
   }
 
+  // GAP-528: бейдж «есть что поставить» обязан загораться и в свободной
+  // редакции (обновление диспетчера по PyPI), и в платной — суммой обеих
+  // проверок, а не только канала издателя (companionHasNews).
   function renderUpdatesBadge(status) {
-    const news = companionHasNews(status);
+    const news = companionHasNews(status) || !!(lastSelfVersion && lastSelfVersion.update_available);
     const badge = byId("updates-badge");
     if (badge) badge.hidden = !news;
     // GAP-279: фолбэк без разрешения на уведомления — бейдж плюс заголовок вкладки
@@ -2559,9 +2619,12 @@
       preview.hidden = !staged;
       if (staged) preview.textContent = installerPreviewText(status, staged);
     }
+    // GAP-528: длинный абзац описания канала ушёл из разметки (`upd-mcp-desc`
+    // убран) — та же информация (что сделает установщик, что закрыть перед
+    // запуском) теперь идёт в ту же строку деталей, что и статус запуска.
+    let installerNote = "";
     if (staged) {
-      byId("upd-mcp-desc").textContent =
-        `Установщик ${staged.version} скачан и проверен: он обновит MCP-сервер, диспетчер, ` +
+      installerNote = `Установщик ${staged.version} скачан и проверен: он обновит MCP-сервер, диспетчер, ` +
         "скиллы и документацию. " + INSTALL_CLOSE_APPS_NOTE;
     }
 
@@ -2570,7 +2633,7 @@
       setDetail("upd-installer-detail",
         `Установщик ${launched.version || ""} выполняется — диспетчер перезапустится сам.`);
     } else {
-      setDetail("upd-installer-detail", "");
+      setDetail("upd-installer-detail", installerNote);
     }
   }
 
@@ -2972,15 +3035,17 @@
     // 1. Остановлен/ошибка — причина видна ВСЕГДА, не только при этих двух условиях.
     const failed = !!cycle.halted || block.status === "error";
     if (failed) {
+      const reason = cycle.halted ? (cycle.halt_reason || "повторы остановлены до вмешательства")
+                                   : (String(block.detail || "") || "ошибка синхронизации");
+      setChip("upd-patterns-chip", "err", "ошибка", reason);
       metaEl.textContent = "Синхронизация паттернов остановлена";
-      setDetail("upd-patterns-detail",
-        cycle.halted ? (cycle.halt_reason || "повторы остановлены до вмешательства")
-                     : (String(block.detail || "") || "ошибка синхронизации"));
+      setDetail("upd-patterns-detail", reason);
       return;
     }
 
-    // 2. Канал ни разу не отрабатывал — честно так и сказать.
+    // 2. Канал ни разу не отрабатывал — честно так и сказать, без чипа.
     if (!block.last_run_at) {
+      setChip("upd-patterns-chip", null, "", "");
       metaEl.textContent = "Первая синхронизация паттернов ещё не проходила";
       setDetail("upd-patterns-detail", "");
       return;
@@ -2991,25 +3056,25 @@
     const totalAvailable = block.total_available === null || block.total_available === undefined
       ? null : Number(block.total_available);
     const whenChecked = describeMoment(block.last_run_at);
+    const countText = pluralPatterns(totalAvailable !== null ? totalAvailable : appliedCount);
+
+    // Канал синхронизируется автоматически и молча держит базу актуальной — «доступна
+    // N» здесь смысла не имеет (издатель не публикует отдельную «версию базы» для
+    // сравнения): чип всегда «актуально», содержательная разница — в строке статуса.
+    setChip("upd-patterns-chip", "ok", "актуально", "");
 
     // 3. Отработал успешно, новых у издателя нет — дельта пустая, это УСПЕХ, а не
     // «не синхронизировались»: счётчик при этом — фактически доступная база (поставочная
     // + всё, что применялось раньше), а не дельта последнего тика.
     if (!appliedCount && !version) {
-      const parts = ["Все паттерны уже внутри BPMkit. Новых не появилось"];
-      if (totalAvailable !== null) parts.push(pluralPatterns(totalAvailable));
-      parts.push(`проверено ${whenChecked}`);
-      metaEl.textContent = parts.join(" · ");
+      metaEl.textContent = `${countText} · автоматически, ${whenChecked}`;
       setDetail("upd-patterns-detail", "");
       return;
     }
 
     // 4. Отработал, дельта применена.
-    const parts = [];
-    if (version) parts.push(`Версия базы ${version}`);
-    parts.push(pluralPatterns(totalAvailable !== null ? totalAvailable : appliedCount));
-    parts.push(`обновлено ${whenChecked}`);
-    metaEl.textContent = parts.join(" · ");
+    const verPart = version ? `версия базы ${version} · ` : "";
+    metaEl.textContent = `${verPart}${countText} · автоматически, ${whenChecked}`;
     setDetail("upd-patterns-detail", "");
   }
 
@@ -3018,39 +3083,48 @@
     const current = rel.current_version || "";
     const latest = rel.known_latest || "";
     const staged = rel.staged_version || "";
-    const hasNew = !!(latest && current && String(latest) !== String(current));
+    // GAP-528: `update_available` — поле канала (стейджинг ИЛИ известная более новая
+    // версия), а не пересчёт на глаз по `known_latest` vs `current_version` (та
+    // сверка ломается на приближённом `current_version` из `running_version`).
+    const hasNew = !!rel.update_available;
     // GAP-463: издатель объявил, что версия `latest` ставится установщиком — канал её
     // никогда не подготовит (`staged` для неё не появится, см.
     // `standkit_companion.releases.stage`), поэтому смотрим на флаг, а не на `staged`.
     const installerRequired = hasNew && !!rel.requires_installer;
 
-    const avail = byId("upd-mcp-avail");
-    avail.hidden = !(hasNew || staged);
-    if (!avail.hidden) {
-      avail.textContent = installerRequired ? `нужен установщик ${latest}` : `доступна ${staged || latest}`;
+    const currentEl = byId("upd-mcp-current");
+    if (currentEl) {
+      currentEl.textContent = current || "версия неизвестна";
+      // GAP-528 п.2а: если версия — приближение (маркер работающего процесса, а не
+      // честный `current.json`), title честно об этом говорит, не разбавляя строку.
+      currentEl.title = rel.current_version_source === "running"
+        ? "Приближённо: версия запущенного процесса (файл маркера установки не найден)"
+        : "";
+    }
+    if (installerRequired) {
+      setChip("upd-mcp-chip", "new", `нужен установщик ${latest}`, "");
+    } else if (staged) {
+      setChip("upd-mcp-chip", "new", `доступна ${staged}`, "");
+    } else if (hasNew) {
+      setChip("upd-mcp-chip", "new", `доступна ${latest}`, "");
+    } else if (rel.status === "error") {
+      setChip("upd-mcp-chip", "err", "ошибка", String(rel.detail || "ошибка проверки"));
+    } else if (current) {
+      setChip("upd-mcp-chip", "ok", "актуально", "");
+    } else {
+      setChip("upd-mcp-chip", null, "", "");
     }
 
-    const parts = [];
-    parts.push(current ? `Установлено ${current}` : "Установленная версия неизвестна");
-    if (installerRequired) parts.push(`требуется установщик ${latest}`);
-    else if (staged) parts.push(`скачано ${staged}`);
-    else if (hasNew) parts.push(`доступно ${latest}`);
-    else if (current) parts.push("это последняя версия");
-    if (rel.last_check_at) parts.push(`проверено ${describeMoment(rel.last_check_at)}`);
-    byId("upd-mcp-meta").textContent = parts.join(" · ");
-
-    // GAP-463: тихим обновлением эту версию доставить нельзя — текст говорит об этом
-    // прямо, вместо обычного «скачивается заранее»/«скачана и проверена». Ссылку на
-    // скачивание не обещаем: в снимке канала достоверного адреса поставки нет — только
-    // общее «у издателя», как и в остальном тексте диспетчера (см. `COMPANION_ACTION_REASONS`,
-    // "издатель" в описании циклов).
-    byId("upd-mcp-desc").textContent = installerRequired
-      ? `Версия ${latest} ставится установщиком — тихим обновлением её доставить нельзя. Скачайте новую поставку у издателя BPMkit и запустите установку.`
-      : staged
-        ? "Новая версия скачана и проверена. После установки перезапустите Claude Desktop — иначе продолжит работать прежняя версия."
-        : "Новая версия проверяется и скачивается заранее; подмена файла происходит только по вашей команде.";
-
     setDetail("upd-mcp-detail", rel.status === "error" ? String(rel.detail || "") : "");
+
+    // Вторая строка — «▸ Что нового в X · после установки перезапустите Claude
+    // Desktop» — только при доступной версии (макет владельца): длинные абзацы
+    // «скачивается заранее»/«установщик подмену не сделает» ушли из UI, их смысл
+    // остаётся в title чипа/детали и в самом факте наличия кнопок.
+    const sub = byId("upd-mcp-sub");
+    if (sub) sub.hidden = !hasNew;
+    const restartHint = byId("upd-mcp-restart-hint");
+    if (restartHint) restartHint.hidden = !hasNew || installerRequired;
 
     const install = byId("upd-install-btn");
     // Пока кнопка занята, её подпись держит setButtonBusy — перерисовка статуса
@@ -3058,6 +3132,9 @@
     if (!companionBusy && install.dataset.idleLabel === undefined) {
       install.textContent = staged ? `Установить ${staged}` : "Установить";
     }
+    // GAP-528: кнопка «Установить» — только когда действительно есть что ставить
+    // тихим обновлением (staged/hasNew без требования установщика), а не всегда.
+    install.hidden = installerRequired || !hasNew;
 
     // «Откатить» показывается только когда откат реально возможен: кнопка,
     // которая всегда выключена, — это вопрос без ответа, а не подсказка.
@@ -3171,22 +3248,16 @@
     const current = hub.current || hubVersion || "";
     const latest = hub.known_latest || "";
     const staged = (hub.staged && hub.staged.version) || "";
-    const hasNew = !!(latest && current && String(latest) !== String(current));
+    // GAP-528: тот же принцип, что у MCP — поле канала `update_available`
+    // (стейджинг ИЛИ известная более новая), не пересчёт на глаз.
+    const hasNew = !!hub.update_available;
 
-    const avail = byId("upd-hub-avail");
-    if (avail) {
-      avail.hidden = !(hasNew || staged);
-      if (!avail.hidden) avail.textContent = `доступна ${staged || latest}`;
-    }
-
-    const parts = [];
-    parts.push(current ? `Установлено ${current}` : "Установленная версия неизвестна");
-    if (staged) parts.push(`скачано ${staged}`);
-    else if (hasNew) parts.push(`доступно ${latest}`);
-    else if (current) parts.push("это последняя версия");
-    if (hub.last_check_at) parts.push(`проверено ${describeMoment(hub.last_check_at)}`);
-    const metaEl = byId("upd-hub-meta");
-    if (metaEl) metaEl.textContent = parts.join(" · ");
+    const currentEl = byId("upd-hub-current");
+    if (currentEl) currentEl.textContent = (current ? `${current} · pip` : "версия неизвестна");
+    if (hasNew) setChip("upd-hub-chip", "new", `доступна ${staged || latest}`, "");
+    else if (hub.status === "error") setChip("upd-hub-chip", "err", "ошибка", String(hub.detail || "ошибка проверки"));
+    else if (current) setChip("upd-hub-chip", "ok", "последняя", "");
+    else setChip("upd-hub-chip", null, "", "");
 
     const applyBtn = byId("upd-hub-apply-btn");
     const stageBtn = byId("upd-hub-stage-btn");
@@ -3197,13 +3268,11 @@
       // (контракт серии, GAP-523: «сам pip не запускать»).
       if (applyBtn) applyBtn.hidden = true;
       if (stageBtn) stageBtn.hidden = true;
-      if (pipBox) pipBox.hidden = false;
+      // GAP-528: команда pip — второй строкой, и ТОЛЬКО когда есть что ставить.
+      if (pipBox) pipBox.hidden = !hasNew;
       if (restartBtn) restartBtn.hidden = false;
-      const desc = byId("upd-hub-desc");
-      if (desc) {
-        desc.textContent = hasNew
-          ? `Установлена pip-сборка standkit ${current}, на PyPI доступна ${latest}. Выполните команду ниже в терминале, затем перезапустите диспетчер.`
-          : `Установлена pip-сборка standkit ${current}. Обновление — командой pip, не диспетчером.`;
+      if (currentEl) {
+        currentEl.title = "Программа (standkit-hub), pip-установка. Обновление — командой pip, не диспетчером";
       }
     } else {
       if (pipBox) pipBox.hidden = true;
@@ -3240,52 +3309,130 @@
     const current = (skl.installed && skl.installed.version) || "";
     const latest = skl.known_latest || "";
     const staged = (skl.staged && skl.staged.version) || "";
-    const hasNew = !!(latest && current && String(latest) !== String(current));
+    // GAP-528: поле канала, тот же принцип, что у MCP/диспетчера.
+    const hasNew = !!skl.update_available;
 
-    const avail = byId("upd-skills-avail");
-    if (avail) {
-      avail.hidden = !(hasNew || staged);
-      if (!avail.hidden) avail.textContent = `доступна ${staged || latest}`;
+    const currentEl = byId("upd-skills-current");
+    if (currentEl) {
+      currentEl.textContent = current || "версия неизвестна";
+      // GAP-528 п.2б: фолбэк на версию запущенного MCP, когда честного
+      // installed.json ещё нет — тот же принцип, что у current_version_source MCP.
+      currentEl.title = skl.installed_source === "running"
+        ? "Приближённо: версия запущенного MCP (installed.json ещё не записан)"
+        : "";
     }
+    if (hasNew) setChip("upd-skills-chip", "new", `доступна ${staged || latest}`, "");
+    else if (skl.status === "error") setChip("upd-skills-chip", "err", "ошибка", String(skl.detail || "ошибка проверки"));
+    else if (current) setChip("upd-skills-chip", "ok", "актуально", "");
+    else setChip("upd-skills-chip", null, "", "");
 
-    const parts = [];
-    parts.push(current ? `Установлено ${current}` : "Установленная версия неизвестна");
-    if (staged) parts.push(`скачано ${staged}`);
-    else if (hasNew) parts.push(`доступно ${latest}`);
-    else if (current) parts.push("это последняя версия");
-    if (skl.last_check_at) parts.push(`проверено ${describeMoment(skl.last_check_at)}`);
-    const metaEl = byId("upd-skills-meta");
-    if (metaEl) metaEl.textContent = parts.join(" · ");
-
-    const pluginPath = byId("upd-skills-plugin-path");
-    if (pluginPath) {
-      pluginPath.textContent = install.plugin_dir
-        ? `Плагин для Claude Desktop/Cowork: ${install.plugin_dir}`
-        : "Плагин для Claude Desktop/Cowork: —";
-    }
-
+    // Харнессы, у которых скиллы установлены — списком через « · » в самой
+    // статус-строке (макет владельца), вместо отдельного <ul>.
     const clientsEl = byId("upd-skills-clients");
+    const harnesses = (install.clients || []).filter((c) => c.skills_installed);
     if (clientsEl) {
-      clientsEl.innerHTML = "";
-      (install.clients || []).forEach((c) => {
-        const li = document.createElement("li");
-        const mark = c.skills_installed ? "скиллы обновлены" : "скиллы не установлены";
-        li.textContent = `${c.name || c.id}: ${mark}`;
-        clientsEl.appendChild(li);
-      });
+      clientsEl.textContent = harnesses.length
+        ? harnesses.map((c) => c.name || c.id).join(" · ")
+        : "";
+      clientsEl.title = install.plugin_dir ? `Папка плагина: ${install.plugin_dir}` : "";
+    }
+    // GAP-528: ссылка «Скиллы в харнессах» ведёт на якорь первого найденного
+    // харнесса (по умолчанию #harness-claude-code — как в задаче).
+    const harnessLink = byId("upd-skills-harness-link");
+    if (harnessLink) {
+      const firstId = harnesses.length ? String(harnesses[0].id || "").trim() : "";
+      harnessLink.href = `/bpmkit-cookbook#harness-${firstId || "claude-code"}`;
     }
 
     const applyBtn = byId("upd-skills-apply-btn");
     if (applyBtn) {
-      applyBtn.hidden = !staged;
+      // GAP-528: кнопка — только когда есть что применять.
+      applyBtn.hidden = !hasNew;
       if (staged && !companionBusy && applyBtn.dataset.idleLabel === undefined) {
         applyBtn.textContent = `Обновить скиллы ${staged}`;
+      } else if (!companionBusy && applyBtn.dataset.idleLabel === undefined) {
+        applyBtn.textContent = "Обновить скиллы";
       }
     }
     const stageBtn = byId("upd-skills-stage-btn");
     if (stageBtn) stageBtn.hidden = !(hasNew && !staged);
 
     setDetail("upd-skills-detail", skl.status === "error" ? String(skl.detail || "") : "");
+  }
+
+  // --- GAP-528: «Диспетчер стендов» по PyPI в СВОБОДНОЙ редакции (нет лицензии/
+  // Companion) — GET/POST /api/hub/self-version, работает без канала издателя
+  // вовсе (см. докстринг standkit_hub/self_version.py). ---
+
+  let lastSelfVersion = null;
+
+  function selfVersionBlock() {
+    return lastSelfVersion || {};
+  }
+
+  function renderSelfVersionRow(data) {
+    lastSelfVersion = data || null;
+    const currentEl = byId("upd-self-current");
+    const mode = data && data.mode;
+    const current = (data && data.current) || "";
+    if (currentEl) {
+      currentEl.textContent = current
+        ? `${current} · ${mode === "frozen" ? "установщик" : "pip"}`
+        : "версия неизвестна";
+    }
+    const latest = (data && data.latest) || "";
+    const hasNew = !!(data && data.update_available);
+    if (hasNew) {
+      setChip("upd-self-chip", "new", `доступна ${latest}`, "");
+    } else if (data && data.error) {
+      setChip("upd-self-chip", "err", "ошибка", String(data.error));
+    } else if (current) {
+      setChip("upd-self-chip", "ok", "последняя", "");
+    } else {
+      setChip("upd-self-chip", null, "", "");
+    }
+    setDetail("upd-self-detail", data && data.error ? String(data.error) : "");
+
+    const pipBox = byId("upd-self-pip");
+    const pipCmd = byId("upd-self-pip-cmd");
+    if (pipBox) pipBox.hidden = !(hasNew && mode !== "frozen");
+    if (pipCmd) pipCmd.textContent = (data && data.pip_command) || "python -m pip install -U standkit";
+
+    const restartBtn = byId("upd-self-restart-btn");
+    if (restartBtn) restartBtn.hidden = mode === "frozen" ? true : !hasNew;
+  }
+
+  async function refreshSelfVersion(options) {
+    const quiet = !!(options && options.quiet);
+    try {
+      const data = await apiGet("/api/hub/self-version");
+      renderSelfVersionRow(data);
+      renderUpdatesBadge(lastCompanionStatus);
+    } catch (e) {
+      if (!quiet) {
+        const errorEl = byId("updates-error");
+        if (errorEl) errorEl.textContent = describeApiError(e);
+      }
+    }
+  }
+
+  async function runSelfVersionCheck(btn) {
+    const errorEl = byId("updates-error");
+    if (errorEl) errorEl.textContent = "";
+    const statusEl = byId("updates-check-status");
+    if (statusEl) statusEl.textContent = "";
+    setButtonBusy(btn, "Проверяем…");
+    try {
+      const data = await apiSend("POST", "/api/hub/self-version/check", {});
+      renderSelfVersionRow(data);
+      renderUpdatesBadge(lastCompanionStatus);
+      if (statusEl) statusEl.textContent = "проверено только что";
+      applyUpdatesEditionView();
+    } catch (e) {
+      if (errorEl) errorEl.textContent = describeApiError(e);
+    } finally {
+      clearButtonBusy(btn);
+    }
   }
 
   function renderCompanionStatus(status) {
@@ -3307,6 +3454,7 @@
     renderUpdatesBadge(status);
     updateCompanionActions(status);
     maybeNotifyUpdates(status);
+    if (updatesDialogIsOpen()) applyUpdatesEditionView();
 
     const rel = releasesBlock(status);
     byId("updates-checked-at").textContent = rel.last_check_at
@@ -3362,14 +3510,19 @@
       // Точку в конце ставим сами: серверный текст — это заголовок причины, он
       // приходит без завершающей точки, и без неё две фразы слипаются в одну.
       const reason = String(message || "").trim().replace(/[.\s]+$/, "");
-      note.hidden = false;
-      note.textContent =
-        `${reason}. Канал доставки обновлений издателя (паттерны и обновления MCP) ` +
-        "входит в платную редакцию BPMkit; управление стендами работает без него.";
+      // GAP-528 (макет владельца 24.09.2026): в бесплатной редакции отдельную
+      // плашку не показываем — её смысл несёт строка-замок под диспетчером;
+      // причину (серверный текст) оставляем подсказкой на ней.
+      note.hidden = true;
+      note.textContent = "";
+      const lock = byId("upd-lock");
+      if (lock) lock.title = `${reason}. Управление стендами работает без канала обновлений.`;
     }
     const badge = byId("updates-badge");
     if (badge) badge.hidden = true;
     updateStatuslinePatterns(null);
+    renderUpdatesBadge(null);
+    if (updatesDialogIsOpen()) applyUpdatesEditionView();
   }
 
   async function refreshCompanionStatus(options) {
@@ -3428,6 +3581,11 @@
 
   function setupUpdatesDialog() {
     document.querySelectorAll("[data-companion-action]").forEach((btn) => {
+      // GAP-528: «Проверить [обновления]» в подвале несёт data-companion-action
+      // ТОЛЬКО ради контракта «каждая кнопка канала — известное действие»
+      // (test_companion_buttons_match_api_routes) — её реальный обработчик ниже
+      // умеет выбирать между каналом издателя и self-version по редакции окна.
+      if (btn.id === "updates-check-btn") return;
       // «Установить обновление» установщиком и «Обновить диспетчер» — свои
       // сценарии: предпросмотр/подтверждение, ожидание перезапуска (GAP-279/GAP-523).
       btn.addEventListener("click", () => {
@@ -3437,11 +3595,15 @@
         return runCompanionAction(action, btn);
       });
     });
-    // GAP-523: команда pip — только «Копировать», сам pip диспетчер не запускает.
-    const pipCopyBtn = byId("upd-hub-pip-copy-btn");
-    if (pipCopyBtn) {
+    // GAP-523/GAP-528: команда pip — только «Копировать», сам pip диспетчер не
+    // запускает. Общий обработчик для платной (upd-hub-pip-*) и свободной
+    // (upd-self-pip-*) карточек — тот же UX, разные id разметки.
+    ["upd-hub-pip-copy-btn", "upd-self-pip-copy-btn"].forEach((btnId) => {
+      const pipCopyBtn = byId(btnId);
+      if (!pipCopyBtn) return;
       pipCopyBtn.addEventListener("click", async () => {
-        const cmdEl = byId("upd-hub-pip-cmd");
+        const cmdId = btnId === "upd-hub-pip-copy-btn" ? "upd-hub-pip-cmd" : "upd-self-pip-cmd";
+        const cmdEl = byId(cmdId);
         const text = cmdEl ? cmdEl.textContent : "";
         try {
           await navigator.clipboard.writeText(text);
@@ -3450,16 +3612,14 @@
           toast("Не удалось скопировать — выделите текст вручную");
         }
       });
-    }
-    // GAP-523: pip-режим — перезапуск существующим не-elevated путём хаба.
-    const hubRestartBtn = byId("upd-hub-restart-btn");
-    if (hubRestartBtn) {
-      // Переиспользуем существующий не-elevated сценарий перезапуска (см.
-      // restartHubFlow выше) — та же кнопка «Перезапустить диспетчер», что и
-      // в «О программе», просто вызванная из карточки «Диспетчер стендов».
-      hubRestartBtn.addEventListener("click", () => restartHubFlow(hubRestartBtn));
-    }
-    // GAP-288: «Открыть папку» — фиксированная цель "plugin", путь строит хаб.
+    });
+    // GAP-523/GAP-528: pip-режим — перезапуск существующим не-elevated путём хаба
+    // (та же кнопка «Перезапустить», что и в «О программе»), в обеих редакциях.
+    ["upd-hub-restart-btn", "upd-self-restart-btn"].forEach((btnId) => {
+      const hubRestartBtn = byId(btnId);
+      if (hubRestartBtn) hubRestartBtn.addEventListener("click", () => restartHubFlow(hubRestartBtn));
+    });
+    // GAP-288: «Папка плагина» — фиксированная цель "plugin", путь строит хаб.
     document.querySelectorAll("[data-hub-open-folder]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const target = btn.dataset.hubOpenFolder;
@@ -3475,7 +3635,15 @@
     if (installOverlayCloseBtn) installOverlayCloseBtn.addEventListener("click", hideInstallOverlay);
     byId("btn-updates").addEventListener("click", openUpdatesDialog);
     byId("updates-close-btn").addEventListener("click", closeUpdatesDialog);
-    byId("updates-close-footer-btn").addEventListener("click", closeUpdatesDialog);
+    // GAP-528: одна кнопка «Проверить [обновления]» в подвале — платная редакция
+    // дёргает канал издателя, свободная — self-version force-check.
+    const checkBtn = byId("updates-check-btn");
+    if (checkBtn) {
+      checkBtn.addEventListener("click", () => {
+        if (companionAvailable) return runCompanionAction("check_update", checkBtn);
+        return runSelfVersionCheck(checkBtn);
+      });
+    }
     bindOverlayDismiss(byId("updates-overlay"), closeUpdatesDialog);
     document.addEventListener("keydown", (evt) => {
       if (evt.key === "Escape" && updatesDialogIsOpen()) closeUpdatesDialog();
@@ -3778,7 +3946,9 @@
       && LICENSE_CHANNEL_STATUSES.indexOf(snapshot.status) >= 0;
     // Кнопка «Обновления» и одноимённый раздел настроек существуют только там,
     // где им есть что делать: без лицензии канал издателя не работает вовсе.
-    byId("btn-updates").hidden = !known;
+    // GAP-528: кнопка «Обновления» видна всегда (платная и свободная редакция
+    // показывают разное содержимое окна — см. applyUpdatesEditionView); только
+    // раздел настроек «Обновления» остаётся привязан к лицензии.
     byId("rail-updates").hidden = !known;
     if (!known && document.querySelector('.settings-pane[data-pane="updates"].active')) {
       selectSettingsPane("general");
@@ -4705,10 +4875,15 @@
     // так бейдж «есть новая версия / нужен перезапуск» может зажечься на кнопке
     // в шапке у человека, который в окно не заглядывает.
     refreshCompanionStatus({ quiet: true });
+    // GAP-528: self-version (диспетчер по PyPI) опрашивается всегда, независимо от
+    // канала издателя — это единственная карточка обновлений свободной редакции, и
+    // её бейдж обязан загораться, даже когда /api/companion/status отвечает 503.
+    refreshSelfVersion({ quiet: true });
     // GAP-279: редкий фоновый опрос канала — иначе уведомление «найдено обновление»
     // и заголовок вкладки срабатывали бы только при открытом окне «Обновления».
     setInterval(() => {
       if (companionAvailable && !updatesDialogIsOpen()) refreshCompanionStatus({ quiet: true });
+      if (!updatesDialogIsOpen()) refreshSelfVersion({ quiet: true });
     }, COMPANION_BACKGROUND_POLL_MS);
     setupUpdateNotifications();
     // Лицензия — тоже сразу: баннер «истекает через 3 дня» обязан появиться до

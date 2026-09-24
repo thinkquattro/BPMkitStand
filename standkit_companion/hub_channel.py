@@ -34,17 +34,15 @@ pip-режиме отказывают `self_update_unsupported` ДО любог�
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
 from pathlib import Path
 from typing import Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from standkit import __version__ as _standkit_version
 from standkit.platform import ProcessError, spawn_hidden
+from standkit_hub import self_version as _self_version
 
 from . import fsutil, signature
 from .backend import CONTENT_PREFIX
@@ -88,12 +86,15 @@ HUB_PREFIX = f"{CONTENT_PREFIX}/hub"
 _HUB_FILENAME_RE = re.compile(r"^bpmkit-hub-\d+(?:\.\d+)*\.exe\Z")
 
 #: Публичный JSON-эндпоинт PyPI для best-effort проверки версии в pip-режиме.
-#: НЕ лицензионный бэкенд издателя — отдельный хост, без авторизации, поэтому
-#: идёт напрямую через `urllib`, а не через `BackendClient`.
-PYPI_PACKAGE_URL = "https://pypi.org/pypi/standkit/json"
+#: НЕ лицензионный бэкенд издателя — отдельный хост, без авторизации. Само
+#: значение и сетевой поход теперь живут в `standkit_hub.self_version`
+#: (GAP-528: свободная редакция без `standkit_companion` тоже умеет спросить
+#: PyPI про диспетчер, см. докстринг модуля) — здесь только алиас, чтобы не
+#: ломать импорт `hub_channel.PYPI_PACKAGE_URL` там, где на него уже
+#: ссылаются (тесты, CLI).
+PYPI_PACKAGE_URL = _self_version.PYPI_PACKAGE_URL
 
-#: Таймаут запроса к PyPI. Best-effort проверка не имеет права подвесить тик
-#: канала на системный таймаут сети (десятки секунд).
+#: Таймаут запроса к PyPI — тот же алиас, см. `PYPI_PACKAGE_URL` выше.
 _PYPI_TIMEOUT_S = 6.0
 
 
@@ -185,19 +186,26 @@ def check_hub_pypi(*, timeout: float = _PYPI_TIMEOUT_S) -> dict:
     проверка не имеет права остановить канал целиком за отказ стороннего,
     неуправляемого издателем сервиса.
 
-    Ключ ответа PyPI — `info.version` (контракт `GET /pypi/<name>/json`, тот же
-    у самого PyPI, не BPMkit-специфика)."""
-    try:
-        req = Request(PYPI_PACKAGE_URL, headers={"Accept": "application/json"})
-        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - фиксированный https-хост
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (URLError, HTTPError, ValueError, OSError, UnicodeDecodeError) as exc:
+    Сам сетевой поход и посегментная сверка версий переехали в
+    `standkit_hub.self_version` (GAP-528) — эта функция ТОЛЬКО переводит
+    его нейтральный ответ в контракт канала (`mode`/`available`/`reason`/
+    `pip_command`). `force=True` — явное действие человека (кнопка
+    «Проверить»/цикл канала) обязано ходить в сеть КАЖДЫЙ раз, а не отдавать
+    шестичасовой кэш бесплатной карточки `/api/hub/self-version`; сам ответ
+    при этом всё равно кладётся в тот же процессный кэш — следующий `GET
+    /api/hub/self-version` увидит его и не сходит в сеть повторно."""
+    entry = _self_version.cached_pypi_latest(
+        force=True,
+        fetch=lambda: _self_version.fetch_pypi_latest(timeout=timeout),
+    )
+    error = entry.get("error")
+    if error:
         return {
             "mode": "pip", "available": False, "latest": None,
             "current": _standkit_version, "reason": "offline",
-            "detail": f"{type(exc).__name__}: {exc}",
+            "detail": error,
         }
-    latest = str((payload.get("info") or {}).get("version") or "").strip()
+    latest = entry.get("latest")
     available = bool(latest) and compare_versions(latest, _standkit_version) > 0
     return {
         "mode": "pip",
@@ -205,7 +213,7 @@ def check_hub_pypi(*, timeout: float = _PYPI_TIMEOUT_S) -> dict:
         "latest": latest or None,
         "current": _standkit_version,
         "reason": "update_available" if available else "up_to_date",
-        "pip_command": "python -m pip install -U standkit",
+        "pip_command": _self_version.PIP_INSTALL_COMMAND,
     }
 
 
@@ -400,14 +408,26 @@ def staged_hub_info(state) -> Optional[dict]:
 
 
 def hub_status(state) -> dict:
-    """Карточка канала диспетчера для `/api/companion/status`."""
+    """Карточка канала диспетчера для `/api/companion/status`.
+
+    `update_available` (GAP-528 п.2в): есть либо УЖЕ подготовленный диспетчер
+    (`staged`), либо известная более новая версия (`known_latest` строго
+    больше запущенной `current`) — UI прячет кнопку «Установить», когда
+    ставить нечего, вместо того чтобы решать это на глаз по наличию `staged`.
+    """
+    staged = staged_hub_info(state)
+    known_latest = state.hub.get("known_latest")
+    update_available = bool(staged) or (
+        bool(known_latest) and compare_versions(known_latest, _standkit_version) > 0
+    )
     return {
         "mode": state.hub.get("mode"),
         "frozen": is_frozen_hub(),
         "current": _standkit_version,
-        "known_latest": state.hub.get("known_latest"),
-        "staged": staged_hub_info(state),
+        "known_latest": known_latest,
+        "staged": staged,
         "self_update_launched": state.hub.get("self_update_launched"),
+        "update_available": update_available,
     }
 
 
