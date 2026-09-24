@@ -795,6 +795,10 @@ def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext"
     block["since_id"] = cursor_id
     block["seeded"] = True
     block["root"] = str(Path(override_root))
+    # GAP-528: «последний тик реально что-то поставил» — единственный сигнал, по
+    # которому UI показывает кнопку «Загрузить новые» (см. `state.py::summary`).
+    # Пустая дельта сбрасывает флаг сама, следующим тиком.
+    block["had_new_last_run"] = bool(applied_count or removed_count)
     if last_bundle:
         block["last_bundle_sha256"] = last_bundle
     detail = (f"страниц {pages}, получено {fetched}, применено {applied_count}, "

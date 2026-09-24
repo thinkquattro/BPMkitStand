@@ -487,6 +487,47 @@ def test_empty_delta_is_ok_and_touches_nothing(tmp_path):
     assert {p: p.stat().st_mtime_ns for p in override.rglob("*") if p.is_file()} == mtimes
 
 
+def test_had_new_last_run_flags_delta_and_resets_on_empty_tick(tmp_path):
+    """GAP-528: `patterns.had_new_last_run` (сводка — `state.summary()["patterns"]
+    ["new_available"]`) — единственный сигнал кнопки «Загрузить новые» в окне
+    «Обновления»: True сразу после тика, применившего хоть один патторн, и False
+    на следующем тике без дельты — сам `sync` дренирует очередь целиком за проход,
+    «доступно, но не скачано» состояния у канала нет."""
+    ctx, state, override = make_env(tmp_path)
+
+    assert state.summary()["patterns"]["new_available"] is False, (
+        "До первой синхронизации флага нет и быть не может")
+
+    pm.sync(FakeClient([page([pattern(1, title="Первый", body=BODY_TASK)],
+                             next_since="2026-08-01T10:00:00Z", next_since_id=1)]),
+            state, ctx, CompanionSettings())
+    assert state.patterns["had_new_last_run"] is True
+    assert state.summary()["patterns"]["new_available"] is True, (
+        "Тик применил новый паттерн — кнопка «Загрузить новые» обязана появиться")
+
+    pm.sync(FakeClient([page([], since="2026-08-01T10:00:00Z", since_id=1,
+                             next_since="2026-08-01T10:00:00Z", next_since_id=1)]),
+            state, ctx, CompanionSettings())
+    assert state.patterns["had_new_last_run"] is False
+    assert state.summary()["patterns"]["new_available"] is False, (
+        "Следующий тик без дельты обязан снова спрятать кнопку — паттерн из "
+        "предыдущего прохода уже на диске, повторно грузить нечего")
+
+
+def test_had_new_last_run_true_on_tombstone_only_tick(tmp_path):
+    """Отзыв без единой новой записи — тоже «есть что применить у канала»: флаг
+    обязан подняться и на чистом tombstone-тике, не только на добавлении."""
+    ctx, state, override = make_env(tmp_path)
+    pm.sync(FakeClient([page([pattern(1, title="Первый", body=BODY_TASK)],
+                             next_since="2026-08-01T10:00:00Z", next_since_id=1)]),
+            state, ctx, CompanionSettings())
+    pm.sync(FakeClient([page([tombstone(1)], since="2026-08-01T10:00:00Z", since_id=1,
+                             next_since="2026-08-02T10:00:00Z", next_since_id=2)]),
+            state, ctx, CompanionSettings())
+    assert state.patterns["had_new_last_run"] is True, (
+        "Отзыв паттерна — тоже дельта, о которой стоит сказать пользователю")
+
+
 # --------------------------------------------------------------------------------------
 # 4. Отзыв (tombstone)
 # --------------------------------------------------------------------------------------

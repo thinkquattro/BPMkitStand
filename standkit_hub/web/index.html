@@ -1140,20 +1140,35 @@
     <span id="sl-stands"></span>
   </footer>
 
-  <!-- ═══ Окно «Обновления» (GAP-528) ═══
+  <!-- ═══ Окно «Обновления» (GAP-528, правки владельца по живому хосту) ═══
        Диалог, а не отдельный экран: обновления — редкое действие, ради
-       которого не стоит уводить человека со списка стендов. Компактная
-       сетка «иконка 34px | название + статус-строка | кнопки» — одна строка
-       на канал вместо абзацев описаний (макет владельца
-       updates_mockup_v2.html). Платная редакция (Companion, `#upd-paid-rows`)
-       показывает 4 канала; свободная (`#upd-free-rows`) — только диспетчер по
-       PyPI (`GET /api/hub/self-version`). Какой блок виден — решает
-       app.js::applyUpdatesEditionView по факту ответа /api/companion/status. -->
+       которого не стоит уводить человека со списка стендов. Сетка строки —
+       «иконка 34px | название + мета-строка | статус (140px, чип по левому
+       краю колонки) | действия (150px, по правому краю)»: чип стоит СВОЕЙ
+       колонкой у всех строк, а не «гуляет» вслед за длиной версии/текста
+       (правка владельца после просмотра на живом хосте). Кнопка «Проверить»
+       — в шапке рядом с «проверено N назад», подвала у окна больше нет.
+       Платная редакция (Companion, `#upd-paid-rows`) показывает 4 канала;
+       свободная (`#upd-free-rows`) — только диспетчер по PyPI (`GET
+       /api/hub/self-version`). Какой блок виден — решает
+       app.js::applyUpdatesEditionView по факту ответа /api/companion/status.
+       Кнопка каждого канала («Загрузить новые»/«Установить»/«Скачать»/
+       «Обновить скиллы») видна ТОЛЬКО когда есть что поставить — прячет её
+       та же функция, что красит чип (см. render*Row в app.js); кнопки
+       «Перезапустить» в окне больше нет — перезапуск диспетчера живёт в
+       настройках. -->
   <div id="updates-overlay" class="modal-overlay" hidden>
     <div class="modal-box modal-box-updates" role="dialog" aria-modal="true" aria-labelledby="updates-title">
       <div class="modal-header">
         <h2 id="updates-title">Обновления BPMkit</h2>
-        <span id="updates-checked-at" class="status-text"></span>
+        <div class="upd-header-actions">
+          <span id="updates-checked-at" class="status-text"></span>
+          <span id="updates-check-status" class="status-text"></span>
+          <button type="button" class="secondary upd-header-check-btn" id="updates-check-btn" data-companion-action="check_update" title="Проверить обновления">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 1 2.64 6.36"/><path d="M3 21v-6h6"/></svg>
+            <span id="updates-check-btn-label">Проверить</span>
+          </button>
+        </div>
         <button id="updates-close-btn" class="modal-close-btn" type="button" title="Закрыть" aria-label="Закрыть">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
@@ -1171,13 +1186,18 @@
             <div class="upd-main">
               <div class="upd-title">Паттерны разработки</div>
               <div class="upd-status-line">
-                <span class="upd-chip" id="upd-patterns-chip" hidden></span>
                 <span class="upd-meta" id="upd-patterns-meta">—</span>
               </div>
               <div class="upd-detail" id="upd-patterns-detail" hidden></div>
             </div>
+            <div class="upd-status">
+              <span class="upd-chip" id="upd-patterns-chip" hidden></span>
+            </div>
             <div class="upd-action">
-              <button type="button" class="secondary" data-companion-action="sync_patterns">Обновить</button>
+              <!-- GAP-528: видна ТОЛЬКО когда есть новые паттерны у издателя
+                   (`patterns.new_available` в summary канала, см. app.js::renderPatternsRow) —
+                   канал синхронизируется автоматически, кнопка — для «применить сейчас». -->
+              <button type="button" class="secondary" id="upd-patterns-apply-btn" data-companion-action="sync_patterns" hidden>Загрузить новые</button>
             </div>
           </div>
 
@@ -1189,7 +1209,6 @@
               <div class="upd-title">MCP-сервер BPMkit</div>
               <div class="upd-status-line">
                 <span class="upd-ver" id="upd-mcp-current">—</span>
-                <span class="upd-chip" id="upd-mcp-chip" hidden></span>
               </div>
               <div class="upd-detail" id="upd-mcp-detail" hidden></div>
               <!-- GAP-279: предпросмотр «MCP A→B, диспетчер C→D» перед установкой
@@ -1214,6 +1233,9 @@
                 <span id="upd-mcp-restart-hint" hidden>после установки перезапустите Claude Desktop</span>
               </div>
             </div>
+            <div class="upd-status">
+              <span class="upd-chip" id="upd-mcp-chip" hidden></span>
+            </div>
             <div class="upd-action">
               <!-- GAP-279 (ADR-0048): установка обновления подписанным установщиком целиком
                    (MCP + диспетчер + скиллы + документация). Видна, только когда установщик
@@ -1225,8 +1247,10 @@
             </div>
           </div>
 
-          <!-- GAP-523: карточка «Диспетчер стендов» — самообновление exe-сборки
-               ЛИБО, для pip-установки, команда `pip install -U` + перезапуск. -->
+          <!-- GAP-523/GAP-528: карточка «Диспетчер стендов» — самообновление exe-сборки
+               ЛИБО, для pip-установки, команда `pip install -U` + иконка «копировать»
+               (ВСЕГДА в pip-режиме — правка владельца: копирование команды нужно и без
+               новой версии). Кнопки «Перезапустить» здесь больше нет — она в настройках. -->
           <div class="upd-row">
             <div class="upd-ico">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
@@ -1235,26 +1259,30 @@
               <div class="upd-title">Диспетчер стендов</div>
               <div class="upd-status-line">
                 <span class="upd-ver" id="upd-hub-current">—</span>
-                <span class="upd-chip" id="upd-hub-chip" hidden></span>
               </div>
               <div class="upd-detail" id="upd-hub-detail" hidden></div>
               <div class="upd-pip" id="upd-hub-pip" hidden>
                 <code id="upd-hub-pip-cmd">python -m pip install -U standkit</code>
-                <button type="button" class="secondary upd-icon-btn" id="upd-hub-pip-copy-btn" title="Скопировать команду pip">⧉ pip</button>
               </div>
               <div class="upd-restart" id="upd-hub-wait-note" hidden>
                 <strong>Диспетчер обновляется…</strong><span> сейчас он завершится и перезапустится новой версией — окно обновится само.</span>
               </div>
             </div>
+            <div class="upd-status">
+              <span class="upd-chip" id="upd-hub-chip" hidden></span>
+            </div>
             <div class="upd-action">
               <button type="button" id="upd-hub-apply-btn" data-companion-action="apply_hub" hidden>Установить</button>
-              <button type="button" id="upd-hub-stage-btn" class="secondary" data-companion-action="stage_hub" hidden>Скачать</button>
-              <button type="button" id="upd-hub-restart-btn" class="secondary" data-hub-restart hidden>Перезапустить</button>
+              <button type="button" class="secondary" id="upd-hub-stage-btn" data-companion-action="stage_hub" hidden>Скачать</button>
+              <!-- GAP-528: pip-режим — ВСЕГДА видна (не только при доступной версии). -->
+              <button type="button" class="secondary upd-icon-btn" id="upd-hub-pip-copy-btn" hidden title="Скопировать команду обновления: python -m pip install -U standkit">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
+              </button>
             </div>
           </div>
 
-          <!-- GAP-288: карточка «Скиллы и плагин» — обновление скиллов в найденных
-               клиентах и `.plugin` для ручной загрузки в Claude Desktop/Cowork. -->
+          <!-- GAP-288/GAP-528: карточка «Скиллы и плагин» — обновление скиллов в найденных
+               клиентах и «Папка плагина» иконкой (не текстовой кнопкой). -->
           <div class="upd-row">
             <div class="upd-ico">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 12l-2.5 6-6-2.5-6 2.5L3.5 12l2.5-6 6 2.5 6-2.5z"/></svg>
@@ -1263,7 +1291,6 @@
               <div class="upd-title">Скиллы и плагин</div>
               <div class="upd-status-line">
                 <span class="upd-ver" id="upd-skills-current">—</span>
-                <span class="upd-chip" id="upd-skills-chip" hidden></span>
                 <span id="upd-skills-clients">—</span>
               </div>
               <div class="upd-detail" id="upd-skills-detail" hidden></div>
@@ -1274,10 +1301,15 @@
                 <a href="/bpmkit-cookbook#harness-claude-code" id="upd-skills-harness-link" target="_blank" rel="noopener">Скиллы в харнессах</a>
               </div>
             </div>
+            <div class="upd-status">
+              <span class="upd-chip" id="upd-skills-chip" hidden></span>
+            </div>
             <div class="upd-action">
               <button type="button" id="upd-skills-apply-btn" data-companion-action="apply_skills" hidden>Обновить скиллы</button>
-              <button type="button" id="upd-skills-stage-btn" class="secondary" data-companion-action="stage_skills" hidden>Скачать</button>
-              <button type="button" id="upd-skills-open-folder-btn" class="secondary" data-hub-open-folder="plugin">Папка плагина</button>
+              <button type="button" class="secondary" id="upd-skills-stage-btn" data-companion-action="stage_skills" hidden>Скачать</button>
+              <button type="button" class="secondary upd-icon-btn" id="upd-skills-open-folder-btn" data-hub-open-folder="plugin" title="Открыть папку плагина">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+              </button>
             </div>
           </div>
         </div>
@@ -1293,16 +1325,21 @@
               <div class="upd-title">Диспетчер стендов</div>
               <div class="upd-status-line">
                 <span class="upd-ver" id="upd-self-current">—</span>
-                <span class="upd-chip" id="upd-self-chip" hidden></span>
               </div>
               <div class="upd-detail" id="upd-self-detail" hidden></div>
               <div class="upd-pip" id="upd-self-pip" hidden>
                 <code id="upd-self-pip-cmd">python -m pip install -U standkit</code>
-                <button type="button" class="secondary upd-icon-btn" id="upd-self-pip-copy-btn" title="Скопировать команду pip">⧉ Копировать</button>
               </div>
             </div>
+            <div class="upd-status">
+              <span class="upd-chip" id="upd-self-chip" hidden></span>
+            </div>
             <div class="upd-action">
-              <button type="button" class="secondary" id="upd-self-restart-btn" data-hub-restart hidden>Перезапустить</button>
+              <!-- GAP-528: та же иконка-копия, что в платной редакции, ВСЕГДА в
+                   pip-режиме; в режиме установщика (frozen) — скрыта. -->
+              <button type="button" class="secondary upd-icon-btn" id="upd-self-pip-copy-btn" hidden title="Скопировать команду обновления: python -m pip install -U standkit">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
+              </button>
             </div>
           </div>
           <div class="upd-lock" id="upd-lock">
@@ -1310,12 +1347,7 @@
             <a href="https://bpmkit.pro" target="_blank" rel="noopener">Подробнее</a>
           </div>
         </div>
-      </div>
-      <div class="modal-footer updates-footer">
-        <span class="status-text" id="updates-footer-note">Скачивание — заранее, установка — только по вашей кнопке</span>
-        <span class="statusline-spacer"></span>
-        <span id="updates-check-status" class="status-text"></span>
-        <button type="button" class="secondary" id="updates-check-btn" data-companion-action="check_update">Проверить обновления</button>
+        <p class="upd-footnote" id="updates-footer-note">Скачивание — заранее, установка — только по вашей кнопке</p>
       </div>
     </div>
   </div>

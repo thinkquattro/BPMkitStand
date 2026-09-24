@@ -184,7 +184,15 @@
   // секунды — без видимой занятости кнопку жмут повторно.
   function setButtonBusy(btn, label) {
     if (!btn) return;
-    if (btn.dataset.idleLabel === undefined) btn.dataset.idleLabel = btn.textContent;
+    if (btn.dataset.idleLabel === undefined) {
+      // GAP-528: `idleLabel` остаётся флагом «кнопка сейчас занята» (на него
+      // смотрят render*Row, чтобы не затереть спиннер серединой операции) —
+      // но восстановление содержимого идёт по `idleHtml`, иначе кнопка с SVG-
+      // иконкой (⟳ «Проверить», ⧉ копировать) теряет иконку навсегда после
+      // первого же busy-цикла: textContent её не видит и не возвращает.
+      btn.dataset.idleLabel = btn.textContent;
+      btn.dataset.idleHtml = btn.innerHTML;
+    }
     btn.disabled = true;
     btn.textContent = "";
     const spin = document.createElement("span");
@@ -195,7 +203,12 @@
 
   function clearButtonBusy(btn) {
     if (!btn || btn.dataset.idleLabel === undefined) return;
-    btn.textContent = btn.dataset.idleLabel;
+    if (btn.dataset.idleHtml !== undefined) {
+      btn.innerHTML = btn.dataset.idleHtml;
+      delete btn.dataset.idleHtml;
+    } else {
+      btn.textContent = btn.dataset.idleLabel;
+    }
     delete btn.dataset.idleLabel;
     btn.disabled = false;
   }
@@ -2485,8 +2498,11 @@
         ? "Скачивание — заранее, установка — только по вашей кнопке"
         : "Проверяется по PyPI, без лицензии";
     }
-    const checkBtn = byId("updates-check-btn");
-    if (checkBtn) checkBtn.textContent = paid ? "Проверить обновления" : "Проверить";
+    // GAP-528, правка владельца: кнопка переехала в шапку и теперь несёт SVG-иконку
+    // ⟳ — подпись меняет вложенный <span>, не весь textContent кнопки (иначе иконка
+    // стирается).
+    const checkBtnLabel = byId("updates-check-btn-label");
+    if (checkBtnLabel) checkBtnLabel.textContent = paid ? "Проверить обновления" : "Проверить";
 
     const checkedAt = byId("updates-checked-at");
     if (checkedAt) {
@@ -3044,6 +3060,15 @@
     const cycle = ((status && status.cycles) || {}).patterns || {};
     const metaEl = byId("upd-patterns-meta");
 
+    // GAP-528, правка владельца: «Загрузить новые» видна ТОЛЬКО когда канал сам
+    // сообщает, что последний тик реально что-то применил или отозвал
+    // (`patterns.new_available`, см. state.py::summary/patterns.py::sync) — канал
+    // синхронизируется автоматически и дренирует очередь целиком за проход, так
+    // что отдельного «доступно, но не скачано» состояния у него нет; кнопка — это
+    // «применить сейчас», а не «скачать».
+    const applyBtn = byId("upd-patterns-apply-btn");
+    if (applyBtn) applyBtn.hidden = !block.new_available;
+
     // 1. Остановлен/ошибка — причина видна ВСЕГДА, не только при этих двух условиях.
     const failed = !!cycle.halted || block.status === "error";
     if (failed) {
@@ -3274,21 +3299,24 @@
     const applyBtn = byId("upd-hub-apply-btn");
     const stageBtn = byId("upd-hub-stage-btn");
     const pipBox = byId("upd-hub-pip");
-    const restartBtn = byId("upd-hub-restart-btn");
+    const pipCopyBtn = byId("upd-hub-pip-copy-btn");
     if (!frozen) {
-      // pip-установка: канал не подменяет себя — только команда и перезапуск
-      // (контракт серии, GAP-523: «сам pip не запускать»).
+      // pip-установка: канал не подменяет себя — только команда pip (перезапуск
+      // живёт в настройках, не в этом окне — правка владельца, GAP-528).
       if (applyBtn) applyBtn.hidden = true;
       if (stageBtn) stageBtn.hidden = true;
-      // GAP-528: команда pip — второй строкой, и ТОЛЬКО когда есть что ставить.
+      // GAP-528: строка с `<code>`-командой — ТОЛЬКО когда есть что ставить.
       if (pipBox) pipBox.hidden = !hasNew;
-      if (restartBtn) restartBtn.hidden = false;
+      // GAP-528, правка владельца: иконка «копировать» — ВСЕГДА в pip-режиме,
+      // независимо от того, есть новая версия или нет (её ждут и просто «на
+      // всякий случай», не только рядом с объявленным обновлением).
+      if (pipCopyBtn) pipCopyBtn.hidden = false;
       if (currentEl) {
         currentEl.title = "Программа (standkit-hub), pip-установка. Обновление — командой pip, не диспетчером";
       }
     } else {
       if (pipBox) pipBox.hidden = true;
-      if (restartBtn) restartBtn.hidden = true;
+      if (pipCopyBtn) pipCopyBtn.hidden = true;
       if (stageBtn) {
         stageBtn.hidden = !(hasNew && !staged);
       }
@@ -3347,6 +3375,16 @@
         ? harnesses.map((c) => c.name || c.id).join(" · ")
         : "";
       clientsEl.title = install.plugin_dir ? `Папка плагина: ${install.plugin_dir}` : "";
+    }
+    // GAP-528, правка владельца: «Папка плагина» — иконка, путь виден только
+    // подсказкой title (кнопка сама по себе — универсальный текст-заглушка,
+    // пока путь неизвестен, точный путь дописывается тем же способом, что и
+    // у clientsEl выше).
+    const openFolderBtn = byId("upd-skills-open-folder-btn");
+    if (openFolderBtn) {
+      openFolderBtn.title = install.plugin_dir
+        ? `Открыть папку плагина: ${install.plugin_dir}`
+        : "Открыть папку плагина";
     }
     // GAP-528: ссылка «Скиллы в харнессах» ведёт на якорь первого найденного
     // харнесса (по умолчанию #harness-claude-code — как в задаче).
@@ -3410,8 +3448,12 @@
     if (pipBox) pipBox.hidden = !(hasNew && mode !== "frozen");
     if (pipCmd) pipCmd.textContent = (data && data.pip_command) || "python -m pip install -U standkit";
 
-    const restartBtn = byId("upd-self-restart-btn");
-    if (restartBtn) restartBtn.hidden = mode === "frozen" ? true : !hasNew;
+    // GAP-528, правка владельца: та же иконка-копия, что в платной редакции —
+    // ВСЕГДА видна в pip-режиме (не только при доступной версии), скрыта в
+    // режиме установщика (frozen, там pip ни при чём). Кнопки «Перезапустить»
+    // в окне больше нет — перезапуск живёт в настройках.
+    const pipCopyBtn = byId("upd-self-pip-copy-btn");
+    if (pipCopyBtn) pipCopyBtn.hidden = mode === "frozen";
   }
 
   async function refreshSelfVersion(options) {
@@ -3619,18 +3661,15 @@
         const text = cmdEl ? cmdEl.textContent : "";
         try {
           await navigator.clipboard.writeText(text);
-          toast("Команда скопирована");
+          toast("Скопировано");
         } catch (e) {
           toast("Не удалось скопировать — выделите текст вручную");
         }
       });
     });
-    // GAP-523/GAP-528: pip-режим — перезапуск существующим не-elevated путём хаба
-    // (та же кнопка «Перезапустить», что и в «О программе»), в обеих редакциях.
-    ["upd-hub-restart-btn", "upd-self-restart-btn"].forEach((btnId) => {
-      const hubRestartBtn = byId(btnId);
-      if (hubRestartBtn) hubRestartBtn.addEventListener("click", () => restartHubFlow(hubRestartBtn));
-    });
+    // GAP-528, правка владельца: кнопки «Перезапустить» в окне «Обновления» больше
+    // нет — перезапуск диспетчера живёт в настройках (version-skew-restart-btn и
+    // соседи, см. setupSettingsPane), поэтому здесь для них нет обработчика.
     // GAP-288: «Папка плагина» — фиксированная цель "plugin", путь строит хаб.
     document.querySelectorAll("[data-hub-open-folder]").forEach((btn) => {
       btn.addEventListener("click", async () => {

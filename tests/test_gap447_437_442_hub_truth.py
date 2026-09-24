@@ -476,3 +476,107 @@ def test_gap528_footer_and_lock_texts_from_mockup():
     assert "Паттерны, обновления MCP и скиллов — в редакции с лицензией BPMkit" in html
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
     assert "Проверяется по PyPI, без лицензии" in js
+
+
+# ==========================================================================================
+# GAP-528, продолжение — правки владельца после просмотра на живом хосте:
+# чип своей колонкой, кнопка «Проверить» в шапке, кнопки по делу, «Перезапустить» убрана,
+# копирование pip-команды и «Папка плагина» — иконками.
+# ==========================================================================================
+
+def test_gap528b_status_column_is_a_dedicated_grid_cell():
+    """Чип каждой строки — в СВОЕЙ колонке грида (`.upd-status`), а не внутри
+    `.upd-main` вместе с версией/метой: иначе колонка чипа «гуляет» вслед за
+    длиной текста слева от него (жалоба владельца на живом хосте)."""
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    css = (_web_dir() / "style.css").read_text(encoding="utf-8")
+    for chip_id in ("upd-patterns-chip", "upd-mcp-chip", "upd-hub-chip",
+                    "upd-skills-chip", "upd-self-chip"):
+        needle = f'<div class="upd-status">\n              <span class="upd-chip" id="{chip_id}"'
+        assert needle in html, f"чип {chip_id} обязан лежать в своей колонке .upd-status"
+    assert ".upd-status {" in css
+    # 4 колонки фиксированной ширины — статус и действия не "плавают".
+    assert "grid-template-columns: 34px 1fr 140px 150px" in css
+
+
+def test_gap528b_check_button_moved_to_header_no_footer():
+    """Кнопка «Проверить обновления» — в шапке (рядом с «проверено N назад»),
+    подвала `.modal-footer` у окна больше нет."""
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    overlay_start = html.index('id="updates-overlay"')
+    overlay_html = html[overlay_start:html.index('id="license-crit-overlay"')]
+    header_part, _, rest = overlay_html.partition('<div class="modal-body upd-body">')
+    assert 'id="updates-check-btn"' in header_part, (
+        "кнопка проверки обязана быть в шапке окна, до modal-body")
+    assert 'class="modal-footer updates-footer"' not in overlay_html, (
+        "подвал окна «Обновления» убран целиком"
+    )
+
+
+def test_gap528b_no_restart_button_in_updates_window():
+    """Кнопки «Перезапустить» в окне «Обновления» больше нет ни у диспетчера
+    (платная редакция), ни у self-version (свободная) — перезапуск живёт в
+    настройках (`version-skew-restart-btn` и т.п.), а не в этом окне."""
+    overlay_start_marker = 'id="updates-overlay"'
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    overlay_html = html[html.index(overlay_start_marker):
+                         html.index('id="license-crit-overlay"')]
+    assert "upd-hub-restart-btn" not in overlay_html
+    assert "upd-self-restart-btn" not in overlay_html
+    assert "data-hub-restart" not in overlay_html
+    assert ">Перезапустить<" not in overlay_html
+
+
+def test_gap528b_pip_copy_is_an_icon_button_always_visible_in_pip_mode():
+    """Копирование pip-команды — иконка-кнопка 30×30 (не текст «⧉ pip»), лежит
+    в колонке действий и не привязана к наличию новой версии: `hidden` в
+    разметке (JS решает видимость по режиму hub/self, не по update_available)."""
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    for btn_id in ("upd-hub-pip-copy-btn", "upd-self-pip-copy-btn"):
+        assert f'id="{btn_id}"' in html
+        start = html.index(f'id="{btn_id}"')
+        tag = html[html.rfind("<button", 0, start):html.index(">", start) + 1]
+        assert "hidden" in tag, f"{btn_id} по умолчанию скрыта, показывает JS"
+        assert "<svg" in html[start:start + 400], f"{btn_id} обязана быть SVG-иконкой"
+        assert "⧉" not in html[start - 5:start], f"{btn_id} больше не текстовая кнопка"
+    assert "Скопировать команду обновления: python -m pip install -U standkit" in html
+    # Не завязано на конкретный <code>-контейнер по видимости — копия работает
+    # ВСЕГДА в pip-режиме (см. renderHubRow/renderSelfVersionRow).
+    assert "pipCopyBtn.hidden" in js or "PipCopyBtn.hidden" in js or \
+        "hub-pip-copy-btn" in js
+
+
+def test_gap528b_plugin_folder_button_is_icon_only():
+    """«Папка плагина» — иконка-кнопка (SVG папки), не текстовая надпись, с
+    title, называющим путь."""
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    assert ">Папка плагина<" not in html
+    start = html.index('id="upd-skills-open-folder-btn"')
+    tag_start = html.rfind("<button", 0, start)
+    tag_end = html.index("</button>", start)
+    button_html = html[tag_start:tag_end]
+    assert "<svg" in button_html
+    assert 'data-hub-open-folder="plugin"' in button_html
+    assert "title=" in button_html
+
+
+def test_gap528b_patterns_button_only_when_new_available():
+    """«Загрузить новые» у паттернов — видна только когда канал сообщает
+    `patterns.new_available` (см. `standkit_companion.state.CompanionState.summary`);
+    в разметке кнопка по умолчанию `hidden`, JS решает по этому полю."""
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    assert '<button type="button" class="secondary" id="upd-patterns-apply-btn" data-companion-action="sync_patterns" hidden>Загрузить новые</button>' in html
+    assert "new_available" in js, (
+        "renderPatternsRow обязан читать summary.patterns.new_available")
+
+
+def test_gap528b_state_summary_exposes_new_available_field():
+    """Бэкенд: `CompanionState.summary()["patterns"]["new_available"]` — поле
+    для кнопки «Загрузить новые», отдельное от `applied_count`/`total_available`."""
+    from standkit_companion.state import CompanionState
+    state = CompanionState(_web_dir() / "нет-такого-файла.json")
+    summary = state.summary()
+    assert "new_available" in summary["patterns"]
+    assert summary["patterns"]["new_available"] is False
