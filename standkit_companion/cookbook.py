@@ -46,6 +46,7 @@ __all__ = [
     "installed_version",
     "installed_copies",
     "read_version",
+    "read_date",
     "check",
     "sync",
 ]
@@ -117,7 +118,38 @@ def read_version(path: Path) -> Optional[str]:
 
 #: Числовой префикс строки версии (`1.1.149-bb912a67` → `1.1.149`). Дальше `-sha8`
 #: от СОДЕРЖИМОГО — он сравнению не подлежит (не порядковый).
-_VERSION_PREFIX_RE = re.compile(r"^(\d+(?:\.\d+)*)")
+#:
+#: GAP-527: префикс обязан заканчиваться `-` или концом строки. Генератор dev-репо
+#: (`tools/gen_cookbook_meta.py`, GAP-423) пишет в тег версии ГОЛЫЙ sha8
+#: (`831f9a68`), и прежний регэксп брал из хеша ведущие цифры (`831`) как «номер
+#: поставки» — выбор между копиями решался случайными hex-цифрами.
+_VERSION_PREFIX_RE = re.compile(r"^(\d+(?:\.\d+)*)(?=-|$)")
+
+#: Дата редакции (`bpmkit-cookbook-date`, ГГГГ-ММ-ДД) — тот же порядковый признак,
+#: что у `self_check` MCP-сервера (`_cookbook_pick`, GAP-423).
+_DATE_VALUE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _meta_value(text: str, name: str) -> Optional[str]:
+    for pattern in (
+        r"""<meta\s+[^>]*name\s*=\s*["']{}["'][^>]*content\s*=\s*["']([^"']+)["']""",
+        r"""<meta\s+[^>]*content\s*=\s*["']([^"']+)["'][^>]*name\s*=\s*["']{}["']""",
+    ):
+        match = re.search(pattern.format(re.escape(name)), text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def read_date(path: Path) -> Optional[str]:
+    """Дата редакции из `<meta name="bpmkit-cookbook-date">` либо `None`."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(_VERSION_SCAN_BYTES)
+    except OSError:
+        return None
+    value = _meta_value(head.decode("utf-8", errors="replace"), "bpmkit-cookbook-date")
+    return value if value and _DATE_VALUE_RE.match(value) else None
 
 
 def _version_order_key(version: Optional[str]):
@@ -159,8 +191,37 @@ def installed_copies(ctx=None, config_dir: Optional[Path] = None) -> list:
         if version is None and not Path(path).exists():
             continue
         out.append({"origin": origin, "path": Path(path), "version": version,
-                     "mtime": _mtime_or_zero(path)})
+                     "date": read_date(path), "mtime": _mtime_or_zero(path)})
     return out
+
+
+def _is_newer(candidate: dict, best: dict) -> bool:
+    """Строго ли `candidate` новее `best` (обе — записи `installed_copies`).
+
+    GAP-527: правило то же, что у `self_check` MCP-сервера (`_cookbook_pick`,
+    GAP-423), чтобы диспетчер и сервер называли одну и ту же копию:
+      * версии равны — копии одинаковы, остаётся прежняя (порядок поиска);
+      * даты редакции есть у обеих и различаются — новее та, чья дата позже;
+      * дата есть только у одной — побеждает она;
+      * иначе (старые редакции без даты) — прежнее правило GAP-429: числовой
+        префикс `<поставка>-<sha8>`, при равном префиксе — время файла.
+    """
+    if candidate["version"] == best["version"]:
+        return False
+    cd, bd = candidate.get("date"), best.get("date")
+    if cd and bd and cd != bd:
+        return cd > bd
+    if cd and not bd:
+        return True
+    if bd and not cd:
+        return False
+
+    def _key(entry):
+        order = _version_order_key(entry["version"])
+        # Копии без разбираемой версии не могут «победить» разбираемую.
+        return (0, (), 0.0) if order is None else (1, order, entry["mtime"])
+
+    return _key(candidate) > _key(best)
 
 
 def installed_version(ctx=None, config_dir: Optional[Path] = None) -> Optional[str]:
@@ -175,7 +236,8 @@ def installed_version(ctx=None, config_dir: Optional[Path] = None) -> Optional[s
     строкой, отчёт называет пользователю версию, которой у него уже нет, а
     «обновление применено» может рапортоваться при открытом старом документе.
 
-    Теперь сравниваются ОБЕ копии, и побеждает НОВЕЙШАЯ:
+    Теперь сравниваются ОБЕ копии, и побеждает НОВЕЙШАЯ (GAP-527: первым
+    признаком — дата редакции, как у `self_check` сервера, см. `_is_newer`):
       * по числовому префиксу версии ВНУТРИ файла (`<версия поставки>-<sha8>`),
         посегментно целыми числами;
       * при равном префиксе (та же поставка, другой `sha8` содержимого) — по
@@ -190,17 +252,9 @@ def installed_version(ctx=None, config_dir: Optional[Path] = None) -> Optional[s
     known = [c for c in copies if c["version"] is not None]
     if not known:
         return None
-    if len(known) == 1:
-        return known[0]["version"]
-
-    def _key(entry):
-        order = _version_order_key(entry["version"])
-        # Копии без разбираемой версии не могут «победить» разбираемую.
-        return (0, (), 0.0) if order is None else (1, order, entry["mtime"])
-
     best = known[0]
     for candidate in known[1:]:
-        if _key(candidate) > _key(best):
+        if _is_newer(candidate, best):
             best = candidate
     return best["version"]
 
@@ -303,10 +357,9 @@ def _stale_profile_copy(ctx, config_dir) -> Optional[dict]:
     `installed_version` (GAP-429)."""
     by_origin = {c["origin"]: c for c in installed_copies(ctx, config_dir)}
     profile, shipped = by_origin.get("профиль"), by_origin.get("поставка")
-    if not profile or not shipped:
+    if not profile or not shipped or profile["version"] is None or shipped["version"] is None:
         return None
-    p_key, s_key = _version_order_key(profile["version"]), _version_order_key(shipped["version"])
-    if p_key is None or s_key is None or s_key <= p_key:
+    if not _is_newer(shipped, profile):
         return None
     return {"profile": profile["version"], "shipped": shipped["version"]}
 
