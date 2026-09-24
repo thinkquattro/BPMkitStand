@@ -189,6 +189,24 @@
     </div>
   </div>
 
+  <!-- Оверлей ожидания установки обновления (GAP-279): установщик останавливает
+       диспетчер и поднимает его заново — вкладка ждёт новый процесс и
+       перезагружается сама (app.js::waitForInstallerRestart). -->
+  <div id="install-overlay" class="modal-overlay" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="install-overlay-title">
+      <div class="modal-header">
+        <h2 id="install-overlay-title">Установка обновления BPMkit</h2>
+      </div>
+      <div class="modal-body">
+        <p id="install-overlay-text">Идёт установка обновления. Страница переподключится сама.</p>
+        <p class="modal-note" id="install-overlay-hint" hidden></p>
+      </div>
+      <div class="modal-footer" id="install-overlay-footer" hidden>
+        <button id="install-overlay-close-btn" type="button" class="secondary">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Оверлей «однократной операции с правами администратора» (GAP-311, П2):
        та же UAC-ситуация, что у restart-overlay, но БЕЗ перезапуска диспетчера
        — только один appcmd-вызов через elevated-помощника. Отдельный оверлей,
@@ -875,6 +893,14 @@
               <input type="checkbox" name="companion_auto_stage_release" />
               Скачивать новую версию MCP заранее, установку подтверждаю сам
             </label>
+            <!-- GAP-279: уведомления браузера. Без name — это выбор конкретного браузера
+                 (хранится в нём), а не поле конфига диспетчера; разрешение браузера
+                 спрашивается только по нажатию этого переключателя. -->
+            <label class="checkbox-label">
+              <input type="checkbox" id="updates-notify-toggle" />
+              Уведомлять в браузере: «найдено обновление» и «скачано, готово к установке»
+            </label>
+            <p class="pane-note" id="updates-notify-note" hidden></p>
             <div class="panel-toolbar pane-actions">
               <button type="submit">Сохранить</button>
             </div>
@@ -1133,6 +1159,10 @@
             <div class="upd-desc" id="upd-mcp-desc">Новая версия проверяется и скачивается заранее; подмена файла происходит только по вашей команде.</div>
             <div class="upd-meta" id="upd-mcp-meta">—</div>
             <div class="upd-detail" id="upd-mcp-detail" hidden></div>
+            <!-- GAP-279: предпросмотр «MCP A→B, диспетчер C→D» перед установкой
+                 установщиком и строка «установщик выполняется». -->
+            <div class="upd-meta" id="upd-installer-preview" hidden></div>
+            <div class="upd-detail" id="upd-installer-detail" hidden></div>
             <div class="upd-restart" id="upd-restart-note" hidden>
               <strong>Перезапустите Claude Desktop</strong><span id="upd-restart-detail">, чтобы начала работать новая версия: перезагрузка плагина MCP-сервер заново не поднимает.</span>
             </div>
@@ -1147,6 +1177,11 @@
             </details>
           </div>
           <div class="upd-action">
+            <!-- GAP-279 (ADR-0048): установка обновления подписанным установщиком целиком
+                 (MCP + диспетчер + скиллы + документация). Видна, только когда установщик
+                 скачан и проверен; сценарий — app.js::installUpdateFlow. -->
+            <button type="button" id="upd-installer-btn" data-companion-action="apply_installer" hidden>Установить обновление</button>
+            <button type="button" id="upd-installer-stage-btn" class="secondary" data-companion-action="stage_installer" hidden>Скачать установщик</button>
             <button type="button" id="upd-install-btn" data-companion-action="apply_update">Установить</button>
             <button type="button" id="upd-rollback-btn" class="secondary" data-companion-action="rollback" hidden>Откатить</button>
           </div>

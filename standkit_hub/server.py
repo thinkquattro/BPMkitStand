@@ -677,7 +677,7 @@ def _snapshot_sources(config_path: Path) -> tuple:
 # --- канал обновлений издателя (companion) -----------------------------------
 #
 # Ядро знает о канале ровно три вещи: есть ли пакет, как спросить у него статус
-# и как попросить выполнить одно из шести разрешённых действий. Никакой логики
+# и как попросить выполнить одно из разрешённых действий (``COMPANION_ACTION_ROUTES``). Никакой логики
 # канала (лицензия, подписи, сеть) здесь нет и быть не должно — она целиком
 # живёт в ``standkit_companion``.
 
@@ -696,12 +696,19 @@ COMPANION_ACTION_ROUTES = {
     "/api/companion/apply-update": "apply_update",
     "/api/companion/rollback": "rollback",
     "/api/companion/revocations": "refresh_revocations",
+    # GAP-279 (ADR-0048): установщик как артефакт обновления. «Скачать установщик» —
+    # подготовка с полной проверкой подписи и kind; «Установить обновление» — ЗАПУСК
+    # подготовленного установщика (тихо, /VERYSILENT), который сам останавливает и
+    # поднимает диспетчер. Только явное действие человека — планировщик сюда не ходит.
+    "/api/companion/stage-installer": "stage_installer",
+    "/api/companion/apply-installer": "apply_installer",
 }
 
 #: Действия, которые умеют адресоваться к конкретной версии (тело
 #: ``{"version": "0.307.0"}``). Для остальных поле в теле игнорируется — молча,
 #: потому что лишний ключ в JSON не повод отказать пользователю в операции.
-COMPANION_VERSION_ACTIONS = frozenset({"stage_update", "rollback"})
+COMPANION_VERSION_ACTIONS = frozenset({"stage_update", "rollback",
+                                       "stage_installer", "apply_installer"})
 
 #: ``CompanionError.kind`` → HTTP-код. Смысл группировки, а не «все ошибки 500»:
 #:
@@ -726,6 +733,10 @@ COMPANION_ERROR_STATUS = {
     "context_unavailable": 503,
     "nothing_staged": 409,
     "nothing_to_rollback": 409,
+    # GAP-279: установщик не опубликован для этой версии / хабу без прав его не
+    # запустить — оба противоречат текущему состоянию, а не «отказ бэкенда».
+    "installer_not_available": 409,
+    "elevation_required": 409,
 }
 COMPANION_ERROR_STATUS_DEFAULT = 502
 

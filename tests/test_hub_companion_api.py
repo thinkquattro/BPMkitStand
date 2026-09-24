@@ -60,6 +60,9 @@ ACTION_ROUTES = {
     "/api/companion/apply-update": "apply_update",
     "/api/companion/rollback": "rollback",
     "/api/companion/revocations": "refresh_revocations",
+    # GAP-279: установщик как артефакт обновления.
+    "/api/companion/stage-installer": "stage_installer",
+    "/api/companion/apply-installer": "apply_installer",
 }
 
 
