@@ -78,14 +78,31 @@
     <button id="theme-toggle-btn" class="topbar-btn" type="button" title="Переключить тему" aria-label="Переключить тему">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9c0-.5 0-1-.1-1.4A5.5 5.5 0 0 1 13.4 3.1 9 9 0 0 0 12 3z"/></svg>
     </button>
-    <!-- Кукбук — обычная статика (/static/cookbook.html), один самодостаточный
-         файл со всем CSS/JS/картинками внутри: открывается и офлайн, и когда
-         диспетчер остановлен (файл можно открыть с диска). Поэтому это <a>, а
-         не кнопка с обработчиком в app.js. -->
-    <a id="help-btn" class="topbar-btn" href="/static/cookbook.html" target="_blank"
-       rel="noopener" title="Справка — кукбук BPMkitStand" aria-label="Справка">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5V14"/><circle cx="12" cy="17" r=".7" fill="currentColor" stroke="none"/></svg>
-    </a>
+    <!-- Меню «Справка» (GAP-522): два кукбука. Кукбук диспетчера — обычная
+         статика (/static/cookbook.html, самодостаточный файл, открывается и с
+         диска при остановленном диспетчере). Кукбук BPMkit (инструкция
+         пользователя MCP) хаб отдаёт из локальной установки BPMkit маршрутом
+         /bpmkit-cookbook. Пункты — обычные <a>: открытие в новой вкладке не
+         зависит от обработчиков app.js, JS только раскрывает/закрывает меню. -->
+    <div class="help-menu" id="help-menu-wrap">
+      <button id="help-btn" class="topbar-btn" type="button" title="Справка"
+              aria-label="Справка" aria-haspopup="menu" aria-expanded="false"
+              aria-controls="help-menu">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5V14"/><circle cx="12" cy="17" r=".7" fill="currentColor" stroke="none"/></svg>
+      </button>
+      <div class="help-menu-list" id="help-menu" role="menu" hidden>
+        <a class="help-menu-item" id="help-menu-bpmkit" role="menuitem"
+           href="/bpmkit-cookbook" target="_blank" rel="noopener">
+          <span class="help-menu-title">Кукбук BPMkit</span>
+          <span class="help-menu-sub">MCP-агент: что умеет, кейсы, FAQ</span>
+        </a>
+        <a class="help-menu-item" id="help-menu-stand" role="menuitem"
+           href="/static/cookbook.html" target="_blank" rel="noopener">
+          <span class="help-menu-title">Кукбук BPMkitStand</span>
+          <span class="help-menu-sub">Диспетчер стендов: установка, работа, агенты</span>
+        </a>
+      </div>
+    </div>
     <!-- Индикатор прав администратора (GAP-311). На Windows виден ВСЕГДА
          (supported=true у GET /api/hub/elevation) — только иконка, без
          подписи: без прав любая IIS-операция обречена (appcmd.exe не читает
@@ -1088,8 +1105,9 @@
             </details>
             <p class="pane-lead">BPMkitStand — свободный диспетчер стендов BPMSoft (часть экосистемы BPMkit).</p>
             <p class="pane-lead">
-              Справка — <a href="/static/cookbook.html" target="_blank" rel="noopener">кукбук BPMkit</a>:
+              Справка — <a href="/static/cookbook.html" target="_blank" rel="noopener">кукбук BPMkitStand</a>:
               установка, работа с диспетчером, FAQ, удалённые агенты.
+              Инструкция пользователя MCP — <a href="/bpmkit-cookbook" target="_blank" rel="noopener">кукбук BPMkit</a>.
             </p>
             <div class="about-icons">
               <a class="about-icon-link" href="https://bpmkit.pro" target="_blank" rel="noopener" title="Сайт bpmkit.pro" aria-label="Сайт bpmkit.pro">

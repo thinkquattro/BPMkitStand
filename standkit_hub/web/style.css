@@ -1485,6 +1485,62 @@ span.value-has-reason {
   cursor: not-allowed;
 }
 
+/* --- меню «Справка» в шапке (GAP-522): кукбук BPMkit + кукбук BPMkitStand.
+ * Тот же вид, что у меню сплит-кнопки логов, но свои классы: обработчики
+ * .split-btn-menu-item в app.js открывают папку логов. --- */
+
+.help-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.help-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 1100;
+  min-width: 260px;
+  background: var(--bpmkit-panel-bg);
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.16);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.help-menu-list[hidden] {
+  display: none;
+}
+
+.help-menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--bpmkit-text);
+  text-decoration: none;
+  border-radius: 6px;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.help-menu-item:hover,
+.help-menu-item:focus-visible {
+  background: var(--bpmkit-code-bg);
+  outline: none;
+}
+
+.help-menu-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.help-menu-sub {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
 #state-output {
   max-height: 320px;
   overflow: auto;

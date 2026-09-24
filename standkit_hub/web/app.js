@@ -1470,6 +1470,45 @@
     });
   }
 
+  // Меню «Справка» в шапке (GAP-522): кукбук BPMkit и кукбук BPMkitStand.
+  // Пункты — обычные <a target="_blank">, здесь только раскрытие/закрытие.
+  function setHelpMenuOpen(open) {
+    const menu = document.getElementById("help-menu");
+    const btn = document.getElementById("help-btn");
+    if (!menu || !btn) return;
+    menu.hidden = !open;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.classList.toggle("active", open);
+  }
+
+  function setupHelpMenu() {
+    const wrap = document.getElementById("help-menu-wrap");
+    const btn = document.getElementById("help-btn");
+    const menu = document.getElementById("help-menu");
+    if (!wrap || !btn || !menu) return;
+    btn.addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      setHelpMenuOpen(menu.hidden);
+      if (!menu.hidden) {
+        const first = menu.querySelector(".help-menu-item");
+        if (first) first.focus();
+      }
+    });
+    menu.querySelectorAll(".help-menu-item").forEach((item) => {
+      // Ссылка открывается браузером сама; меню просто закрываем.
+      item.addEventListener("click", () => setHelpMenuOpen(false));
+    });
+    document.addEventListener("click", (evt) => {
+      if (!wrap.contains(evt.target)) setHelpMenuOpen(false);
+    });
+    document.addEventListener("keydown", (evt) => {
+      if (evt.key === "Escape" && !menu.hidden) {
+        setHelpMenuOpen(false);
+        btn.focus();
+      }
+    });
+  }
+
   // Человеческий текст вместо браузерного «Failed to fetch».
   //
   // fetch отвергается TypeError'ом одинаково и когда процесс диспетчера убит,
@@ -4385,6 +4424,7 @@
     setupPickButtons();
     setupSettingsForm();
     setupStatePanel();
+    setupHelpMenu();
     setupActionStatus();
     document.getElementById("refresh-stands-btn").addEventListener("click", refreshStandsWithFeedback);
 
