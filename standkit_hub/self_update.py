@@ -120,6 +120,20 @@ def _replace_with_retry(src: Path, dst: Path, *, attempts: int = REPLACE_ATTEMPT
     raise last
 
 
+def _relaunch_previous(target_path: Path) -> None:
+    """Поднять прежнюю версию диспетчера после неудачной подмены (best-effort)."""
+    if not target_path.is_file():
+        return
+    try:
+        spawn_hidden([str(target_path)], cwd=target_path.parent,
+                     log_path=target_path.parent / "self_update_launch.log")
+        _log.info("самообновление диспетчера: подмена не удалась — запущена прежняя версия %s",
+                  target_path)
+    except ProcessError as exc:
+        _log.error("самообновление диспетчера: прежнюю версию %s запустить не удалось: %s — "
+                   "запустите диспетчер ярлыком", target_path, exc)
+
+
 def run_self_update_helper(*, target: str, wait_pid: int,
                            self_path: Optional[str] = None) -> int:
     """Точка входа помощника (`--apply-self-update --target ... --wait-pid ...`).
@@ -154,9 +168,15 @@ def run_self_update_helper(*, target: str, wait_pid: int,
         if winerror == 5:  # ERROR_ACCESS_DENIED — нет прав записи в target
             _log.error("самообновление диспетчера: нет прав на запись в %s (%s) — "
                        "нужны права администратора", target_path, exc)
-            return RC_ELEVATION_REQUIRED
-        _log.error("самообновление диспетчера: не удалось подменить %s: %s", target_path, exc)
-        return RC_LOCAL_IO
+            rc = RC_ELEVATION_REQUIRED
+        else:
+            _log.error("самообновление диспетчера: не удалось подменить %s: %s", target_path, exc)
+            rc = RC_LOCAL_IO
+        # Старый диспетчер уже вышел — без этого шага пользователь остался бы
+        # вовсе без диспетчера. Поднимаем ПРЕЖНЮЮ версию (target не тронут:
+        # подмена идёт через временный файл и os.replace).
+        _relaunch_previous(target_path)
+        return rc
 
     _log.info("самообновление диспетчера: %s подменён, запускаю новую версию", target_path)
     launch_log = target_path.parent / "self_update_launch.log"

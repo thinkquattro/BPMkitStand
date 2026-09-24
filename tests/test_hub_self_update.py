@@ -125,7 +125,8 @@ def test_run_self_update_helper_elevation_required(tmp_path, monkeypatch):
 
     assert rc == self_update.RC_ELEVATION_REQUIRED
     assert target.read_bytes() == b"OLD VERSION"
-    assert spawned["called"] is False
+    # Старый диспетчер уже вышел — помощник обязан поднять прежнюю версию.
+    assert spawned["called"] is True
 
 
 def test_replace_with_retry_retries_then_succeeds(tmp_path, monkeypatch):

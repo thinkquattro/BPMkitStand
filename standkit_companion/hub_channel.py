@@ -426,6 +426,31 @@ _TARGET_FLAG = "--target"
 _WAIT_PID_FLAG = "--wait-pid"
 
 
+def _ensure_target_writable(target: Path) -> None:
+    """Проверить ДО запуска помощника, что папку диспетчера можно писать.
+
+    Иначе (установка «для всех» в Program Files, хаб без прав администратора)
+    диспетчер успел бы выйти, а подмена отказала бы — пользователь остался бы
+    без диспетчера. Проба — создание и удаление временного файла рядом с exe."""
+    probe = target.parent / (".bpmkit-hub-write-probe-%d" % os.getpid())
+    try:
+        with open(probe, "wb") as fh:
+            fh.write(b"probe")
+        probe.unlink()
+    except OSError:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+        raise ChannelError(
+            "Нет прав на запись в папку диспетчера ({}) — он установлен «для всех "
+            "пользователей». Обновите его установщиком (кнопка «Установить обновление» "
+            "в карточке MCP-сервера) либо перезапустите диспетчер с правами "
+            "администратора и повторите.".format(target.parent),
+            kind="elevation_required",
+        ) from None
+
+
 def apply_self_update(state, ctx) -> dict:
     """Запустить подготовленный диспетчер КАК ПОМОЩНИКА самообновления.
 
@@ -504,6 +529,7 @@ def apply_self_update(state, ctx) -> dict:
             kind="local_io",
         )
     current_pid = os.getpid()
+    _ensure_target_writable(Path(target_exe))
 
     log_path = companion_workdir(ctx) / "hub_self_update.log"
     try:

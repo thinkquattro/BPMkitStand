@@ -389,6 +389,162 @@ def test_takeover_fails_when_port_never_released(tmp_path, monkeypatch):
     assert "порт" in reason
 
 
+# --- GAP-524: автоматический перехват у экземпляра ДРУГОЙ версии -----------
+
+
+def test_takeover_auto_happens_for_different_version_without_elevation(tmp_path, monkeypatch):
+    """Клиент поставил новую версию поверх работающей старой (pip install -U /
+    установщик BPMkit) — перехват срабатывает БЕЗ --takeover и БЕЗ elevation,
+    ровно по несовпадению версии."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _instance.write_state(
+        _instance.state_path(run_dir),
+        _instance.HubInstanceState(pid=4242, host="127.0.0.1", port=8770, elevated=False, version="0.12.9"),
+    )
+    state_file = _instance.state_path(run_dir)
+
+    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: (True, ""))
+    monkeypatch.setattr(_instance, "wait_port_released", lambda *a, **kw: True)
+    monkeypatch.setattr(hub_main, "is_elevated", lambda: False)
+    monkeypatch.setattr(_instance, "is_alive", lambda pid: True)
+    monkeypatch.setattr(hub_main, "_standkit_version", "0.12.11")
+
+    exc = HubAlreadyRunning("127.0.0.1", 8770)
+    ok, reason = hub_main._takeover_running_instance(
+        exc, state_file, run_dir, explicit=False, our_sid=None
+    )
+
+    assert ok is True
+    assert reason == ""
+
+
+def test_takeover_skipped_for_same_version_without_elevation(tmp_path, monkeypatch):
+    """Та же версия, без --takeover и без elevation — прежнее поведение:
+    перехвата нет, к stop_running_instance дело не доходит."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _instance.write_state(
+        _instance.state_path(run_dir),
+        _instance.HubInstanceState(pid=4242, host="127.0.0.1", port=8770, elevated=False, version="0.12.11"),
+    )
+    state_file = _instance.state_path(run_dir)
+
+    called = []
+    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: called.append(1) or (True, ""))
+    monkeypatch.setattr(hub_main, "is_elevated", lambda: False)
+    monkeypatch.setattr(hub_main, "_standkit_version", "0.12.11")
+
+    exc = HubAlreadyRunning("127.0.0.1", 8770)
+    ok, reason = hub_main._takeover_running_instance(
+        exc, state_file, run_dir, explicit=False, our_sid=None
+    )
+
+    assert ok is False
+    assert called == []
+
+
+def test_takeover_different_version_disabled_by_no_takeover_flag(tmp_path, monkeypatch):
+    """``--no-takeover`` отключает автоматический версионный перехват —
+    прежнее поведение (молча открыть браузер на старом)."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _instance.write_state(
+        _instance.state_path(run_dir),
+        _instance.HubInstanceState(pid=4242, host="127.0.0.1", port=8770, elevated=False, version="0.12.9"),
+    )
+    state_file = _instance.state_path(run_dir)
+
+    called = []
+    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: called.append(1) or (True, ""))
+    monkeypatch.setattr(hub_main, "is_elevated", lambda: False)
+    monkeypatch.setattr(hub_main, "_standkit_version", "0.12.11")
+
+    exc = HubAlreadyRunning("127.0.0.1", 8770)
+    ok, reason = hub_main._takeover_running_instance(
+        exc, state_file, run_dir, explicit=False, our_sid=None, no_takeover=True
+    )
+
+    assert ok is False
+    assert called == []
+
+
+def test_takeover_different_version_prints_and_logs_explanation(tmp_path, monkeypatch, capsys, caplog):
+    """Требование задачи: и в консоль, и в лог должно уйти сообщение вида
+    «работал диспетчер X (путь/exe), запущена версия Y — старый остановлен»."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _instance.write_state(
+        _instance.state_path(run_dir),
+        _instance.HubInstanceState(
+            pid=4242,
+            host="127.0.0.1",
+            port=8770,
+            elevated=False,
+            version="0.12.9",
+            executable=r"C:\Program Files\BPMkit\BPMkit-hub.exe",
+        ),
+    )
+    state_file = _instance.state_path(run_dir)
+
+    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: (True, ""))
+    monkeypatch.setattr(_instance, "wait_port_released", lambda *a, **kw: True)
+    monkeypatch.setattr(hub_main, "is_elevated", lambda: False)
+    monkeypatch.setattr(_instance, "is_alive", lambda pid: True)
+    monkeypatch.setattr(hub_main, "_standkit_version", "0.12.11")
+
+    caplog.set_level(logging.WARNING, logger=hub_main._log.name)
+    exc = HubAlreadyRunning("127.0.0.1", 8770)
+    ok, _ = hub_main._takeover_running_instance(exc, state_file, run_dir, explicit=False, our_sid=None)
+
+    assert ok is True
+    out = capsys.readouterr().out
+    assert "BPMkit-hub.exe" in out
+    assert "0.12.11" in out
+    assert "старый остановлен" in out
+    assert "BPMkit-hub.exe" in caplog.text
+    assert "0.12.11" in caplog.text
+
+
+def test_takeover_unknown_version_from_old_state_file_takes_over(tmp_path, monkeypatch):
+    """Старый файл состояния без поля version (до GAP-524) — читается как
+    version="" ("неизвестна") — тоже повод перехватить."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    state_file = _instance.state_path(run_dir)
+    state_file.write_text(
+        json.dumps({"pid": 4242, "host": "127.0.0.1", "port": 8770, "elevated": False}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(_instance, "stop_running_instance", lambda *a, **kw: (True, ""))
+    monkeypatch.setattr(_instance, "wait_port_released", lambda *a, **kw: True)
+    monkeypatch.setattr(hub_main, "is_elevated", lambda: False)
+    monkeypatch.setattr(_instance, "is_alive", lambda pid: True)
+    monkeypatch.setattr(hub_main, "_standkit_version", "0.12.11")
+
+    exc = HubAlreadyRunning("127.0.0.1", 8770)
+    ok, reason = hub_main._takeover_running_instance(
+        exc, state_file, run_dir, explicit=False, our_sid=None
+    )
+
+    assert ok is True
+
+
+def test_no_takeover_argument_is_accepted_by_argparse(monkeypatch):
+    """``--no-takeover`` — реальный CLI-флаг (не только параметр функции):
+    argparse не должен упасть с SystemExit(2) "unrecognized arguments"."""
+    calls = []
+    monkeypatch.setattr(
+        hub_main, "install_desktop_shortcut", lambda: calls.append(1) or type("R", (), {"ok": True, "message": "ок"})()
+    )
+
+    rc = hub_main.main(["--no-takeover", "--install-shortcut"])
+
+    assert rc == 0
+    assert calls == [1]
+
+
 # --- полный путь main(): serving/failed в result-file через реальный перехват --
 
 
