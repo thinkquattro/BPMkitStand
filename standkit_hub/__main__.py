@@ -120,8 +120,37 @@ def _describe_elevation(value) -> str:
     return "да" if value else "нет"
 
 
+def _is_version_mismatch_takeover(state: "Optional[_instance.HubInstanceState]", *, we_elevated: Optional[bool]) -> bool:
+    """
+    ``True`` — причина перехвата в ``_takeover_running_instance`` (уже решённого
+    ``should_takeover``) была ИМЕННО «другая версия / версия неизвестна» (GAP-524),
+    а не «мы elevated, а он нет». Нужно только для текста сообщения пользователю:
+    оба повода приводят к одинаковому механизму остановки, но объяснение —
+    разное. Elevation-повод проверяется первым, потому что у него приоритет в
+    ``should_takeover`` (см. её докстринг).
+    """
+    if state is None:
+        return False
+    if bool(we_elevated) and state.elevated is False:
+        return False
+    return state.version != _standkit_version
+
+
+def _describe_running_instance(state: "_instance.HubInstanceState") -> str:
+    """Человекочитаемое «что за процесс» для сообщения о версионном автоперехвате (GAP-524)."""
+    version = state.version or "неизвестна"
+    exe = f" ({state.executable})" if state.executable else ""
+    return f"диспетчер{exe}, версия {version}"
+
+
 def _takeover_running_instance(
-    exc: HubAlreadyRunning, state_file: Path, run_dir: Path, *, explicit: bool, our_sid: Optional[str]
+    exc: HubAlreadyRunning,
+    state_file: Path,
+    run_dir: Path,
+    *,
+    explicit: bool,
+    our_sid: Optional[str],
+    no_takeover: bool = False,
 ) -> "tuple[bool, str]":
     """
     Отобрать ли порт у уже работающего диспетчера — и, если да, попросить его
@@ -134,12 +163,21 @@ def _takeover_running_instance(
     случае, иначе — человекочитаемая причина отказа (уходит в
     ``result_file`` вызывающего, а не заменяется обобщённым текстом). Правила
     решения — в ``standkit_hub.instance.should_takeover`` (коротко: явный
-    ``--takeover`` либо «мы elevated, а он нет», за исключением случая, когда
-    работающий экземпляр принадлежит ДРУГОЙ учётной записи — тогда
-    автоматический перехват не делаем, см. GAP-311 п.4).
+    ``--takeover``, «мы elevated, а он нет», либо — GAP-524 — работающий
+    экземпляр ДРУГОЙ версии/версия неизвестна (если не отключено
+    ``--no-takeover``), за исключением случая, когда работающий экземпляр
+    принадлежит ДРУГОЙ учётной записи — тогда автоматический перехват не
+    делаем ни по одной из причин, см. GAP-311 п.4).
     """
     state = _instance.read_state(state_file)
-    if not _instance.should_takeover(state, we_elevated=is_elevated(), explicit=explicit, our_sid=our_sid):
+    if not _instance.should_takeover(
+        state,
+        we_elevated=is_elevated(),
+        explicit=explicit,
+        our_sid=our_sid,
+        our_version=_standkit_version,
+        no_takeover=no_takeover,
+    ):
         return False, ""
 
     if state is None:
@@ -155,9 +193,22 @@ def _takeover_running_instance(
         _log.warning(f"{reason}")
         return False, reason
 
-    _log.warning(f"перехватываю порт {exc.port} у работающего диспетчера "
-        f"(pid {state.pid}, права администратора: {_describe_elevation(state.elevated)})"
-    )
+    # explicit=True (--takeover, кнопка «Перезапустить с правами администратора»)
+    # — решение уже явно принято пользователем, версионное сообщение здесь
+    # было бы вводящим в заблуждение (адресует не ту причину перехвата).
+    version_mismatch = not explicit and _is_version_mismatch_takeover(state, we_elevated=is_elevated())
+    if version_mismatch:
+        # GAP-524: клиент поставил новый диспетчер поверх работающего старого
+        # (pip install -U, установщик BPMkit) — объясняем, что именно
+        # произошло, а не просто «перехватываю порт».
+        _log.warning(
+            f"обнаружен работающий {_describe_running_instance(state)} (pid {state.pid}) — "
+            f"запускается версия {_standkit_version}, старый экземпляр будет остановлен"
+        )
+    else:
+        _log.warning(f"перехватываю порт {exc.port} у работающего диспетчера "
+            f"(pid {state.pid}, права администратора: {_describe_elevation(state.elevated)})"
+        )
     ok, reason = _instance.stop_running_instance(state, run_dir=run_dir, requester_pid=os.getpid())
     if not ok:
         message = reason or f"не удалось остановить процесс {state.pid}"
@@ -168,6 +219,14 @@ def _takeover_running_instance(
         reason = f"порт {exc.port} так и не освободился — перехват отменён"
         _log.warning(f"{reason}")
         return False, reason
+
+    if version_mismatch:
+        message = (
+            f"[standkit-hub] работал {_describe_running_instance(state)} — "
+            f"запущена версия {_standkit_version}, старый остановлен"
+        )
+        print(message)
+        _log.warning(message)
     return True, ""
 
 
@@ -298,6 +357,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--no-takeover",
+        action="store_true",
+        help=(
+            "не отбирать порт автоматически у работающего диспетчера ДРУГОЙ версии "
+            "(GAP-524) — прежнее поведение: молча открыть браузер на старом; "
+            "явный --takeover при этом флаге по-прежнему работает"
+        ),
+    )
+    parser.add_argument(
         "--session-token-file",
         default=None,
         help=(
@@ -339,6 +407,28 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="имя стенда для --elevated-op",
     )
+    parser.add_argument(
+        "--apply-self-update",
+        action="store_true",
+        help=(
+            "режим ПОМОЩНИКА самообновления диспетчера (GAP-523) — внутренний флаг, "
+            "которым hub_channel.apply_self_update запускает ЗАСТЕЙДЖЕННЫЙ exe поверх "
+            "работающего; ждёт выхода --wait-pid, подменяет --target собой, запускает "
+            "его и выходит, без bind порта и без остального старта"
+        ),
+    )
+    parser.add_argument(
+        "--target",
+        default=None,
+        help="путь к exe, который нужно подменить (только с --apply-self-update)",
+    )
+    parser.add_argument(
+        "--wait-pid",
+        type=int,
+        default=None,
+        help="pid процесса, чьего выхода нужно дождаться перед подменой (только с "
+             "--apply-self-update)",
+    )
     args = parser.parse_args(argv)
 
     # Лог поднимаем ПЕРВЫМ делом после разбора аргументов — до mutex/bind/
@@ -353,6 +443,21 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLevelName(_log.level),
         _hub_logging.LOG_LEVEL_ENV, os.environ.get(_hub_logging.LOG_LEVEL_ENV) or "не задана",
     )
+
+    if args.apply_self_update:
+        # GAP-523: ДО preload/mutex/bind/state — тот же принцип, что у
+        # --elevated-op ниже: одноразовый процесс "выполнить и выйти", HTTP-
+        # сервер ему не нужен вовсе, и открывать порт/мьютекс вторым
+        # экземпляром, пока СТАРЫЙ (--wait-pid) ещё жив, было бы конфликтом на
+        # пустом месте. Логирование уже поднято строкой выше — помощник
+        # обязан оставить след в том же файле, что и обычный старт.
+        from standkit_hub import self_update as _self_update
+
+        if not args.target or not args.wait_pid:
+            print("[standkit-hub] --apply-self-update требует --target и --wait-pid")
+            return 1
+        return _self_update.run_self_update_helper(
+            target=args.target, wait_pid=args.wait_pid)
 
     # Необработанное исключение обязано остаться в логе, а не исчезнуть вместе
     # с невидимым stderr: без этого «диспетчер просто пропал» — всё, что
@@ -507,7 +612,7 @@ def main(argv: list[str] | None = None) -> int:
         # экземпляре — пользователь видел ту же ошибку прав, будучи уверен, что
         # всё сделал правильно.
         takeover_ok, takeover_reason = _takeover_running_instance(
-            exc, state_file, run_dir, explicit=args.takeover, our_sid=our_sid
+            exc, state_file, run_dir, explicit=args.takeover, our_sid=our_sid, no_takeover=args.no_takeover
         )
         if takeover_ok:
             # Порт мог освободиться формально (сокет закрыт), но ОС не всегда

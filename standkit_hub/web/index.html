@@ -1204,6 +1204,54 @@
             <button type="button" id="upd-rollback-btn" class="secondary" data-companion-action="rollback" hidden>Откатить</button>
           </div>
         </div>
+
+        <!-- GAP-523: карточка «Диспетчер стендов» — самообновление exe-сборки
+             ЛИБО, для pip-установки, команда `pip install -U` + перезапуск. -->
+        <div class="upd-row">
+          <div class="upd-ico">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          </div>
+          <div class="upd-main">
+            <div class="upd-title">Диспетчер стендов <span class="upd-avail" id="upd-hub-avail" hidden></span></div>
+            <div class="upd-desc" id="upd-hub-desc">Эта программа (standkit-hub). exe-сборка обновляется подписанным файлом с сервера издателя; pip-установка — командой pip, которую вы запускаете сами.</div>
+            <div class="upd-meta" id="upd-hub-meta">—</div>
+            <div class="upd-detail" id="upd-hub-detail" hidden></div>
+            <div class="upd-pip" id="upd-hub-pip" hidden>
+              <code id="upd-hub-pip-cmd">python -m pip install -U standkit</code>
+              <button type="button" class="secondary" id="upd-hub-pip-copy-btn">Копировать</button>
+            </div>
+            <div class="upd-restart" id="upd-hub-wait-note" hidden>
+              <strong>Диспетчер обновляется…</strong><span> сейчас он завершится и перезапустится новой версией — окно обновится само.</span>
+            </div>
+          </div>
+          <div class="upd-action">
+            <button type="button" id="upd-hub-apply-btn" data-companion-action="apply_hub" hidden>Установить</button>
+            <button type="button" id="upd-hub-stage-btn" class="secondary" data-companion-action="stage_hub" hidden>Скачать</button>
+            <button type="button" id="upd-hub-restart-btn" class="secondary" data-hub-restart hidden>Перезапустить диспетчер</button>
+          </div>
+        </div>
+
+        <!-- GAP-288: карточка «Скиллы и плагин» — обновление скиллов в найденных
+             клиентах и `.plugin` для ручной загрузки в Claude Desktop/Cowork. -->
+        <div class="upd-row">
+          <div class="upd-ico">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 12l-2.5 6-6-2.5-6 2.5L3.5 12l2.5-6 6 2.5 6-2.5z"/></svg>
+          </div>
+          <div class="upd-main">
+            <div class="upd-title">Скиллы и плагин <span class="upd-avail" id="upd-skills-avail" hidden></span></div>
+            <div class="upd-desc">База знаний BPMkit для MCP-клиентов и файл плагина для Claude Desktop/Cowork.</div>
+            <div class="upd-meta" id="upd-skills-meta">—</div>
+            <div class="upd-detail" id="upd-skills-detail" hidden></div>
+            <div class="upd-meta" id="upd-skills-plugin-path">—</div>
+            <ul class="upd-whatsnew-list" id="upd-skills-clients"></ul>
+            <p class="upd-desc"><a href="/bpmkit-cookbook#plugin-install" target="_blank" rel="noopener">Как загрузить плагин в Claude Desktop/Cowork</a></p>
+          </div>
+          <div class="upd-action">
+            <button type="button" id="upd-skills-apply-btn" data-companion-action="apply_skills" hidden>Обновить скиллы</button>
+            <button type="button" id="upd-skills-stage-btn" class="secondary" data-companion-action="stage_skills" hidden>Скачать</button>
+            <button type="button" id="upd-skills-open-folder-btn" class="secondary" data-hub-open-folder="plugin">Открыть папку</button>
+          </div>
+        </div>
       </div>
       <div class="modal-footer updates-footer">
         <button type="button" id="updates-close-footer-btn" class="secondary">Закрыть</button>

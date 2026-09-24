@@ -485,9 +485,117 @@ def test_should_takeover_unknown_sid_does_not_block():
     assert instance.should_takeover(running, we_elevated=True, explicit=False, our_sid="S-1-5-21-BBB") is True
 
 
+# --- GAP-524: автоматический перехват у экземпляра ДРУГОЙ версии -----------
+
+
+def test_should_takeover_different_version_auto_takes_over():
+    running = HubInstanceState(pid=1, host="127.0.0.1", port=8770, elevated=False, version="0.12.9")
+
+    assert (
+        instance.should_takeover(running, we_elevated=False, explicit=False, our_version="0.12.11") is True
+    )
+
+
+def test_should_takeover_unknown_version_auto_takes_over():
+    # Старый файл состояния без поля version — instance.from_dict читает его
+    # как пустую строку ("неизвестна"), тот же повод, что явное расхождение.
+    running = HubInstanceState(pid=1, host="127.0.0.1", port=8770, elevated=False, version="")
+
+    assert (
+        instance.should_takeover(running, we_elevated=False, explicit=False, our_version="0.12.11") is True
+    )
+
+
+def test_should_takeover_same_version_keeps_old_behavior():
+    running = HubInstanceState(pid=1, host="127.0.0.1", port=8770, elevated=False, version="0.12.11")
+
+    assert (
+        instance.should_takeover(running, we_elevated=False, explicit=False, our_version="0.12.11") is False
+    )
+
+
+def test_should_takeover_version_mismatch_disabled_by_no_takeover_flag():
+    running = HubInstanceState(pid=1, host="127.0.0.1", port=8770, elevated=False, version="0.12.9")
+
+    assert (
+        instance.should_takeover(
+            running, we_elevated=False, explicit=False, our_version="0.12.11", no_takeover=True
+        )
+        is False
+    )
+
+
+def test_should_takeover_no_takeover_does_not_disable_elevation_reason():
+    # --no-takeover отключает ТОЛЬКО версионный автоповод — повышение прав
+    # по-прежнему перехватывает (это старая, отдельная гарантия).
+    running = HubInstanceState(pid=1, host="127.0.0.1", port=8770, elevated=False, version="0.12.11")
+
+    assert (
+        instance.should_takeover(
+            running, we_elevated=True, explicit=False, our_version="0.12.11", no_takeover=True
+        )
+        is True
+    )
+
+
+def test_should_takeover_version_mismatch_ignored_when_our_version_not_passed():
+    # Вызывающий не передал our_version (тесты старого поведения, не
+    # интересующиеся этой веткой) — версионная ветка отключена целиком.
+    running = HubInstanceState(pid=1, host="127.0.0.1", port=8770, elevated=False, version="0.12.9")
+
+    assert instance.should_takeover(running, we_elevated=False, explicit=False) is False
+
+
+def test_should_takeover_different_version_refuses_other_account():
+    # Другая версия — но работающий экземпляр принадлежит ДРУГОЙ учётной
+    # записи: молча останавливать чужой рабочий экземпляр нельзя ни по какой
+    # причине (GAP-311 п.4, теперь и для версии — GAP-524).
+    running = HubInstanceState(
+        pid=1, host="127.0.0.1", port=8770, elevated=False, version="0.12.9", user_sid="S-1-5-21-AAA"
+    )
+
+    assert (
+        instance.should_takeover(
+            running, we_elevated=False, explicit=False, our_sid="S-1-5-21-BBB", our_version="0.12.11"
+        )
+        is False
+    )
+
+
 def test_hub_instance_state_from_dict_without_user_sid_is_backward_compatible():
     state = HubInstanceState.from_dict({"pid": 1, "host": "127.0.0.1", "port": 8770})
     assert state.user_sid is None
+
+
+def test_hub_instance_state_from_dict_without_executable_is_backward_compatible():
+    # GAP-524: старый файл состояния (до этого гэпа) без поля executable —
+    # читается как None, а не падает.
+    state = HubInstanceState.from_dict({"pid": 1, "host": "127.0.0.1", "port": 8770})
+    assert state.executable is None
+
+
+def test_hub_instance_state_from_dict_without_version_reads_as_empty_string():
+    # GAP-524: старый файл состояния без поля version — should_takeover должен
+    # видеть "версия неизвестна", а не крашиться на отсутствующем ключе.
+    state = HubInstanceState.from_dict({"pid": 1, "host": "127.0.0.1", "port": 8770})
+    assert state.version == ""
+
+
+def test_current_state_records_executable():
+    # GAP-524: current_state кладёт sys.executable в снимок — нужно только
+    # для человекочитаемого сообщения при версионном автоперехвате.
+    state = instance.current_state("127.0.0.1", 8770, elevated=False)
+    assert state.executable == sys.executable
+
+
+def test_state_round_trip_preserves_executable(tmp_path):
+    path = instance.state_path(tmp_path)
+    state = instance.current_state("127.0.0.1", 8770, elevated=False)
+    instance.write_state(path, state)
+
+    loaded = instance.read_state(path)
+    assert loaded is not None
+    assert loaded.executable == state.executable
 
 
 # --- API хаба ---

@@ -2353,6 +2353,13 @@
     // GAP-279 (ADR-0048): установщик как артефакт обновления.
     stage_installer: "/api/companion/stage-installer",
     apply_installer: "/api/companion/apply-installer",
+    // GAP-523/GAP-288: диспетчер (kind=hub) и скиллы/плагин (kind=skills).
+    check_hub: "/api/companion/check-hub",
+    stage_hub: "/api/companion/stage-hub",
+    apply_hub: "/api/companion/apply-hub",
+    check_skills: "/api/companion/check-skills",
+    stage_skills: "/api/companion/stage-skills",
+    apply_skills: "/api/companion/apply-skills",
   };
 
   // Подпись занятой кнопки: «Обновляем…» честнее универсального «Подождите» —
@@ -2364,6 +2371,12 @@
     rollback: "Откатываем…",
     stage_installer: "Скачиваем установщик…",
     apply_installer: "Запускаем установщик…",
+    check_hub: "Проверяем…",
+    stage_hub: "Скачиваем диспетчер…",
+    apply_hub: "Запускаем самообновление…",
+    check_skills: "Проверяем…",
+    stage_skills: "Скачиваем скиллы/плагин…",
+    apply_skills: "Применяем скиллы…",
   };
 
   const COMPANION_ACTION_DONE = {
@@ -2373,6 +2386,12 @@
     rollback: "Откат выполнен",
     stage_installer: "Установщик скачан и проверен",
     apply_installer: "Установщик запущен",
+    check_hub: "Проверка выполнена",
+    stage_hub: "Диспетчер скачан и проверен",
+    apply_hub: "Самообновление запущено",
+    check_skills: "Проверка выполнена",
+    stage_skills: "Скиллы/плагин скачаны и проверены",
+    apply_skills: "Скиллы применены",
   };
 
   // Почему действие сейчас недоступно. Кнопка не прячется — она выключается и
@@ -2382,6 +2401,8 @@
     rollback: "Откатываться не на что: канал ещё не устанавливал обновлений на этой машине",
     apply_installer: "Устанавливать нечего: установщик новой версии ещё не скачан — нажмите «Проверить обновления»",
     stage_installer: "Скачать установщик сейчас нельзя",
+    apply_hub: "Устанавливать нечего: новая версия диспетчера ещё не скачана — нажмите «Проверить»",
+    apply_skills: "Применять нечего: новые скиллы/плагин ещё не скачаны — нажмите «Проверить»",
   };
   const COMPANION_DISABLED_REASON =
     "Канал обновлений выключен в настройках (Настройки → Обновления)";
@@ -2670,6 +2691,80 @@
       (logHint ? logHint + ". " : "") + "Откройте дашборд ярлыком «BPMkit — диспетчер стендов» и проверьте версию в «О программе».",
       true
     );
+  }
+
+  // --- GAP-523: самообновление диспетчера (apply_hub) ---
+  //
+  // Симметрично installUpdateFlow/waitForInstallerRestart, но проще: сервер
+  // (standkit_hub.server::_api_companion_action) отвечает и СРАЗУ ЖЕ завершает
+  // текущий процесс (тот же путь, что POST /api/hub/shutdown) — к моменту,
+  // когда этот код получает ответ, старый процесс уже уходит, ждать его ухода
+  // отдельно незачем (в отличие от установщика, который стартует асинхронно).
+
+  const HUB_SELF_UPDATE_WAIT_MS = 120000; // 2 минуты: копирование exe + запуск
+  const HUB_SELF_UPDATE_POLL_MS = 1500;
+
+  async function waitForHubRestart(launch) {
+    showInstallOverlay(
+      "Диспетчер обновляется: сейчас он завершится и перезапустится новой версией — страница переподключится сама.",
+      launch && launch.log ? `Журнал: ${launch.log}` : "",
+      false
+    );
+    const deadline = Date.now() + HUB_SELF_UPDATE_WAIT_MS;
+    let unauthorizedSince = 0;
+    while (Date.now() < deadline) {
+      await sleep(HUB_SELF_UPDATE_POLL_MS);
+      const probe = await probeHubByCookie();
+      if (probe === "ok") {
+        window.location.reload();
+        return;
+      }
+      if (probe === "unauthorized") {
+        if (!unauthorizedSince) unauthorizedSince = Date.now();
+        if (Date.now() - unauthorizedSince > INSTALL_SESSION_WAIT_MS) {
+          showInstallOverlay(
+            "Диспетчер обновлён и перезапущен — он открылся в новой вкладке браузера.",
+            "Эту вкладку можно закрыть.", true);
+          return;
+        }
+      }
+    }
+    showInstallOverlay(
+      "Не дождались перезапуска диспетчера после самообновления.",
+      (launch && launch.log ? `Журнал: ${launch.log}. ` : "") +
+        "Откройте дашборд ярлыком «BPMkit — диспетчер стендов» и проверьте версию в «О программе».",
+      true
+    );
+  }
+
+  async function applyHubFlow(btn) {
+    if (companionBusy) return;
+    const errorEl = byId("updates-error");
+    errorEl.textContent = "";
+    const confirmed = await styledConfirm(
+      "Обновить диспетчер",
+      "Диспетчер завершится и перезапустится новой версией; запущенные стенды продолжат работать. Продолжить?",
+      "Обновить"
+    );
+    if (!confirmed) return;
+    companionBusy = true;
+    setButtonBusy(btn, COMPANION_ACTION_BUSY.apply_hub);
+    updateCompanionActions(null);
+    let launched = null;
+    try {
+      const data = await apiSend("POST", COMPANION_ACTION_PATHS.apply_hub, {});
+      launched = (data && data.result) || {};
+    } catch (e) {
+      errorEl.textContent = describeApiError(e);
+    } finally {
+      companionBusy = false;
+      clearButtonBusy(btn);
+    }
+    if (launched && launched.launched) {
+      closeUpdatesDialog();
+      await waitForHubRestart(launched);
+    }
+    await refreshCompanionStatus({ quiet: true });
   }
 
   async function installUpdateFlow(btn) {
@@ -3060,6 +3155,139 @@
     box.hidden = false;
   }
 
+  // --- GAP-523: карточка «Диспетчер стендов» (kind=hub) ---
+  //
+  // Два режима — exe (frozen, самообновление) и pip (только команда + перезапуск).
+  // Развилку сообщает канал (`status.hub.mode`/`status.hub.frozen`), страница её не
+  // угадывает по User-Agent или чему-то ещё локальному.
+
+  function hubBlock(status) {
+    return (status && status.hub) || {};
+  }
+
+  function renderHubRow(status) {
+    const hub = hubBlock(status);
+    const frozen = !!hub.frozen;
+    const current = hub.current || hubVersion || "";
+    const latest = hub.known_latest || "";
+    const staged = (hub.staged && hub.staged.version) || "";
+    const hasNew = !!(latest && current && String(latest) !== String(current));
+
+    const avail = byId("upd-hub-avail");
+    if (avail) {
+      avail.hidden = !(hasNew || staged);
+      if (!avail.hidden) avail.textContent = `доступна ${staged || latest}`;
+    }
+
+    const parts = [];
+    parts.push(current ? `Установлено ${current}` : "Установленная версия неизвестна");
+    if (staged) parts.push(`скачано ${staged}`);
+    else if (hasNew) parts.push(`доступно ${latest}`);
+    else if (current) parts.push("это последняя версия");
+    if (hub.last_check_at) parts.push(`проверено ${describeMoment(hub.last_check_at)}`);
+    const metaEl = byId("upd-hub-meta");
+    if (metaEl) metaEl.textContent = parts.join(" · ");
+
+    const applyBtn = byId("upd-hub-apply-btn");
+    const stageBtn = byId("upd-hub-stage-btn");
+    const pipBox = byId("upd-hub-pip");
+    const restartBtn = byId("upd-hub-restart-btn");
+    if (!frozen) {
+      // pip-установка: канал не подменяет себя — только команда и перезапуск
+      // (контракт серии, GAP-523: «сам pip не запускать»).
+      if (applyBtn) applyBtn.hidden = true;
+      if (stageBtn) stageBtn.hidden = true;
+      if (pipBox) pipBox.hidden = false;
+      if (restartBtn) restartBtn.hidden = false;
+      const desc = byId("upd-hub-desc");
+      if (desc) {
+        desc.textContent = hasNew
+          ? `Установлена pip-сборка standkit ${current}, на PyPI доступна ${latest}. Выполните команду ниже в терминале, затем перезапустите диспетчер.`
+          : `Установлена pip-сборка standkit ${current}. Обновление — командой pip, не диспетчером.`;
+      }
+    } else {
+      if (pipBox) pipBox.hidden = true;
+      if (restartBtn) restartBtn.hidden = true;
+      if (stageBtn) {
+        stageBtn.hidden = !(hasNew && !staged);
+      }
+      if (applyBtn) {
+        applyBtn.hidden = !staged;
+        if (staged && !companionBusy && applyBtn.dataset.idleLabel === undefined) {
+          applyBtn.textContent = `Установить ${staged}`;
+        }
+      }
+    }
+
+    const waitNote = byId("upd-hub-wait-note");
+    if (waitNote) waitNote.hidden = !(hub.self_update_launched && hub.self_update_launched.pid);
+    setDetail("upd-hub-detail", hub.status === "error" ? String(hub.detail || "") : "");
+  }
+
+  // --- GAP-288: карточка «Скиллы и плагин» (kind=skills) ---
+
+  function skillsBlock(status) {
+    return (status && status.skills) || {};
+  }
+
+  function installBlock(status) {
+    return (status && status.install) || {};
+  }
+
+  function renderSkillsRow(status) {
+    const skl = skillsBlock(status);
+    const install = installBlock(status);
+    const current = (skl.installed && skl.installed.version) || "";
+    const latest = skl.known_latest || "";
+    const staged = (skl.staged && skl.staged.version) || "";
+    const hasNew = !!(latest && current && String(latest) !== String(current));
+
+    const avail = byId("upd-skills-avail");
+    if (avail) {
+      avail.hidden = !(hasNew || staged);
+      if (!avail.hidden) avail.textContent = `доступна ${staged || latest}`;
+    }
+
+    const parts = [];
+    parts.push(current ? `Установлено ${current}` : "Установленная версия неизвестна");
+    if (staged) parts.push(`скачано ${staged}`);
+    else if (hasNew) parts.push(`доступно ${latest}`);
+    else if (current) parts.push("это последняя версия");
+    if (skl.last_check_at) parts.push(`проверено ${describeMoment(skl.last_check_at)}`);
+    const metaEl = byId("upd-skills-meta");
+    if (metaEl) metaEl.textContent = parts.join(" · ");
+
+    const pluginPath = byId("upd-skills-plugin-path");
+    if (pluginPath) {
+      pluginPath.textContent = install.plugin_dir
+        ? `Плагин для Claude Desktop/Cowork: ${install.plugin_dir}`
+        : "Плагин для Claude Desktop/Cowork: —";
+    }
+
+    const clientsEl = byId("upd-skills-clients");
+    if (clientsEl) {
+      clientsEl.innerHTML = "";
+      (install.clients || []).forEach((c) => {
+        const li = document.createElement("li");
+        const mark = c.skills_installed ? "скиллы обновлены" : "скиллы не установлены";
+        li.textContent = `${c.name || c.id}: ${mark}`;
+        clientsEl.appendChild(li);
+      });
+    }
+
+    const applyBtn = byId("upd-skills-apply-btn");
+    if (applyBtn) {
+      applyBtn.hidden = !staged;
+      if (staged && !companionBusy && applyBtn.dataset.idleLabel === undefined) {
+        applyBtn.textContent = `Обновить скиллы ${staged}`;
+      }
+    }
+    const stageBtn = byId("upd-skills-stage-btn");
+    if (stageBtn) stageBtn.hidden = !(hasNew && !staged);
+
+    setDetail("upd-skills-detail", skl.status === "error" ? String(skl.detail || "") : "");
+  }
+
   function renderCompanionStatus(status) {
     lastCompanionStatus = status;
     companionAvailable = true;
@@ -3074,6 +3302,8 @@
 
     renderPatternsRow(status);
     renderMcpRow(status);
+    renderHubRow(status);
+    renderSkillsRow(status);
     renderUpdatesBadge(status);
     updateCompanionActions(status);
     maybeNotifyUpdates(status);
@@ -3198,11 +3428,48 @@
 
   function setupUpdatesDialog() {
     document.querySelectorAll("[data-companion-action]").forEach((btn) => {
-      // «Установить обновление» установщиком — свой сценарий: предпросмотр версий,
-      // подтверждение, ожидание перезапуска диспетчера (GAP-279).
-      btn.addEventListener("click", () => (btn.dataset.companionAction === "apply_installer"
-        ? installUpdateFlow(btn)
-        : runCompanionAction(btn.dataset.companionAction, btn)));
+      // «Установить обновление» установщиком и «Обновить диспетчер» — свои
+      // сценарии: предпросмотр/подтверждение, ожидание перезапуска (GAP-279/GAP-523).
+      btn.addEventListener("click", () => {
+        const action = btn.dataset.companionAction;
+        if (action === "apply_installer") return installUpdateFlow(btn);
+        if (action === "apply_hub") return applyHubFlow(btn);
+        return runCompanionAction(action, btn);
+      });
+    });
+    // GAP-523: команда pip — только «Копировать», сам pip диспетчер не запускает.
+    const pipCopyBtn = byId("upd-hub-pip-copy-btn");
+    if (pipCopyBtn) {
+      pipCopyBtn.addEventListener("click", async () => {
+        const cmdEl = byId("upd-hub-pip-cmd");
+        const text = cmdEl ? cmdEl.textContent : "";
+        try {
+          await navigator.clipboard.writeText(text);
+          toast("Команда скопирована");
+        } catch (e) {
+          toast("Не удалось скопировать — выделите текст вручную");
+        }
+      });
+    }
+    // GAP-523: pip-режим — перезапуск существующим не-elevated путём хаба.
+    const hubRestartBtn = byId("upd-hub-restart-btn");
+    if (hubRestartBtn) {
+      // Переиспользуем существующий не-elevated сценарий перезапуска (см.
+      // restartHubFlow выше) — та же кнопка «Перезапустить диспетчер», что и
+      // в «О программе», просто вызванная из карточки «Диспетчер стендов».
+      hubRestartBtn.addEventListener("click", () => restartHubFlow(hubRestartBtn));
+    }
+    // GAP-288: «Открыть папку» — фиксированная цель "plugin", путь строит хаб.
+    document.querySelectorAll("[data-hub-open-folder]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const target = btn.dataset.hubOpenFolder;
+        try {
+          const data = await apiSend("POST", "/api/hub/open-folder", { target });
+          if (!data || !data.ok) toast((data && data.message) || "Не удалось открыть папку");
+        } catch (e) {
+          toast(describeApiError(e));
+        }
+      });
     });
     const installOverlayCloseBtn = byId("install-overlay-close-btn");
     if (installOverlayCloseBtn) installOverlayCloseBtn.addEventListener("click", hideInstallOverlay);
