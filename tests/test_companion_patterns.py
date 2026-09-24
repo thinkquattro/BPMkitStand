@@ -487,31 +487,41 @@ def test_empty_delta_is_ok_and_touches_nothing(tmp_path):
     assert {p: p.stat().st_mtime_ns for p in override.rglob("*") if p.is_file()} == mtimes
 
 
-def test_had_new_last_run_flags_delta_and_resets_on_empty_tick(tmp_path):
-    """GAP-528: `patterns.had_new_last_run` (сводка — `state.summary()["patterns"]
-    ["new_available"]`) — единственный сигнал кнопки «Загрузить новые» в окне
-    «Обновления»: True сразу после тика, применившего хоть один патторн, и False
-    на следующем тике без дельты — сам `sync` дренирует очередь целиком за проход,
-    «доступно, но не скачано» состояния у канала нет."""
+def test_peek_counts_pending_without_applying_and_sync_resets(tmp_path):
+    """GAP-528: кнопка «Загрузить новые» видна только когда у издателя ЖДУТ паттерны
+    после курсора. `peek` считает их одной страницей, ничего не применяя и не двигая
+    курсор; `sync` осушает очередь и сбрасывает счётчик. До первой синхронизации
+    `peek` не считает — первый проход и так применит всё."""
     ctx, state, override = make_env(tmp_path)
-
-    assert state.summary()["patterns"]["new_available"] is False, (
-        "До первой синхронизации флага нет и быть не может")
+    assert state.summary()["patterns"]["new_available"] is False
+    assert pm.peek(FakeClient([]), state, ctx)["skipped"] == "not_seeded"
 
     pm.sync(FakeClient([page([pattern(1, title="Первый", body=BODY_TASK)],
                              next_since="2026-08-01T10:00:00Z", next_since_id=1)]),
             state, ctx, CompanionSettings())
-    assert state.patterns["had_new_last_run"] is True
-    assert state.summary()["patterns"]["new_available"] is True, (
-        "Тик применил новый паттерн — кнопка «Загрузить новые» обязана появиться")
-
-    pm.sync(FakeClient([page([], since="2026-08-01T10:00:00Z", since_id=1,
-                             next_since="2026-08-01T10:00:00Z", next_since_id=1)]),
-            state, ctx, CompanionSettings())
-    assert state.patterns["had_new_last_run"] is False
     assert state.summary()["patterns"]["new_available"] is False, (
-        "Следующий тик без дельты обязан снова спрятать кнопку — паттерн из "
-        "предыдущего прохода уже на диске, повторно грузить нечего")
+        "Сразу после синхронизации ждущих нет — кнопки быть не должно")
+    cursor = (state.patterns["since"], state.patterns["since_id"])
+    before = files_snapshot(override)
+
+    res = pm.peek(FakeClient([page([pattern(2, title="Второй", body=BODY_TASK),
+                                    pattern(3, title="Третий", body=BODY_TASK)],
+                                   since="2026-08-01T10:00:00Z", since_id=1,
+                                   next_since="2026-08-02T10:00:00Z", next_since_id=3)]),
+                  state, ctx)
+    assert res["pending"] == 2
+    summary = state.summary()["patterns"]
+    assert summary["new_available"] is True and summary["pending_count"] == 2
+    assert (state.patterns["since"], state.patterns["since_id"]) == cursor, "peek не двигает курсор"
+    assert files_snapshot(override) == before, "peek не пишет файлы"
+
+    pm.sync(FakeClient([page([pattern(2, title="Второй", body=BODY_TASK),
+                              pattern(3, title="Третий", body=BODY_TASK)],
+                             since="2026-08-01T10:00:00Z", since_id=1,
+                             next_since="2026-08-02T10:00:00Z", next_since_id=3)]),
+            state, ctx, CompanionSettings())
+    assert state.summary()["patterns"]["new_available"] is False, (
+        "После загрузки очередь пуста — кнопка «Загрузить новые» пропадает")
 
 
 def test_had_new_last_run_true_on_tombstone_only_tick(tmp_path):

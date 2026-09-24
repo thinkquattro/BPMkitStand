@@ -3060,12 +3060,10 @@
     const cycle = ((status && status.cycles) || {}).patterns || {};
     const metaEl = byId("upd-patterns-meta");
 
-    // GAP-528, правка владельца: «Загрузить новые» видна ТОЛЬКО когда канал сам
-    // сообщает, что последний тик реально что-то применил или отозвал
-    // (`patterns.new_available`, см. state.py::summary/patterns.py::sync) — канал
-    // синхронизируется автоматически и дренирует очередь целиком за проход, так
-    // что отдельного «доступно, но не скачано» состояния у него нет; кнопка — это
-    // «применить сейчас», а не «скачать».
+    // GAP-528, правка владельца: «Загрузить новые» видна ТОЛЬКО когда у издателя ЖДУТ
+    // паттерны после курсора (`patterns.new_available` = `pending_count`, считает
+    // `patterns.peek` при «Проверить»; `sync` — плановый тик или эта кнопка —
+    // осушает очередь и сбрасывает счётчик).
     const applyBtn = byId("upd-patterns-apply-btn");
     if (applyBtn) applyBtn.hidden = !block.new_available;
 
@@ -3098,7 +3096,12 @@
     // Канал синхронизируется автоматически и молча держит базу актуальной — «доступна
     // N» здесь смысла не имеет (издатель не публикует отдельную «версию базы» для
     // сравнения): чип всегда «актуально», содержательная разница — в строке статуса.
-    setChip("upd-patterns-chip", "ok", "актуально", "");
+    if (block.new_available) {
+      const n = Number(block.pending_count || 0);
+      setChip("upd-patterns-chip", "new", n ? `новых: ${n}${block.pending_more ? "+" : ""}` : "есть новые", "");
+    } else {
+      setChip("upd-patterns-chip", "ok", "актуально", "");
+    }
 
     // 3. Отработал успешно, новых у издателя нет — дельта пустая, это УСПЕХ, а не
     // «не синхронизировались»: счётчик при этом — фактически доступная база (поставочная
@@ -3397,7 +3400,8 @@
     const applyBtn = byId("upd-skills-apply-btn");
     if (applyBtn) {
       // GAP-528: кнопка — только когда есть что применять.
-      applyBtn.hidden = !hasNew;
+      // Одна кнопка за раз: не скачано — «Скачать», скачано — «Обновить скиллы».
+      applyBtn.hidden = !(hasNew && staged);
       if (staged && !companionBusy && applyBtn.dataset.idleLabel === undefined) {
         applyBtn.textContent = `Обновить скиллы ${staged}`;
       } else if (!companionBusy && applyBtn.dataset.idleLabel === undefined) {

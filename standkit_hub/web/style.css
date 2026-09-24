@@ -2153,7 +2153,7 @@ span.value-has-reason {
 /* --- Окно «Обновления» ----------------------------------------------------- */
 
 .modal-box-updates {
-  width: 640px;
+  width: 760px;
   max-width: calc(100vw - 32px);
 }
 
@@ -2171,7 +2171,7 @@ span.value-has-reason {
    версии слева, из-за чего зелёный чип "гулял" по горизонтали между строками). */
 .upd-row {
   display: grid;
-  grid-template-columns: 34px 1fr 140px 150px;
+  grid-template-columns: 34px minmax(0, 1fr) 124px 136px;
   gap: 12px;
   align-items: center;
   padding: 10px 0;
@@ -2605,3 +2605,7 @@ span.value-has-reason {
     grid-template-columns: 1fr;
   }
 }
+
+/* GAP-528: ссылки плагина и команда pip не переносятся посреди строки. */
+#upd-skills-links, .upd-row .upd-sub a { white-space: nowrap; }
+.upd-row code { white-space: nowrap; }

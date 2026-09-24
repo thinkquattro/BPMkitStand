@@ -422,7 +422,7 @@ def test_gap528_buttons_hidden_unless_actionable():
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
     assert '<button type="button" id="upd-install-btn" data-companion-action="apply_update" hidden>' in html
     assert "install.hidden = installerRequired || !hasNew" in js
-    assert "applyBtn.hidden = !hasNew" in js  # renderSkillsRow
+    assert "applyBtn.hidden = !(hasNew && staged)" in js  # renderSkillsRow
 
 
 def test_gap528_chip_helper_and_colors():
@@ -496,7 +496,7 @@ def test_gap528b_status_column_is_a_dedicated_grid_cell():
         assert needle in html, f"чип {chip_id} обязан лежать в своей колонке .upd-status"
     assert ".upd-status {" in css
     # 4 колонки фиксированной ширины — статус и действия не "плавают".
-    assert "grid-template-columns: 34px 1fr 140px 150px" in css
+    assert "grid-template-columns: 34px minmax(0, 1fr) 124px 136px" in css
 
 
 def test_gap528b_check_button_moved_to_header_no_footer():
