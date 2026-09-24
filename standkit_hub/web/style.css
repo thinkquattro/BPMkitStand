@@ -581,10 +581,20 @@ body {
    заголовок слева, независимо от того, сколько модалок делят .modal-header. */
 .upd-header-actions {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
   margin-left: auto;
+}
+
+/* GAP-528: «проверено N назад» — мелко под кнопкой «Проверить», не рядом с ней:
+   шапка не растягивает окно по ширине. */
+.upd-checked-at {
+  font-size: 11.5px;
+  color: var(--bpmkit-muted);
+}
+.upd-checked-at:empty {
+  display: none;
 }
 
 .upd-header-check-btn {
@@ -2153,7 +2163,7 @@ span.value-has-reason {
 /* --- Окно «Обновления» ----------------------------------------------------- */
 
 .modal-box-updates {
-  width: 760px;
+  width: 700px;
   max-width: calc(100vw - 32px);
 }
 
@@ -2171,7 +2181,7 @@ span.value-has-reason {
    версии слева, из-за чего зелёный чип "гулял" по горизонтали между строками). */
 .upd-row {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 124px 136px;
+  grid-template-columns: 34px minmax(0, 1fr) 112px 136px;
   gap: 12px;
   align-items: center;
   padding: 10px 0;
@@ -2370,7 +2380,10 @@ span.value-has-reason {
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  /* GAP-528: иконки/кнопки — сразу за колонкой статуса, не у дальнего края. */
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  white-space: nowrap;
   align-items: center;
   gap: 6px;
 }
@@ -2609,3 +2622,6 @@ span.value-has-reason {
 /* GAP-528: ссылки плагина и команда pip не переносятся посреди строки. */
 #upd-skills-links, .upd-row .upd-sub a { white-space: nowrap; }
 .upd-row code { white-space: nowrap; }
+
+/* GAP-528: подпись и ссылка «как установить» — одной строкой текста, не флекс-элементами. */
+.upd-sub.upd-sub-inline { display: block; }

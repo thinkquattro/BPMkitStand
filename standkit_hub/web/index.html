@@ -1162,12 +1162,12 @@
       <div class="modal-header">
         <h2 id="updates-title">Обновления BPMkit</h2>
         <div class="upd-header-actions">
-          <span id="updates-checked-at" class="status-text"></span>
-          <span id="updates-check-status" class="status-text"></span>
           <button type="button" class="secondary upd-header-check-btn" id="updates-check-btn" data-companion-action="check_update" title="Проверить обновления">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 1 2.64 6.36"/><path d="M3 21v-6h6"/></svg>
             <span id="updates-check-btn-label">Проверить</span>
           </button>
+          <span id="updates-checked-at" class="status-text upd-checked-at"></span>
+          <span id="updates-check-status" class="status-text upd-checked-at"></span>
         </div>
         <button id="updates-close-btn" class="modal-close-btn" type="button" title="Закрыть" aria-label="Закрыть">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
@@ -1294,12 +1294,8 @@
                 <span id="upd-skills-clients">—</span>
               </div>
               <div class="upd-detail" id="upd-skills-detail" hidden></div>
-              <div class="upd-sub">Плагин для Claude Desktop / Cowork загружается вручную</div>
-              <div class="upd-sub">
-                <a href="/bpmkit-cookbook#plugin-install" target="_blank" rel="noopener">Как загрузить плагин</a>
-                <span aria-hidden="true">·</span>
-                <a href="/bpmkit-cookbook#harness-claude-code" id="upd-skills-harness-link" target="_blank" rel="noopener">Скиллы в харнессах</a>
-              </div>
+              <div class="upd-sub upd-sub-inline" title="Плагин в Claude Desktop и Cowork загружается вручную">Плагин для Claude — вручную:
+                <a href="/bpmkit-cookbook#plugin-skills" id="upd-skills-howto-link" target="_blank" rel="noopener">как установить</a></div>
             </div>
             <div class="upd-status">
               <span class="upd-chip" id="upd-skills-chip" hidden></span>
