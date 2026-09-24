@@ -75,6 +75,7 @@ from standkit.lifecycle import AdoptionRequired, AdoptionUnavailable, LifecycleE
 from standkit.models import HostKind, ProbeState, Stand, Transport
 from standkit.registry import Registry, RegistryError, default_registry_path
 from standkit.secrets import SecretError, delete_secret, has_secret, set_secret
+from standkit_hub import bpmkit_cookbook as _bpmkit_cookbook
 from standkit_hub import consent_api
 from standkit_hub import license_api
 from standkit_hub import logs_browser
@@ -288,6 +289,38 @@ def normalize_view(value: object) -> str:
     if isinstance(value, str) and value.strip().lower() in HUB_VIEWS:
         return value.strip().lower()
     return _DEFAULT_VIEW
+
+
+#: Маршрут кукбука BPMkit (инструкции пользователя MCP) — пункт меню «Справка»
+#: в шапке дашборда (GAP-522). Кукбук самого диспетчера — ``/static/cookbook.html``.
+BPMKIT_COOKBOOK_ROUTE = "/bpmkit-cookbook"
+
+#: Страница, когда локальной копии кукбука BPMkit нет (BPMkit не установлен на
+#: этой машине, либо установлен без документа). Самодостаточная, без /static/*.
+_BPMKIT_COOKBOOK_MISSING_HTML = """<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Кукбук BPMkit не найден</title>
+<style>
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;max-width:640px;
+margin:48px auto;padding:0 16px;line-height:1.55;color:#1f2933;background:#fff}
+@media (prefers-color-scheme:dark){body{color:#e4e7eb;background:#15191e}a{color:#7cb7ff}}
+code{background:rgba(127,127,127,.15);padding:1px 5px;border-radius:4px}
+</style></head><body>
+<h1>Кукбук BPMkit не найден на этой машине</h1>
+<p>Инструкция пользователя BPMkit ставится вместе с MCP-сервером BPMkit и
+обновляется его каналом обновлений. Диспетчер ищет её в двух местах:</p>
+<ul>
+<li>в профиле — <code>%APPDATA%\\BPMkit\\docs\\cookbook.html</code>;</li>
+<li>в папке установки BPMkit — <code>&lt;папка BPMkit&gt;\\docs\\cookbook.html</code>
+(папку диспетчер узнаёт от запущенного MCP-сервера).</li>
+</ul>
+<p>Если BPMkit установлен — запустите Claude Desktop (или другой клиент с MCP BPMkit)
+и обновите эту страницу. Если BPMkit не установлен — о продукте и установке:
+<a href="https://bpmkit.pro" target="_blank" rel="noopener">bpmkit.pro</a>.</p>
+<p>Справка по самому диспетчеру стендов — <a href="/static/cookbook.html">кукбук BPMkitStand</a>.</p>
+</body></html>
+"""
 
 
 def _static_cache_control(target: Path) -> str:
@@ -1263,6 +1296,39 @@ def make_handler(
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
+
+        def _send_html(self, code: int, body: bytes, *, cache_control: str = "no-store") -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", cache_control)
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+
+        def _serve_bpmkit_cookbook(self) -> None:
+            """
+            ``GET /bpmkit-cookbook`` — кукбук BPMkit (инструкция пользователя MCP)
+            из локальной установки, пункт меню «Справка» в шапке (GAP-522).
+
+            Без авторизации — как и ``/static/*``: это публичный документ
+            поставки, путь к файлу фиксирован (профиль или ``{app}\\docs``,
+            см. ``standkit_hub.bpmkit_cookbook``) и из запроса не берётся ничего.
+            ``no-store``: канал обновлений подменяет файл без перезапуска хаба.
+            Файла нет — не JSON-404, а человеческая страница с объяснением.
+            """
+            found = _bpmkit_cookbook.find_cookbook()
+            if found is not None:
+                try:
+                    body = Path(found["path"]).read_bytes()
+                except OSError:
+                    body = None
+                if body is not None:
+                    self._send_html(200, body)
+                    return
+            self._send_html(404, _BPMKIT_COOKBOOK_MISSING_HTML.encode("utf-8"))
 
         def _handle_root(self, parsed) -> None:
             qs = parse_qs(parsed.query)
@@ -2790,6 +2856,10 @@ def make_handler(
 
             if path.startswith("/static/"):
                 self._serve_static(path[len("/static/"):])
+                return
+
+            if path == BPMKIT_COOKBOOK_ROUTE:
+                self._serve_bpmkit_cookbook()
                 return
 
             if not path.startswith("/api/"):
