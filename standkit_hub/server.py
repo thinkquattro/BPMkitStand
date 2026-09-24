@@ -82,6 +82,7 @@ from standkit_hub import logs_browser
 from standkit_hub import pick_dialog
 from standkit_hub import redis_min
 from standkit_hub import security as _security
+from standkit_hub import self_version as _self_version
 from standkit_hub.agent_control import AgentControlError, AgentController
 from standkit_hub import elevation as _elevation
 from standkit_hub import instance as _instance
@@ -200,6 +201,13 @@ _ELEVATED_OP_PATH = "/api/hub/elevated-op"
 # проверки формата (ровно 32 hex — secrets.token_hex(16)).
 _ELEVATED_OP_ANY_RE = re.compile(r"^/api/hub/elevated-op/(?P<op_id>[^/]+)$")
 _OP_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+# GAP-528: проверка версии ДИСПЕТЧЕРА (не MCP, не канала обновлений издателя)
+# без лицензии — работает в свободной редакции, где окно «Обновления» может
+# показать только диспетчер. GET — дешёвое чтение (кэш/ленивая проверка),
+# POST .../check — принудительная (та же форма ответа, см. _api_self_version).
+_SELF_VERSION_PATH = "/api/hub/self-version"
+_SELF_VERSION_CHECK_PATH = "/api/hub/self-version/check"
 
 # Поля формы регистрации, которые сервер готов принять и записать в Stand —
 # белый список (всё, чего нет в этом множестве, в реестр не попадает, даже
@@ -1930,6 +1938,60 @@ def make_handler(
                 payload["companion_version"] = described["companion_version"]
             self._send_json(200, payload)
 
+        def _api_self_version(self, *, force: bool) -> None:
+            """``GET /api/hub/self-version`` / ``POST .../self-version/check`` (GAP-528).
+
+            Версия ДИСПЕТЧЕРА (не MCP, не канала обновлений издателя) — единственная
+            карточка обновлений, которую свободная редакция способна показать: без
+            лицензии окно «Обновления» умеет предложить только сам диспетчер.
+            Read-only по духу (ничего не меняет на диске и в реестре), но POST для
+            принудительной проверки всё равно идёт через ``_authorize_mutation`` —
+            он ходит в сеть, а не просто читает, тот же принцип, что у
+            ``/api/companion/check-*``.
+
+            ``force=False`` (GET) — кэш процесса (TTL 6 часов, см.
+            ``standkit_hub.self_version``) и ленивая проверка при его отсутствии;
+            ``force=True`` (POST) — обходит кэш. В FROZEN-сборке (PyInstaller) PyPI
+            не спрашивается вовсе: у самообновляемого exe своя пара
+            ``check-hub``/``stage-hub``/``apply-hub`` в канале издателя (см.
+            ``standkit_companion.hub_channel``), а pip там неприменим по определению.
+            Любая сетевая беда — не исключение, а поле ``error`` в ответе: карточка
+            «О диспетчере» обязана отрисоваться и без сети.
+            """
+            on_disk = on_disk_standkit_version(_standkit_version)
+            if _self_version.is_frozen():
+                payload = {
+                    "current": _standkit_version,
+                    "on_disk": on_disk,
+                    "latest": None,
+                    "update_available": False,
+                    "mode": "frozen",
+                    "source": None,
+                    "checked_at": None,
+                    "error": None,
+                    "pip_command": _self_version.PIP_INSTALL_COMMAND,
+                    "companion": companion_available(),
+                }
+                self._send_json(200, payload)
+                return
+            entry = _self_version.cached_pypi_latest(force=force)
+            latest = entry.get("latest")
+            update_available = bool(latest) and _self_version.compare_versions(
+                latest, _standkit_version) > 0
+            payload = {
+                "current": _standkit_version,
+                "on_disk": on_disk,
+                "latest": latest,
+                "update_available": update_available,
+                "mode": "pip",
+                "source": "pypi",
+                "checked_at": entry.get("checked_at"),
+                "error": entry.get("error"),
+                "pip_command": _self_version.PIP_INSTALL_COMMAND,
+                "companion": companion_available(),
+            }
+            self._send_json(200, payload)
+
         # --- API: настройки ---
 
         def _api_settings_get(self) -> None:
@@ -2969,6 +3031,15 @@ def make_handler(
                 self._api_version()
                 return
 
+            if path == _SELF_VERSION_PATH:
+                # GAP-528: работает БЕЗ лицензии (обычный _authorize_read, как у
+                # прочих GET /api/*) — свободная редакция обязана уметь показать
+                # хотя бы версию диспетчера.
+                if not self._authorize_read():
+                    return
+                self._api_self_version(force=False)
+                return
+
             if path == "/api/agent/status":
                 if not self._authorize_read():
                     return
@@ -3070,6 +3141,15 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_settings_post()
+                return
+
+            if path == _SELF_VERSION_CHECK_PATH:
+                # GAP-528: принудительная проверка — мутация (сетевой поход), та
+                # же авторизация, что у остальных POST /api/* (double-submit +
+                # локальный Origin); работает БЕЗ лицензии, как и GET-версия.
+                if not self._authorize_mutation():
+                    return
+                self._api_self_version(force=True)
                 return
 
             action = COMPANION_ACTION_ROUTES.get(path)

@@ -416,11 +416,43 @@ def staged_skills_info(state) -> Optional[dict]:
 
 
 def skills_status(state) -> dict:
-    """Карточка канала для `/api/companion/status`."""
+    """Карточка канала для `/api/companion/status`.
+
+    Установленная версия (GAP-528 п.2б): если маркера `installed.json` ещё
+    нет (свежая установка, канал ещё ни разу не применял скиллы), берём
+    версию ЗАПУЩЕННОГО MCP из `mcp_runtime.json` — то же приближение, что
+    `_current_skills_version` уже использует для сетевого `check_skills`, но
+    до этой правки НИКОГДА не попадало в статус: UI видел `installed: null`
+    и писал «неизвестна», хотя маркер запущенного MCP рядом был. Источник
+    отмечается `installed_source` ("marker" — честный `installed.json`,
+    "running" — приближение по `mcp_runtime.json"), чтобы UI мог показать
+    это отличие, а не выдать приближение за точный факт.
+
+    `update_available` (GAP-528 п.2в): подготовленная версия (`staged`) ЛИБО
+    известная более новая, чем действующая (маркер или приближение выше).
+    """
+    installed = read_installed_marker()
+    installed_source = "marker" if installed else None
+    if installed is None:
+        runtime = read_runtime_marker()
+        runtime_version = str((runtime or {}).get("version") or "").strip()
+        if runtime_version:
+            installed = {"version": runtime_version, "sha256": None,
+                         "applied_at": None, "hosts": []}
+            installed_source = "running"
+    known_latest = state.skills.get("known_latest")
+    staged = staged_skills_info(state)
+    installed_version = (installed or {}).get("version")
+    update_available = bool(staged) or (
+        bool(known_latest) and bool(installed_version)
+        and compare_versions(known_latest, installed_version) > 0
+    )
     return {
-        "installed": read_installed_marker(),
-        "known_latest": state.skills.get("known_latest"),
-        "staged": staged_skills_info(state),
+        "installed": installed,
+        "installed_source": installed_source,
+        "known_latest": known_latest,
+        "staged": staged,
+        "update_available": update_available,
     }
 
 

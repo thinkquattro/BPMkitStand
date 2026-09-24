@@ -347,10 +347,20 @@ def _web_dir() -> Path:
 
 
 def test_ui_has_four_distinct_pattern_row_states():
+    """GAP-528: окно переверстано по компактному макету («иконка | название +
+    статус-строка | кнопки» — updates_mockup_v2.html), и два прежних текстовых
+    состояния «новых нет»/«дельта применена» слились в одну строку с чипом
+    «актуально» — макет владельца не оставляет места под абзац-объяснение. Тест
+    по-прежнему держит различимость состояний «остановлен», «ни разу не
+    отрабатывал» и «отработал» (см. renderPatternsRow), просто по новым
+    текстам/чипу, а не по старой дословной фразе."""
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
     assert "Первая синхронизация паттернов ещё не проходила" in js
-    assert "Все паттерны уже внутри BPMkit. Новых не появилось" in js, (
-        "текст владельца для состояния «отработал, новых нет» — дословно")
+    assert "Синхронизация паттернов остановлена" in js
+    # Состояние «отработал успешно» — единая строка с чипом «актуально», а не
+    # прежний развёрнутый текст (см. renderPatternsRow, ветки 3/4).
+    assert 'setChip("upd-patterns-chip", "ok", "актуально"' in js
+    assert "· автоматически, ${whenChecked}" in js
 
 
 def test_ui_restart_note_names_running_version_when_known():
@@ -368,3 +378,101 @@ def test_ui_has_whatsnew_spoiler_collapsed_by_default():
         "ещё и hidden (нечего показывать, пока не пришли данные)")
     assert ".upd-whatsnew" in css
     assert "renderWhatsNew" in js
+
+
+# ==========================================================================================
+# GAP-528 — переверстка окна «Обновления» по макету владельца (updates_mockup_v2.html):
+# компактная сетка «иконка 34px | название + статус-строка | кнопки», один блок разметки
+# на редакцию (`#upd-paid-rows` / `#upd-free-rows`), кнопки только когда есть что нажать.
+# Те же текстовые guard'ы, что и остальной набор этого файла — без DOM-рендера.
+# ==========================================================================================
+
+def test_gap528_updates_button_is_always_visible():
+    """Кнопка «Обновления» видна в обеих редакциях (GAP-528) — прежний `hidden`
+    по умолчанию и его снятие только для платной редакции убраны."""
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    # Кнопка в разметке без атрибута hidden.
+    assert '<button id="btn-updates" class="updates-btn" type="button" title="Обновления">' in html
+    assert 'byId("btn-updates").hidden = !known' not in js, (
+        "кнопка «Обновления» больше не прячется по лицензии — свободная редакция "
+        "показывает свою карточку (self-version)")
+
+
+def test_gap528_paid_and_free_row_containers_exist():
+    """Разметка держит ОБА варианта окна: 4 канала (Companion) и одну строку
+    «Диспетчер стендов» по self-version (свободная редакция), скрытые/показанные
+    через app.js::applyUpdatesEditionView по факту ответа /api/companion/status."""
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    assert 'id="upd-paid-rows"' in html
+    assert 'id="upd-free-rows" hidden' in html
+    assert 'id="upd-self-current"' in html
+    assert 'id="upd-self-chip"' in html
+    assert "applyUpdatesEditionView" in js
+    assert '"/api/hub/self-version"' in js
+    assert '"/api/hub/self-version/check"' in js
+
+
+def test_gap528_buttons_hidden_unless_actionable():
+    """«Установить»/«Обновить скиллы» — только по делу (update_available), а не
+    всегда доступной кнопкой (макет владельца убрал абзацы-объяснения, поэтому
+    видимость кнопки — единственный сигнал «есть что поставить»)."""
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    assert '<button type="button" id="upd-install-btn" data-companion-action="apply_update" hidden>' in html
+    assert "install.hidden = installerRequired || !hasNew" in js
+    assert "applyBtn.hidden = !hasNew" in js  # renderSkillsRow
+
+
+def test_gap528_chip_helper_and_colors():
+    """Чип статус-строки — общий хелпер setChip с тремя цветами (ok/new/err), а
+    не разные ad-hoc бейджи на каждый канал; цвета берутся из переменных темы
+    диспетчера (--bpmkit-ok/--bpmkit-primary/--bpmkit-down), не хардкодом макета."""
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    css = (_web_dir() / "style.css").read_text(encoding="utf-8")
+    assert "function setChip(id, kind, text, title)" in js
+    assert ".upd-chip.ok" in css and "var(--bpmkit-ok)" in css
+    assert ".upd-chip.new" in css and "var(--bpmkit-primary)" in css
+    assert ".upd-chip.err" in css and "var(--bpmkit-down)" in css
+
+
+def test_gap528_skills_harnesses_joined_and_link_uses_first_id():
+    """Список харнессов со скиллами — через « · » в статус-строке, ссылка
+    «Скиллы в харнессах» ведёт на якорь первого найденного (дефолт —
+    #harness-claude-code, как задано владельцем)."""
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    assert 'harnesses.map((c) => c.name || c.id).join(" · ")' in js
+    assert '`/bpmkit-cookbook#harness-${firstId || "claude-code"}`' in js
+    assert 'id="upd-skills-harness-link"' in html
+    assert 'id="plugin-install"' not in html  # ссылка внешняя, якорь не в этом файле
+    assert '/bpmkit-cookbook#plugin-install' in html
+
+
+def test_gap528_version_fallback_fields_used_in_ui():
+    """`current_version_source`/`installed_source` (фолбэк на running-версию,
+    GAP-528 п.2а/2б) читаются фронтом и превращаются в подсказку title, а не
+    теряются молча."""
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    assert "rel.current_version_source" in js
+    assert "skl.installed_source" in js
+    assert "rel.update_available" in js
+    assert "hub.update_available" in js
+    assert "skl.update_available" in js
+
+
+def test_gap528_updates_badge_includes_self_version():
+    """Бейдж «есть что поставить» учитывает и self-version (свободная редакция и
+    платная — диспетчер по PyPI), не только канал издателя."""
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    assert "lastSelfVersion && lastSelfVersion.update_available" in js
+
+
+def test_gap528_footer_and_lock_texts_from_mockup():
+    """Подвал и плашка платных каналов — тексты владельца дословно."""
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    assert "Скачивание — заранее, установка — только по вашей кнопке" in html
+    assert "Паттерны, обновления MCP и скиллов — в редакции с лицензией BPMkit" in html
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    assert "Проверяется по PyPI, без лицензии" in js

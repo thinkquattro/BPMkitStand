@@ -31,6 +31,7 @@ from typing import Any, Optional
 from standkit.registry import bpmkit_config_dir
 
 from . import fsutil
+from .patterns import compare_versions
 
 __all__ = ["STATE_FILE_NAME", "CompanionState", "state_path", "utc_now_iso"]
 
@@ -299,6 +300,27 @@ class CompanionState:
         skl = self.skills
         staged = rel.get("staged") or {}
         current = rel.get("current") or {}
+        # GAP-528 п.2а: `current_version` пуст (свежая установка/маркер не
+        # писался) — подставляем версию РЕАЛЬНО работающего процесса
+        # (`running_version`, маркер `mcp_runtime.json`) вместо честного, но
+        # бесполезного для человека `None`. Источник помечается ОТДЕЛЬНЫМ
+        # полем `current_version_source`: "installed" — обычный случай
+        # (маркер канала есть), "running" — приближение, значение подменено.
+        current_version = current.get("version") or None
+        running_version = rel.get("running_version")
+        current_version_source = "installed" if current_version else None
+        if not current_version and running_version:
+            current_version = running_version
+            current_version_source = "running"
+        rel_known_latest = rel.get("known_latest")
+        rel_staged_version = staged.get("version")
+        # GAP-528 п.2в: подготовленная версия ИЛИ известная более новая, чем
+        # действующая (маркер/приближение выше) — сравнивать строкой нельзя
+        # ("0.9.0" > "0.10.0" как строки), только посегментно.
+        releases_update_available = bool(rel_staged_version) or (
+            bool(rel_known_latest) and bool(current_version)
+            and compare_versions(rel_known_latest, current_version) > 0
+        )
         applied = pat.get("applied") or []
         shipped_count = pat.get("shipped_count")
         total_available = (int(shipped_count) + len(applied)) if shipped_count is not None else None
@@ -326,17 +348,20 @@ class CompanionState:
                 "last_check_at": rel.get("last_check_at"),
                 "status": rel.get("last_status"),
                 "detail": rel.get("last_detail"),
-                "known_latest": rel.get("known_latest"),
+                "known_latest": rel_known_latest,
                 "staged_version": staged.get("version"),
                 "staged_signed": staged.get("signed"),
-                "current_version": current.get("version"),
+                # GAP-528 п.2а: с фолбэком на `running_version`, когда маркер
+                # канала пуст — см. вычисление `current_version` выше.
+                "current_version": current_version,
+                "current_version_source": current_version_source,
                 "restart_required": bool(rel.get("restart_required")),
                 "rollback_available": bool(rel.get("history")),
                 "resume_bytes": (rel.get("partial") or {}).get("bytes"),
                 # GAP-447: версия и момент старта РЕАЛЬНО работающего процесса (маркер
                 # `mcp_runtime.json`), отдельно от того, что канал считает установленным
                 # (`current_version` выше). `None` — маркера не видно.
-                "running_version": rel.get("running_version"),
+                "running_version": running_version,
                 "running_started_at": rel.get("running_started_at"),
                 # GAP-442: состав обновления/известные проблемы, попутный запрос
                 # `GET /v1/version/latest` при проверке релиза.
@@ -348,6 +373,9 @@ class CompanionState:
                 # `releases.stage`/`releases.apply_staged`); UI диспетчера не должен
                 # предлагать тихую установку в этом состоянии.
                 "requires_installer": bool(rel.get("requires_installer")),
+                # GAP-528 п.2в: подготовленная ЛИБО известная более новая версия —
+                # UI прячет кнопку «Установить», когда ставить нечего.
+                "update_available": releases_update_available,
             },
             "cookbook": {
                 "last_check_at": cb.get("last_check_at"),
