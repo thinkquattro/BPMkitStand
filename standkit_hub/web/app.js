@@ -2460,8 +2460,17 @@
    * свободная (одна строка «Диспетчер стендов» по PyPI). Решает по факту
    * доступности /api/companion/status (companionAvailable), не по лицензии
    * напрямую — свободная редакция никогда не видит канал издателя вовсе. */
+  // GAP-528: «платный» вид окна — только когда канал Companion есть И лицензия
+  // действующая. Пакет standkit_companion ставится с pip всем, поэтому одного
+  // companionAvailable мало: без лицензии пользователь должен видеть свободный вид
+  // (диспетчер по PyPI), а не четыре канала, которые ему не работают.
+  function licenseChannelOk() {
+    const lic = lastLicense || {};
+    return lic.edition === "companion" && LICENSE_CHANNEL_STATUSES.indexOf(lic.status) >= 0;
+  }
+
   function applyUpdatesEditionView() {
-    const paid = !!companionAvailable;
+    const paid = !!companionAvailable && licenseChannelOk();
     const paidRows = byId("upd-paid-rows");
     const freeRows = byId("upd-free-rows");
     if (paidRows) paidRows.hidden = !paid;
@@ -2609,7 +2618,10 @@
     // две кнопки «Установить» рядом только путали бы: остаётся одна, установщиком.
     const replaceBtn = byId("upd-install-btn");
     if (replaceBtn) {
-      replaceBtn.hidden = !!staged && ((status && status.actions) || {}).apply_update !== true;
+      // GAP-528: этот блок только ПРЯЧЕТ кнопку при готовом установщике; показывает её
+      // renderMcpRow (по update_available). Раньше здесь же было «иначе показать» —
+      // и «Установить» висела без всякого обновления.
+      if (staged && ((status && status.actions) || {}).apply_update !== true) replaceBtn.hidden = true;
     }
     const stageBtn = byId("upd-installer-stage-btn");
     if (stageBtn) stageBtn.hidden = !(installerRequired && !staged);
@@ -3640,7 +3652,7 @@
     const checkBtn = byId("updates-check-btn");
     if (checkBtn) {
       checkBtn.addEventListener("click", () => {
-        if (companionAvailable) return runCompanionAction("check_update", checkBtn);
+        if (companionAvailable && licenseChannelOk()) return runCompanionAction("check_update", checkBtn);
         return runSelfVersionCheck(checkBtn);
       });
     }
@@ -3950,6 +3962,7 @@
     // показывают разное содержимое окна — см. applyUpdatesEditionView); только
     // раздел настроек «Обновления» остаётся привязан к лицензии.
     byId("rail-updates").hidden = !known;
+    if (updatesDialogIsOpen()) applyUpdatesEditionView();
     if (!known && document.querySelector('.settings-pane[data-pane="updates"].active')) {
       selectSettingsPane("general");
     }
