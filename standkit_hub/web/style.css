@@ -547,6 +547,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 10px;
   padding: 14px 18px;
   border-bottom: 1px solid var(--bpmkit-border);
 }
@@ -571,6 +573,26 @@ body {
 .modal-close-btn:hover {
   background: var(--bpmkit-bg);
   color: var(--bpmkit-text);
+}
+
+/* GAP-528, правка владельца: «Проверить обновления» переехала из подвала окна
+   в шапку, рядом с «проверено N назад» — `margin-left: auto` (не
+   justify-content шапки) прижимает эту группу к крестику закрытия, оставляя
+   заголовок слева, независимо от того, сколько модалок делят .modal-header. */
+.upd-header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.upd-header-check-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  white-space: nowrap;
 }
 
 .modal-body {
@@ -2131,7 +2153,7 @@ span.value-has-reason {
 /* --- Окно «Обновления» ----------------------------------------------------- */
 
 .modal-box-updates {
-  width: 640px;
+  width: 760px;
   max-width: calc(100vw - 32px);
 }
 
@@ -2144,9 +2166,12 @@ span.value-has-reason {
   color: var(--bpmkit-down);
 }
 
+/* GAP-528, правка владельца по живому хосту: 4 колонки ФИКСИРОВАННОЙ ширины —
+   статус и действия больше не "auto" (та ширина плыла вслед за длиной текста
+   версии слева, из-за чего зелёный чип "гулял" по горизонтали между строками). */
 .upd-row {
   display: grid;
-  grid-template-columns: 34px 1fr auto;
+  grid-template-columns: 34px minmax(0, 1fr) 124px 136px;
   gap: 12px;
   align-items: center;
   padding: 10px 0;
@@ -2245,6 +2270,17 @@ span.value-has-reason {
   flex-wrap: wrap;
 }
 
+/* GAP-528, правка владельца: колонка статуса — своя ячейка грида (3-я из 4),
+   ВСЕГДА присутствует (даже когда чипа нет — сетка не съезжает), чип в ней
+   выровнен по левому краю колонки и по центру строки по вертикали
+   (align-items: center у .upd-row уже это даёт). */
+.upd-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
 .upd-chip {
   display: inline-flex;
   align-items: center;
@@ -2335,6 +2371,7 @@ span.value-has-reason {
   flex-direction: row;
   flex-wrap: wrap;
   justify-content: flex-end;
+  align-items: center;
   gap: 6px;
 }
 
@@ -2342,12 +2379,22 @@ span.value-has-reason {
   display: none;
 }
 
-/* Маленькая кнопка-иконка («⧉ pip», «⧉ Копировать») — тот же .secondary, но
-   уже, для строки с командой pip. */
+/* GAP-528, правка владельца: копирование pip-команды и «Папка плагина» —
+   аккуратные иконки-кнопки 30×30 (SVG, stroke currentColor — тот же приём,
+   что у иконок шапки диспетчера/крестика модалки), не текстовые «⧉ pip». */
 .upd-icon-btn {
-  padding-left: 9px;
-  padding-right: 9px;
-  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  flex: none;
+}
+
+.upd-icon-btn svg {
+  width: 16px;
+  height: 16px;
 }
 
 /* Перезапуск после подмены бинаря: узнать об этом пользователь обязан не из
@@ -2451,9 +2498,13 @@ span.value-has-reason {
   line-height: 1.5;
 }
 
-.updates-footer {
-  align-items: center;
-  gap: 8px;
+/* GAP-528, правка владельца: подвал окна убран целиком (кнопка проверки — в
+   шапке, см. .upd-header-actions), фраза о загрузке заранее — мелкой серой
+   строкой под рядами каналов, не отдельным modal-footer. */
+.upd-body .upd-footnote {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--bpmkit-muted);
 }
 
 /* --- Тост и спиннер на кнопке ---------------------------------------------- */
@@ -2554,3 +2605,7 @@ span.value-has-reason {
     grid-template-columns: 1fr;
   }
 }
+
+/* GAP-528: ссылки плагина и команда pip не переносятся посреди строки. */
+#upd-skills-links, .upd-row .upd-sub a { white-space: nowrap; }
+.upd-row code { white-space: nowrap; }

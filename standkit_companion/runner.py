@@ -921,6 +921,13 @@ class CompanionRunner:
                 result["staged"] = staged
                 result["installer"] = installer
                 result["cookbook"] = self._sync_cookbook(session)
+                # GAP-528: «Проверить» в окне «Обновления» заодно узнаёт, ждут ли новые
+                # паттерны у издателя (без применения — их грузит кнопка «Загрузить
+                # новые» или плановый тик). Сбой подсчёта проверку не роняет.
+                try:
+                    result["patterns"] = patterns.peek(session.client, self._state, session.ctx)
+                except Exception as exc:  # noqa: BLE001 - попутный подсчёт, best-effort
+                    result["patterns"] = {"error": str(exc)[:200]}
                 return result
             if action == "stage_update":
                 return releases.stage(session.client, self._state, session.ctx,

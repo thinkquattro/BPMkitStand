@@ -74,6 +74,17 @@ def _default_state() -> dict:
             "last_detail": "",
             "last_bundle_sha256": "",
             "applied": [],
+            # GAP-528: признак «последний проход канала реально что-то применил или
+            # отозвал» — единственный надёжный сигнал «есть новые паттерны», раз сам
+            # `sync` дренирует очередь целиком за один тик (см. `patterns.sync`) и
+            # отдельного «доступно, но не скачано» состояния у канала нет. Кнопка
+            # «Загрузить новые» в UI смотрит на это поле (см. `summary`), не на
+            # дельту total_available, которая после того же тика уже не отличима от
+            # «всё было применено раньше».
+            "had_new_last_run": False,
+            # GAP-528: ожидающие у издателя после курсора (`patterns.peek`).
+            "pending_count": 0,
+            "pending_more": False,
         },
         "releases": {
             "last_check_at": None,
@@ -343,6 +354,14 @@ class CompanionState:
                 # выдумывать его нельзя (см. докстринг `_default_state`).
                 "shipped_count": shipped_count,
                 "total_available": total_available,
+                # GAP-528: True — последний завершённый проход канала применил или
+                # отозвал хотя бы один паттерн (`had_new_last_run`, см. `patterns.sync`).
+                # Кнопка «Загрузить новые» в окне «Обновления» видна только при этом
+                # флаге; повторный тик без дельты сбрасывает его сам.
+                "new_available": bool(pat.get("pending_count") or pat.get("pending_more")),
+                "pending_count": int(pat.get("pending_count") or 0),
+                "pending_more": bool(pat.get("pending_more")),
+                "had_new_last_run": bool(pat.get("had_new_last_run")),
             },
             "releases": {
                 "last_check_at": rel.get("last_check_at"),

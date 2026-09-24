@@ -103,6 +103,7 @@ __all__ = [
     "seed_override_root",
     "render",
     "sync",
+    "peek",
     "snapshot",
     "restore",
 ]
@@ -669,6 +670,39 @@ def _skip(rid: Any, rec: dict, reason: str, note: str) -> dict:
             "area": str(rec.get("area") or ""), "reason": reason, "note": note}
 
 
+def peek(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext") -> dict:
+    """Сколько паттернов ждёт у издателя ПОСЛЕ текущего курсора — без применения
+    (GAP-528: кнопка «Загрузить новые» в окне «Обновления» видна только когда
+    ждущие есть). Один запрос той же страницы `sync` с тем же курсором; курсор,
+    файлы и применённые записи НЕ трогаются. Результат — в `patterns.pending_count`
+    (+ `pending_more`: за страницей есть ещё), сводка отдаёт его как
+    `new_available`. До первой синхронизации (`seeded` ложно) — не считаем:
+    первый проход и так применит поставку целиком.
+    """
+    block = state.patterns
+    if not block.get("seeded"):
+        return {"pending": 0, "more": False, "skipped": "not_seeded"}
+    params: dict = {"limit": min(PAGE_LIMIT, MAX_LIMIT)}
+    mcp_version = str(getattr(ctx, "mcp_version", "") or "").strip()
+    if mcp_version:
+        params["mcp_version"] = mcp_version
+    cursor_since = block.get("since")
+    cursor_id = block.get("since_id")
+    if cursor_since is not None and cursor_id is not None:
+        params["since"] = cursor_since
+        params["since_id"] = cursor_id
+    payload, _headers = client.get_json(SYNC_PATH, params=params)
+    items = _check_page(payload)
+    pending = len(items)
+    more = bool(isinstance(payload, dict) and payload.get("has_more"))
+    block["pending_count"] = pending
+    block["pending_more"] = more
+    from .state import utc_now_iso  # локально: state.py сам импортирует patterns
+    block["pending_checked_at"] = utc_now_iso()
+    state.save()
+    return {"pending": pending, "more": more}
+
+
 def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext",
          settings: Any, *, max_pages: int = 200) -> dict:
     """Полный проход канала паттернов: seed → пагинация → применение → рендер → состояние.
@@ -795,6 +829,13 @@ def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext"
     block["since_id"] = cursor_id
     block["seeded"] = True
     block["root"] = str(Path(override_root))
+    # GAP-528: «последний тик реально что-то поставил» — единственный сигнал, по
+    # которому UI показывает кнопку «Загрузить новые» (см. `state.py::summary`).
+    # Пустая дельта сбрасывает флаг сама, следующим тиком.
+    block["had_new_last_run"] = bool(applied_count or removed_count)
+    # GAP-528: очередь издателя только что осушена — ожидающих больше нет.
+    block["pending_count"] = 0
+    block["pending_more"] = False
     if last_bundle:
         block["last_bundle_sha256"] = last_bundle
     detail = (f"страниц {pages}, получено {fetched}, применено {applied_count}, "
