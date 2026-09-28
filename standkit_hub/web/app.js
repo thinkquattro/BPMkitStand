@@ -2536,17 +2536,54 @@
     return ((status && status.state) || {}).patterns || {};
   }
 
+  // GAP-604: версии сравниваются ТОЛЬКО посегментно и только на «больше» — зеркало
+  // `parse_version`/`compare_versions` из `standkit_companion.releases`. Строковое
+  // НЕРАВЕНСТВО (`"1.1.224" !== "1.2.0"`) истинно и тогда, когда известная каналу
+  // версия СТАРШЕ установленной, — так бейдж «1» горел при всех четырёх каналах
+  // «актуально» (скриншот владельца 28.09.2026).
+  function parseVersion(value) {
+    let text = String(value == null ? "" : value).trim();
+    if (text[0] === "v" || text[0] === "V") text = text.slice(1);
+    if (!text) return [];
+    return text.split(".").map((chunk) => {
+      const m = /^\d+/.exec(chunk.trim());
+      return m ? parseInt(m[0], 10) : 0;
+    });
+  }
+
+  function compareVersions(a, b) {
+    const va = parseVersion(a);
+    const vb = parseVersion(b);
+    const width = Math.max(va.length, vb.length);
+    for (let i = 0; i < width; i += 1) {
+      const x = va[i] || 0;
+      const y = vb[i] || 0;
+      if (x !== y) return x > y ? 1 : -1;
+    }
+    return 0;
+  }
+
+  /** `candidate` новее `current` (обе заданы). Пустая любая — не «новее». */
+  function isNewerVersion(candidate, current) {
+    if (!candidate || !current) return false;
+    return compareVersions(candidate, current) > 0;
+  }
+
   /** Есть ли что показать бейджем на кнопке шапки: новая версия или перезапуск. */
   function companionHasNews(status) {
     if (!status) return false;
     const rel = releasesBlock(status);
     if (rel.restart_required) return true;
+    // GAP-604: `update_available` — уже посегментное сравнение сервера
+    // (`compare_versions`, `standkit_companion.state`). Прежний фолбэк сравнивал
+    // known_latest/current_version строкой на неравенство и зажигал бейдж при
+    // known_latest СТАРШЕ current_version — известный сервером факт не
+    // пересчитываем на глаз (тот же принцип, что renderMcpRow/renderHubRow/
+    // renderSkillsRow, GAP-528).
     if (rel.update_available) return true;
     if (rel.staged_version) return true;
     if (pendingInstaller(status)) return true;
-    const latest = rel.known_latest;
-    const current = rel.current_version;
-    return !!(latest && current && String(latest) !== String(current));
+    return false;
   }
 
   // GAP-528: бейдж «есть что поставить» обязан загораться и в свободной
@@ -2603,7 +2640,9 @@
     const staged = installerBlock(status).staged;
     if (!staged || !staged.version) return null;
     const current = releasesBlock(status).current_version || "";
-    if (current && String(current) === String(staged.version)) return null;
+    // GAP-604: установщик той же ИЛИ более старой версии, чем установленная, ставить
+    // незачем — только посегментное «больше» (строковое «не равно» держало бы бейдж).
+    if (current && !isNewerVersion(staged.version, current)) return null;
     return staged;
   }
 
@@ -2618,9 +2657,8 @@
   function renderInstallerRow(status) {
     const staged = pendingInstaller(status);
     const rel = releasesBlock(status);
-    const latest = rel.known_latest || "";
-    const current = rel.current_version || "";
-    const hasNew = !!(latest && current && String(latest) !== String(current));
+    // GAP-604: `update_available` сервера (посегментно), а не строковое неравенство.
+    const hasNew = !!rel.update_available;
     const installerRequired = hasNew && !!rel.requires_installer;
 
     const installBtn = byId("upd-installer-btn");
@@ -3005,7 +3043,8 @@
     const current = rel.current_version || "";
     const latest = rel.known_latest || "";
     const events = [];
-    if (latest && current && String(latest) !== String(current)) {
+    // GAP-604: «найдено обновление» — только когда известная версия НОВЕЕ установленной.
+    if (isNewerVersion(latest, current)) {
       events.push({
         key: `found:${latest}`,
         title: "BPMkit: найдено обновление",
@@ -3014,7 +3053,7 @@
     }
     const installer = pendingInstaller(status);
     const ready = installer ? installer.version : (rel.staged_version || "");
-    if (ready && String(ready) !== String(current)) {
+    if (ready && (!current || isNewerVersion(ready, current))) {
       events.push({
         key: `ready:${ready}`,
         title: "BPMkit: обновление готово к установке",
@@ -3218,7 +3257,8 @@
     const staged = rel.staged_version || "";
     const current = rel.current_version || "";
     const latest = rel.known_latest || "";
-    const hasNew = !!(latest && current && String(latest) !== String(current));
+    // GAP-604: только посегментное «больше», не строковое неравенство.
+    const hasNew = isNewerVersion(latest, current);
     // GAP-463: версия с установщиком никогда не станет `staged` (канал её не готовит —
     // см. `renderMcpRow`), но нотсы про НЕЁ пользователю нужны ровно тогда, когда он
     // читает «нужен установщик»: это ответ на «ради чего идти за установщиком».
@@ -3527,7 +3567,8 @@
       const rel = releasesBlock(status);
       const latest = rel.known_latest || "";
       const current = rel.current_version || "";
-      const hasNew = !!(latest && current && String(latest) !== String(current));
+      // GAP-604: только посегментное «больше», не строковое неравенство.
+      const hasNew = isNewerVersion(latest, current);
       if (hasNew && rel.requires_installer) {
         return "Эта версия ставится установщиком — тихая доставка невозможна. " +
           "Скачайте новую поставку у издателя BPMkit и запустите установку.";
