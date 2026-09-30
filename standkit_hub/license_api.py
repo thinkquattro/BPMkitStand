@@ -54,7 +54,7 @@ from standkit.cli_resolve import (
     resolve_command_string,
     search_roots,
 )
-from standkit.platform import run_console
+from standkit.platform import run_console_tree
 from standkit.registry import bpmkit_config_dir
 
 __all__ = [
@@ -186,14 +186,15 @@ def find_cli(settings, *, extra_roots: Optional[Sequence] = None) -> Optional[li
 # Запуск CLI
 # ------------------------------------------------------------------------------------
 def _default_run(argv: list, *, timeout: float = _CLI_TIMEOUT_S) -> tuple:
-    """Запуск через ЕДИНУЮ точку `standkit.platform.run_console` (GAP-138).
+    """Запуск через `standkit.platform.run_console_tree` -- единая точка запуска консольных утилит (GAP-138) плюс убийство дерева по таймауту (GAP-684).
 
     Любое исключение сводится к `rc=-1`: вызывающий разбирает один вид отказа, а не
     зоопарк исключений `subprocess`.
     """
     try:
-        proc = run_console(list(argv), capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout)
+        # GAP-684: по таймауту убиваем ВСЁ дерево CLI (иначе остаются процессы), stdin -- DEVNULL.
+        proc = run_console_tree(list(argv), capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - см. докстринг
         return -1, "", str(exc)
     rc = proc.returncode if proc.returncode is not None else -1
