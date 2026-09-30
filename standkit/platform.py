@@ -83,7 +83,7 @@ def run_console(cmd: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
     """
     if sys.platform == "win32":
         kwargs["creationflags"] = int(kwargs.get("creationflags") or 0) | CREATE_NO_WINDOW
-    # GAP-684 (см. GAP-216): потомок с унаследованным stdin (stdio-пайп родителя) работает
+    # потомок с унаследованным stdin (stdio-пайп родителя) работает
     # в сотни раз медленнее и может зависнуть на чтении; консольным утилитам ввод не нужен.
     if "stdin" not in kwargs and "input" not in kwargs:
         kwargs["stdin"] = subprocess.DEVNULL
@@ -91,7 +91,7 @@ def run_console(cmd: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
 
 
 def _kill_process_tree(proc: "subprocess.Popen") -> None:
-    """Убить процесс И всех его потомков (GAP-684).
+    """Убить процесс И всех его потомков.
 
     ``subprocess.run(timeout=...)`` по таймауту убивает только прямого потомка; у
     PyInstaller-сборки CLI это загрузчик, а работающий процесс -- его ребёнок, и он
@@ -112,7 +112,7 @@ def _kill_process_tree(proc: "subprocess.Popen") -> None:
 
 
 def run_console_tree(cmd: Sequence[str], *, timeout: float, **kwargs) -> subprocess.CompletedProcess:
-    """``run_console`` с гарантией: по таймауту умирает ВСЁ дерево процессов (GAP-684).
+    """``run_console`` с гарантией: по таймауту умирает ВСЁ дерево процессов.
 
     Тот же контракт результата, что у ``subprocess.run`` (``CompletedProcess``;
     ``subprocess.TimeoutExpired`` по таймауту), тот же ``CREATE_NO_WINDOW``, stdin по
