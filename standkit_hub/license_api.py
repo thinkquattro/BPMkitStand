@@ -186,13 +186,13 @@ def find_cli(settings, *, extra_roots: Optional[Sequence] = None) -> Optional[li
 # Запуск CLI
 # ------------------------------------------------------------------------------------
 def _default_run(argv: list, *, timeout: float = _CLI_TIMEOUT_S) -> tuple:
-    """Запуск через `standkit.platform.run_console_tree` -- единая точка запуска консольных утилит (GAP-138) плюс убийство дерева по таймауту (GAP-684).
+    """Запуск через `standkit.platform.run_console_tree` -- единая точка запуска консольных утилит (GAP-138) плюс убийство дерева по таймауту.
 
     Любое исключение сводится к `rc=-1`: вызывающий разбирает один вид отказа, а не
     зоопарк исключений `subprocess`.
     """
     try:
-        # GAP-684: по таймауту убиваем ВСЁ дерево CLI (иначе остаются процессы), stdin -- DEVNULL.
+        # по таймауту убиваем ВСЁ дерево CLI (иначе остаются процессы), stdin -- DEVNULL.
         proc = run_console_tree(list(argv), capture_output=True, text=True,
                                 encoding="utf-8", errors="replace", timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - см. докстринг
