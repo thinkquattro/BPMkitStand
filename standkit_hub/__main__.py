@@ -177,6 +177,7 @@ def _takeover_running_instance(
         our_sid=our_sid,
         our_version=_standkit_version,
         no_takeover=no_takeover,
+        unauthorized_seen=_instance.unauthorized_seen(state_file),
     ):
         return False, ""
 
@@ -197,7 +198,14 @@ def _takeover_running_instance(
     # — решение уже явно принято пользователем, версионное сообщение здесь
     # было бы вводящим в заблуждение (адресует не ту причину перехвата).
     version_mismatch = not explicit and _is_version_mismatch_takeover(state, we_elevated=is_elevated())
-    if version_mismatch:
+    if not explicit and not version_mismatch and _instance.unauthorized_seen(state_file):
+        # GAP-684: браузер не подтвердил сессию у работающего хаба -- перезапуск даёт свежий токен.
+        _log.warning(
+            f"работающий диспетчер (pid {state.pid}) отверг заход без сессии -- "
+            "перезапускаю его и открываю ссылку со свежим токеном"
+        )
+        print("[standkit-hub] предыдущая вкладка не подтвердила сессию -- диспетчер перезапускается")
+    elif version_mismatch:
         # GAP-524: клиент поставил новый диспетчер поверх работающего старого
         # (pip install -U, установщик BPMkit) — объясняем, что именно
         # произошло, а не просто «перехватываю порт».
@@ -702,6 +710,7 @@ def main(argv: list[str] | None = None) -> int:
     # `serve_forever` уже вышел, а знать об исчезновении диспетчера полезно
     # раньше. Повторный `clear_state` в `_serve.finally` безвреден.
     httpd.instance_state_file = state_file
+    _instance.clear_unauthorized(state_file)  # GAP-684: новый процесс -- новый токен
 
     if args.result_file:
         # Успех: сервер реально поднялся на порту (GAP-311 В4/В5) — старый

@@ -229,6 +229,57 @@ def clear_state(path: Path, *, pid: Optional[int] = None) -> None:
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# Маркер «вкладка не подтвердила сессию» (GAP-684)
+# --------------------------------------------------------------------------
+#
+# Второй запуск по ярлыку при живом хабе открывает браузер БЕЗ токена (токен -- только в
+# памяти работающего процесса). Если у браузера нет сессионной cookie (другой браузер,
+# cookie не пережила закрытие), вкладка получает 401 «сессия не подтверждена», а совет
+# «запустите диспетчер ярлыком» вёл по кругу: ярлык снова открывал тот же процесс.
+# Работающий хаб отмечает такой заход файлом-маркером (токена в нём НЕТ), а следующий
+# запуск ярлыком по свежему маркеру перезапускает хаб и открывает ссылку со свежим токеном.
+
+UNAUTHORIZED_MARKER_NAME = "standkit-hub-unauthorized.json"
+UNAUTHORIZED_MAX_AGE_SEC = 600.0
+
+
+def unauthorized_marker_path(state_file: Path) -> Path:
+    """Маркер лежит рядом с файлом состояния (в ``run_dir``)."""
+    return Path(state_file).with_name(UNAUTHORIZED_MARKER_NAME)
+
+
+def mark_unauthorized(state_file: Path, *, min_interval: float = 5.0) -> None:
+    """Отметить заход без подтверждённой сессии. Best-effort, токен не пишется."""
+    try:
+        path = unauthorized_marker_path(state_file)
+        try:
+            if time.time() - path.stat().st_mtime < min_interval:
+                return
+        except OSError:
+            pass
+        _atomic_write_text(path, json.dumps({"at": time.time()}))
+    except Exception:
+        pass
+
+
+def clear_unauthorized(state_file: Path) -> None:
+    """Убрать маркер (сессия подтверждена либо хаб перезапущен). Best-effort."""
+    try:
+        unauthorized_marker_path(state_file).unlink()
+    except OSError:
+        pass
+
+
+def unauthorized_seen(state_file: Path, *, max_age: float = UNAUTHORIZED_MAX_AGE_SEC) -> bool:
+    """Есть ли СВЕЖИЙ маркер: работающий хаб недавно отверг заход без сессии."""
+    try:
+        age = time.time() - unauthorized_marker_path(state_file).stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age <= max_age
+
+
 def stop_request_path(run_dir: Path) -> Path:
     """Путь к файлу-запросу остановки внутри ``run_dir``."""
     return Path(run_dir) / STOP_REQUEST_FILE_NAME
@@ -282,6 +333,7 @@ def should_takeover(
     our_sid: Optional[str] = None,
     our_version: Optional[str] = None,
     no_takeover: bool = False,
+    unauthorized_seen: bool = False,
 ) -> bool:
     """
     Нужно ли новому процессу отобрать порт у работающего.
@@ -302,6 +354,9 @@ def should_takeover(
     поднял через UAC) свой процесс диспетчера рядом с процессом первого
     пользователя, и молча останавливать чужой рабочий экземпляр нельзя.
 
+    ``unauthorized_seen`` — GAP-684: работающий хаб отметил заход без подтверждённой сессии;
+    перехватываем (после проверки SID), чтобы выдать браузеру свежий токен.
+
     ``our_version``/``no_takeover`` — GAP-524. Второй автоматический повод
     (после «мы elevated, а он нет»): работающий экземпляр — ДРУГОЙ версии,
     либо версия неизвестна (пустая строка — старый файл состояния без поля
@@ -321,6 +376,10 @@ def should_takeover(
         return False
     if our_sid and running.user_sid and our_sid != running.user_sid:
         return False
+    # GAP-684: работающий хаб недавно отверг заход без сессии (см. mark_unauthorized) --
+    # перезапуск даёт свежий токен в ссылке; без этого ярлык вечно открывал бы тот же процесс.
+    if unauthorized_seen:
+        return True
     # Повышение прав — первый автоматический повод. Обратного (elevated
     # уступает обычному) не бывает.
     if bool(we_elevated) and running.elevated is False:

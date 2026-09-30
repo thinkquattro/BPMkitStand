@@ -83,7 +83,64 @@ def run_console(cmd: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
     """
     if sys.platform == "win32":
         kwargs["creationflags"] = int(kwargs.get("creationflags") or 0) | CREATE_NO_WINDOW
+    # GAP-684 (см. GAP-216): потомок с унаследованным stdin (stdio-пайп родителя) работает
+    # в сотни раз медленнее и может зависнуть на чтении; консольным утилитам ввод не нужен.
+    if "stdin" not in kwargs and "input" not in kwargs:
+        kwargs["stdin"] = subprocess.DEVNULL
     return subprocess.run(cmd, **kwargs)
+
+
+def _kill_process_tree(proc: "subprocess.Popen") -> None:
+    """Убить процесс И всех его потомков (GAP-684).
+
+    ``subprocess.run(timeout=...)`` по таймауту убивает только прямого потомка; у
+    PyInstaller-сборки CLI это загрузчик, а работающий процесс -- его ребёнок, и он
+    остаётся жить (процессы, оставшиеся после зависшей записи лицензии)."""
+    pid = proc.pid
+    try:
+        if sys.platform == "win32":
+            run_console(["taskkill", "/F", "/T", "/PID", str(pid)],
+                        capture_output=True, timeout=15)
+        else:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
+def run_console_tree(cmd: Sequence[str], *, timeout: float, **kwargs) -> subprocess.CompletedProcess:
+    """``run_console`` с гарантией: по таймауту умирает ВСЁ дерево процессов (GAP-684).
+
+    Тот же контракт результата, что у ``subprocess.run`` (``CompletedProcess``;
+    ``subprocess.TimeoutExpired`` по таймауту), тот же ``CREATE_NO_WINDOW``, stdin по
+    умолчанию -- DEVNULL. Для вызовов, которые могут зависнуть и оставить потомков."""
+    capture = bool(kwargs.pop("capture_output", False))
+    if capture:
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    if "stdin" not in kwargs and "input" not in kwargs:
+        kwargs["stdin"] = subprocess.DEVNULL
+    if sys.platform == "win32":
+        kwargs["creationflags"] = int(kwargs.get("creationflags") or 0) | CREATE_NO_WINDOW
+    else:
+        kwargs.setdefault("start_new_session", True)
+    proc = subprocess.Popen(list(cmd), **kwargs)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        try:
+            out, err = proc.communicate(timeout=5)
+        except Exception:
+            out, err = None, None
+        raise subprocess.TimeoutExpired(list(cmd), timeout, output=out, stderr=err) from None
+    except BaseException:
+        _kill_process_tree(proc)
+        raise
+    return subprocess.CompletedProcess(list(cmd), proc.returncode, out, err)
 
 
 def spawn_hidden(cmd: Sequence[str], cwd: Path, log_path: Path) -> int:

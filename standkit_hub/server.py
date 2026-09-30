@@ -1370,11 +1370,27 @@ def make_handler(
                 # JS мог класть X-Standkit-Token в мутации (cookie HttpOnly, JS её не
                 # читает). Cookie ставим, если пришли по ссылке ?t=. Без редиректа —
                 # иначе токен теряется до загрузки JS (был баг 403 на мутациях).
+                # Отметка ДО ответа: клиент, получивший страницу, уже видит актуальное состояние.
+                self._note_session(authed=True)
                 self._serve_index(
                     inject_token=session_token, set_cookie=authed_query, view=view
                 )
             else:
+                self._note_session(authed=False)
                 self._serve_index(view=view)
+
+        def _note_session(self, *, authed: bool) -> None:
+            """GAP-684: отметить (или снять отметку) захода без подтверждённой сессии.
+
+            Следующий запуск ярлыком по свежей отметке перезапустит хаб со свежим токеном
+            (см. ``instance.should_takeover``). Токен в отметку не попадает."""
+            state_file = getattr(self.server, "instance_state_file", None)
+            if state_file is None:
+                return
+            if authed:
+                _instance.clear_unauthorized(state_file)
+            else:
+                _instance.mark_unauthorized(state_file)
 
         # --- API: стенды ---
 
