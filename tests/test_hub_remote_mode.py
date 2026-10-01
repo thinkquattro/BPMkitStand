@@ -53,6 +53,7 @@ class _World:
         self.spawned = []
         self.stopped = []
         self.die_on_spawn = False
+        self.image = "BPMkit.exe"
 
     def spawn(self, argv, cwd, log_path):
         self.spawned.append((list(argv), Path(log_path)))
@@ -80,6 +81,7 @@ class _World:
             probe=lambda host, port: self.health,
             has_secret=lambda ref: self.secret,
             sleep=lambda s: None,
+            image_of=lambda pid: self.image,
             startup_wait=0.5,
             **kw,
         )
@@ -289,6 +291,77 @@ def test_remote_mode_module_does_not_read_secret_values():
     assert "subprocess.run(" not in src and "Popen(" not in src   # запуск -- через standkit.platform
 
 
+def test_reused_pid_of_foreign_process_is_not_stopped(tmp_path):
+    # pid переиспользован чужим процессом: порт молчит, образ не BPMkit -- не убиваем, чистим состояние
+    w = _World()
+    c = w.controller(_cfg(tmp_path))
+    c.start()
+    w.health = None
+    w.image = "notepad.exe"
+    assert c.stop() is True
+    assert w.stopped == []
+    assert not (tmp_path / "run" / "standkit-hub-remote.json").exists()
+
+
+def test_status_treats_foreign_pid_as_stopped(tmp_path):
+    w = _World()
+    c = w.controller(_cfg(tmp_path))
+    c.start()
+    w.health = None
+    w.image = "chrome.exe"
+    assert c.status()["state"] == "stopped"
+
+
+def test_unknown_image_is_treated_as_foreign(tmp_path):
+    w = _World()
+    c = w.controller(_cfg(tmp_path))
+    c.start()
+    w.health = None
+    w.image = None
+    assert c.stop() is True and w.stopped == []
+
+
+def test_healthz_confirms_ownership_even_if_image_unknown(tmp_path):
+    w = _World()
+    c = w.controller(_cfg(tmp_path))
+    c.start()
+    w.image = None                      # образ узнать не удалось, но /healthz BPMkit отвечает
+    assert c.stop() is True and w.stopped == [4321]
+
+
+def test_python_source_launch_is_recognised(tmp_path):
+    w = _World()
+    c = w.controller(_cfg(tmp_path))
+    c.start()
+    w.health = None
+    w.image = "python.exe"
+    assert c.status()["running"] is True
+
+
+def test_default_image_of_unknown_pid_is_none():
+    assert rm.default_image_of(2 ** 30) is None
+
+
+def test_concurrent_starts_spawn_once(tmp_path):
+    import threading as th
+    w = _World()
+    cfg = _cfg(tmp_path)
+    results = []
+
+    def go():
+        try:
+            w.controller(cfg).start()
+            results.append("ok")
+        except RemoteModeError as exc:
+            results.append(str(exc))
+
+    threads = [th.Thread(target=go) for _ in range(4)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(w.spawned) == 1
+    assert results.count("ok") == 1
+
+
 # --- автозапуск ---
 
 
@@ -367,3 +440,5 @@ def test_ui_has_remote_pane_and_wiring():
         assert f'id="{ident}"' in html
     assert "/api/remote/start" in js and "/api/remote/stop" in js and "/api/remote/status" in js
     assert '"remote_token_ref"' in js
+    assert 'id="mcpremote-query-warn"' in html and "updateRemoteQueryWarning" in js
+    assert "после закрытия диспетчера" in html

@@ -991,12 +991,16 @@
             </label>
             <p class="field-hint field-hint-warn">Только для клиентов без заголовков (запись McpConnection
               платформы ИИ-агентов BPMSoft 2.0): токен в адресе оседает в журналах прокси и в базе клиента.</p>
+            <p class="field-hint field-hint-warn" id="mcpremote-query-warn" hidden>Внимание: адрес не loopback, а TLS
+              здесь нет -- токен в адресе пойдёт по сети открытым текстом (HTTP). Используйте только в доверенной сети
+              или за обратным прокси с TLS.</p>
             <label class="checkbox-label">
               <input type="checkbox" name="remote_autostart" />
               Запускать вместе с диспетчером
             </label>
             <small class="field-hint">Службы Windows нет: после перезагрузки хоста режим поднимется,
-              когда запустится диспетчер. Настройки применяются при следующем запуске.</small>
+              когда запустится диспетчер. Настройки применяются при следующем запуске.
+              Сервер продолжает работать и после закрытия диспетчера — остановить его можно только кнопкой «Остановить».</small>
             <div class="panel-toolbar pane-actions">
               <button type="submit">Сохранить</button>
             </div>

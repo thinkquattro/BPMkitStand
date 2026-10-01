@@ -2408,9 +2408,30 @@
     }
   }
 
+  // Токен в адресе по HTTP на не-loopback адресе уйдёт по сети открытым текстом.
+  function updateRemoteQueryWarning() {
+    const form = document.getElementById("settings-form");
+    const warn = document.getElementById("mcpremote-query-warn");
+    if (!form || !warn) return;
+    const hostInput = form.elements.namedItem("remote_host");
+    const checkInput = form.elements.namedItem("remote_allow_query_token");
+    const host = ((hostInput && hostInput.value) || "").trim().toLowerCase();
+    const loopback = host === "" || host === "localhost" || host === "::1" || host === "[::1]" ||
+      /^127\./.test(host);
+    warn.hidden = !(checkInput && checkInput.checked && !loopback);
+  }
+
   function setupRemoteModeTab() {
     const startBtn = document.getElementById("mcpremote-start-btn");
     if (!startBtn) return;
+    const settingsForm = document.getElementById("settings-form");
+    ["remote_host", "remote_allow_query_token"].forEach((name) => {
+      const input = settingsForm.elements.namedItem(name);
+      if (input) {
+        input.addEventListener("input", updateRemoteQueryWarning);
+        input.addEventListener("change", updateRemoteQueryWarning);
+      }
+    });
     const errorEl = document.getElementById("mcpremote-error");
     startBtn.addEventListener("click", async () => {
       errorEl.textContent = "";
@@ -4886,6 +4907,7 @@
       const input = form.elements.namedItem(field);
       if (input) input.checked = !!data[field];
     });
+    updateRemoteQueryWarning();
     // Тема — из конфига (источник правды). Обычно совпадает с тем, что уже
     // подставил сервер в <html data-theme>; расхождение возможно, если конфиг
     // правили снаружи (руками, вторым экземпляром хаба).

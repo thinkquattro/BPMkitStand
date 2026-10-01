@@ -28,9 +28,13 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 import socket
+import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -38,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from standkit.platform import ProcessError, is_alive, spawn_hidden, stop
+from standkit.platform import ProcessError, is_alive, run_console, spawn_hidden, stop
 from standkit.secrets import has_secret as _default_has_secret
 from standkit_hub import license_api
 from standkit_hub.config import (
@@ -66,6 +70,15 @@ _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9.:\[\]_-]{1,255}$")
 
 _WILDCARD_HOSTS = ("0.0.0.0", "::", "[::]", "")
+
+
+#: Один замок на процесс диспетчера: контроллер создаётся на КАЖДЫЙ запрос хаба, поэтому
+#: замок на экземпляре два одновременных POST не разведёт.
+_CONTROL_LOCK = threading.Lock()
+
+#: Подстроки имени образа, по которым процесс считается «нашим»: собранный BPMkit.exe
+#: либо python (запуск из исходников).
+_IMAGE_MARKERS = ("bpmkit", "python")
 
 
 class RemoteModeError(Exception):
@@ -159,6 +172,24 @@ def default_health_probe(host: str, port: int, *, timeout: float = _HEALTH_TIMEO
     return data if isinstance(data, dict) and data.get("ok") else None
 
 
+def default_image_of(pid: int) -> Optional[str]:
+    """Имя образа процесса по pid (``BPMkit.exe``) либо ``None``, если узнать не удалось.
+
+    Windows -- ``tasklist`` через ``run_console`` (без окна); Linux -- ``/proc/<pid>/comm``."""
+    try:
+        if sys.platform == "win32":
+            proc = run_console(["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
+                               capture_output=True, text=True, timeout=10,
+                               encoding="utf-8", errors="replace")
+            for row in csv.reader(io.StringIO(proc.stdout or "")):
+                if len(row) >= 2 and row[1].strip() == str(int(pid)):
+                    return row[0].strip()
+            return None
+        return Path(f"/proc/{int(pid)}/comm").read_text(encoding="utf-8").strip() or None
+    except Exception:  # noqa: BLE001 - «не знаю» = None
+        return None
+
+
 class RemoteModeController:
     """Управляет ОДНИМ процессом ``BPMkit.exe serve-http``, запущенным из диспетчера.
 
@@ -175,6 +206,7 @@ class RemoteModeController:
                  probe: Callable[[str, int], Optional[dict]] = default_health_probe,
                  has_secret: Callable[[str], bool] = _default_has_secret,
                  sleep: Callable[[float], None] = time.sleep,
+                 image_of: Callable[[int], Optional[str]] = default_image_of,
                  startup_wait: float = _STARTUP_WAIT_S):
         self.config = config
         self._cli_resolver = cli_resolver or (lambda: license_api.find_cli(config.companion))
@@ -184,6 +216,7 @@ class RemoteModeController:
         self._probe = probe
         self._has_secret = has_secret
         self._sleep = sleep
+        self._image_of = image_of
         self._startup_wait = startup_wait
 
     # --- пути ---
@@ -238,10 +271,29 @@ class RemoteModeController:
         if state is None:
             return None
         pid = state["pid"]
-        if self._alive(pid):
+        if self._alive(pid) and self._is_ours(pid, state):
             return pid
+        # pid мёртв либо переиспользован ЧУЖИМ процессом: состояние устарело.
         self._clear_state()
         return None
+
+    def _is_ours(self, pid: int, state: dict) -> bool:
+        """Тот ли это процесс, что мы запускали. pid после перезагрузки/завершения может достаться
+        постороннему -- остановка по одному ``is_alive`` убила бы чужое. «Наш», если на
+        сохранённом адресе отвечает /healthz BPMkit либо имя образа -- BPMkit/python. Не удалось
+        узнать образ -- считаем чужим (убить чужое хуже, чем показать «остановлен»)."""
+        host = state.get("host") or self.config.remote_host
+        port = state.get("port") or self.config.remote_port
+        try:
+            if self._probe(host, int(port)) is not None:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            image = (self._image_of(pid) or "").lower()
+        except Exception:  # noqa: BLE001
+            image = ""
+        return any(marker in image for marker in _IMAGE_MARKERS)
 
     def status(self) -> dict:
         """Снимок состояния для UI. Секретов нет: токен -- только факт наличия.
@@ -302,7 +354,12 @@ class RemoteModeController:
 
     def start(self) -> RemoteStartResult:
         """Запускает ``serve-http``. ``RemoteModeError`` -- с понятным текстом: настройки
-        невалидны, нет токена/CLI, уже запущен, ОС отказала, процесс сразу завершился."""
+        невалидны, нет токена/CLI, уже запущен, ОС отказала, процесс сразу завершился.
+        Под общим замком: два одновременных POST не породят процесс-сироту."""
+        with _CONTROL_LOCK:
+            return self._start_locked()
+
+    def _start_locked(self) -> RemoteStartResult:
         problems = validate_remote_config(self.config)
         if problems:
             raise RemoteModeError(" ".join(problems))
@@ -353,6 +410,10 @@ class RemoteModeController:
     def stop(self, *, timeout: float = 10.0) -> bool:
         """Останавливает процесс (мягко, с эскалацией -- ``standkit.platform.stop``).
         ``True``, если на момент возврата процесса нет (в т.ч. его и не было)."""
+        with _CONTROL_LOCK:
+            return self._stop_locked(timeout)
+
+    def _stop_locked(self, timeout: float) -> bool:
         pid = self._live_pid()
         if pid is None:
             self._clear_state()
