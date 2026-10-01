@@ -1600,6 +1600,7 @@
     // SSE не ходит и обновляется по таймеру всегда.
     if (!sseHealthy) refreshStands();
     refreshAgentStatus();
+    refreshRemoteStatus();
     if (selectedStand) refreshState();
     // Канал обновлений опрашивается, только когда его окно открыто: тики у него
     // редкие (часы и сутки), и дёргать статус в фоне ради закрытого диалога —
@@ -2337,6 +2338,128 @@
       } catch (e) {
         errorEl.textContent = describeApiError(e);
       }
+    });
+  }
+
+  // --- удалённый режим MCP (BPMkit.exe serve-http) ---
+
+  const REMOTE_STATE_TEXT = {
+    stopped: "остановлен",
+    starting: "запускается…",
+    running: "работает",
+    unresponsive: "процесс жив, порт не отвечает",
+  };
+  const REMOTE_FIELDS = ["remote_host", "remote_port", "remote_profile", "remote_token_ref"];
+  const REMOTE_CHECKS = ["remote_allow_query_token", "remote_autostart"];
+  let remoteTokenHint = "";
+
+  function renderRemoteStatus(data) {
+    const el = document.getElementById("mcpremote-status");
+    if (!el) return;
+    let text = REMOTE_STATE_TEXT[data.state] || data.state;
+    if (data.state === "running" && data.pid) text += ` (pid ${data.pid}, ${data.host}:${data.port})`;
+    if (!data.token_present) text += "; токен не задан";
+    el.textContent = text;
+    const urlEl = document.getElementById("mcpremote-url");
+    if (urlEl) urlEl.textContent = data.url || "";
+    const hintEl = document.getElementById("mcpremote-token-hint");
+    if (hintEl && data.token_hint) hintEl.textContent = data.token_hint;
+    remoteTokenHint = data.token_hint || "";
+    const errEl = document.getElementById("mcpremote-error");
+    if (errEl && data.log_tail && data.state !== "running" && data.state !== "stopped") {
+      errEl.textContent = `журнал: ${data.log_tail}`;
+    }
+  }
+
+  async function refreshRemoteStatus() {
+    const el = document.getElementById("mcpremote-status");
+    if (!el) return;
+    try {
+      renderRemoteStatus(await apiGet("/api/remote/status"));
+    } catch (e) {
+      el.textContent = `ошибка: ${describeApiError(e)}`;
+    }
+  }
+
+  // Сохраняем ТОЛЬКО поля удалённого режима перед запуском: сервер мержит тело поверх
+  // текущего конфига, остальные настройки не затрагиваются. Иначе кнопка «Запустить»
+  // стартовала бы со старыми значениями, пока форма показывает новые.
+  async function saveRemoteFields() {
+    const form = document.getElementById("settings-form");
+    const payload = {};
+    REMOTE_FIELDS.forEach((field) => {
+      const input = form.elements.namedItem(field);
+      if (!input) return;
+      payload[field] = input.type === "number" ? Number(input.value) : input.value;
+    });
+    REMOTE_CHECKS.forEach((field) => {
+      const input = form.elements.namedItem(field);
+      if (input) payload[field] = !!input.checked;
+    });
+    await apiSend("POST", "/api/settings", payload);
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Скопировано");
+    } catch (e) {
+      window.prompt("Скопируйте:", text);
+    }
+  }
+
+  // Токен в адресе по HTTP на не-loopback адресе уйдёт по сети открытым текстом.
+  function updateRemoteQueryWarning() {
+    const form = document.getElementById("settings-form");
+    const warn = document.getElementById("mcpremote-query-warn");
+    if (!form || !warn) return;
+    const hostInput = form.elements.namedItem("remote_host");
+    const checkInput = form.elements.namedItem("remote_allow_query_token");
+    const host = ((hostInput && hostInput.value) || "").trim().toLowerCase();
+    const loopback = host === "" || host === "localhost" || host === "::1" || host === "[::1]" ||
+      /^127\./.test(host);
+    warn.hidden = !(checkInput && checkInput.checked && !loopback);
+  }
+
+  function setupRemoteModeTab() {
+    const startBtn = document.getElementById("mcpremote-start-btn");
+    if (!startBtn) return;
+    const settingsForm = document.getElementById("settings-form");
+    ["remote_host", "remote_allow_query_token"].forEach((name) => {
+      const input = settingsForm.elements.namedItem(name);
+      if (input) {
+        input.addEventListener("input", updateRemoteQueryWarning);
+        input.addEventListener("change", updateRemoteQueryWarning);
+      }
+    });
+    const errorEl = document.getElementById("mcpremote-error");
+    startBtn.addEventListener("click", async () => {
+      errorEl.textContent = "";
+      startBtn.disabled = true;
+      try {
+        await saveRemoteFields();
+        renderRemoteStatus(await apiSend("POST", "/api/remote/start"));
+      } catch (e) {
+        errorEl.textContent = describeApiError(e);
+        await refreshRemoteStatus();
+      } finally {
+        startBtn.disabled = false;
+      }
+    });
+    document.getElementById("mcpremote-stop-btn").addEventListener("click", async () => {
+      errorEl.textContent = "";
+      try {
+        renderRemoteStatus(await apiSend("POST", "/api/remote/stop"));
+      } catch (e) {
+        errorEl.textContent = describeApiError(e);
+      }
+    });
+    document.getElementById("mcpremote-copy-url-btn").addEventListener("click", () => {
+      const urlEl = document.getElementById("mcpremote-url");
+      if (urlEl && urlEl.textContent) copyText(urlEl.textContent);
+    });
+    document.getElementById("mcpremote-copy-token-hint-btn").addEventListener("click", () => {
+      if (remoteTokenHint) copyText(remoteTokenHint);
     });
   }
 
@@ -4466,6 +4589,10 @@
     "audit_log",
     "lockout_max_failures",
     "lockout_window_sec",
+    "remote_host",
+    "remote_port",
+    "remote_profile",
+    "remote_token_ref",
   ];
 
   // Поля блока «Агент (расширенное)» — зеркалят флаги CLI standkit-agent и
@@ -4488,7 +4615,7 @@
 
   // Поля, которые имеет смысл валидировать на клиенте до отправки: пользователь
   // получает ответ мгновенно и рядом с полем, а не общей строкой ошибки снизу.
-  const PORT_FIELDS = ["agent_port"];
+  const PORT_FIELDS = ["agent_port", "remote_port"];
   const POSITIVE_INT_FIELDS = [
     "refresh_interval_sec",
     "lockout_max_failures",
@@ -4776,6 +4903,11 @@
           : String(fallback);
     });
     form.elements.namedItem("insecure").checked = !!data.insecure;
+    REMOTE_CHECKS.forEach((field) => {
+      const input = form.elements.namedItem(field);
+      if (input) input.checked = !!data[field];
+    });
+    updateRemoteQueryWarning();
     // Тема — из конфига (источник правды). Обычно совпадает с тем, что уже
     // подставил сервер в <html data-theme>; расхождение возможно, если конфиг
     // правили снаружи (руками, вторым экземпляром хаба).
@@ -4792,7 +4924,7 @@
   }
 
   async function refreshSecretStatuses() {
-    for (const field of ["token_ref", "readonly_token_ref"]) {
+    for (const field of ["token_ref", "readonly_token_ref", "remote_token_ref"]) {
       const statusEl = document.querySelector(`[data-ref-status="${field}"]`);
       const input = document.getElementById("settings-form").elements.namedItem(field);
       const ref = input ? input.value : "";
@@ -4868,6 +5000,10 @@
         payload[field] = input.type === "number" ? Number(input.value) : input.value;
       });
       payload.insecure = form.elements.namedItem("insecure").checked;
+      REMOTE_CHECKS.forEach((field) => {
+        const input = form.elements.namedItem(field);
+        if (input) payload[field] = !!input.checked;
+      });
       payload.agents = currentAgents;
       // Вложенная секция канала: собирается отдельно и уходит одним объектом,
       // сервер мержит её поверх текущей и сам поджимает интервалы к минимуму.
@@ -4894,6 +5030,7 @@
         // пути, устарела ровно в этот момент (сервер сбрасывает свой кэш там же).
         refreshLicense();
         await refreshSecretStatuses();
+        refreshRemoteStatus();
       } catch (e) {
         statusEl.textContent = `Ошибка сохранения: ${describeApiError(e)}`;
         toast(`Ошибка сохранения: ${describeApiError(e)}`);
@@ -4947,6 +5084,7 @@
     setupElevation();
     setupRegisterModal();
     setupAgentTab();
+    setupRemoteModeTab();
     setupUpdatesDialog();
     setupLicensePane();
     setupConsentPane();
@@ -4962,6 +5100,7 @@
     // Push-обновления; при их отсутствии работает резервный таймер ниже.
     setupEventStream();
     refreshAgentStatus();
+    refreshRemoteStatus();
     loadVersionInfo();
     // Статус канала спрашивается сразу, ещё до открытия окна обновлений: только
     // так бейдж «есть новая версия / нужен перезапуск» может зажечься на кнопке

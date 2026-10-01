@@ -633,6 +633,7 @@
           <button type="button" data-pane="updates" id="rail-updates" hidden>Обновления</button>
           <button type="button" data-pane="remote">Удалённые стенды</button>
           <button type="button" data-pane="agent">Локальный агент</button>
+          <button type="button" data-pane="mcp-remote">Удалённый режим MCP</button>
           <button type="button" data-pane="about">О программе</button>
         </nav>
 
@@ -932,6 +933,74 @@
             <p class="pane-lead">Стенды на других машинах, где установлен агент BPMkit. Для локальных стендов ничего настраивать не нужно.</p>
             <div id="agents-list"></div>
             <button type="button" id="add-agent-btn" class="secondary">+ Добавить агента</button>
+            <div class="panel-toolbar pane-actions">
+              <button type="submit">Сохранить</button>
+            </div>
+          </div>
+
+          <!-- ── Удалённый режим MCP (BPMkit.exe serve-http) ─── -->
+          <div class="settings-pane" data-pane="mcp-remote">
+            <h2>Удалённый режим MCP</h2>
+            <p class="pane-lead">Сервер BPMkit по адресу (Streamable HTTP + токен) для платформ и IDE,
+              которые подключают MCP по URL: платформа ИИ-агентов BPMSoft 2.0, облачные агентные
+              платформы, Cursor/VS Code. Это не то же самое, что «Удалённые стенды» и «Локальный агент».
+              Запускается <code>BPMkit.exe serve-http</code> процессом вашего пользователя, без окна.</p>
+            <div class="agent-state-row">
+              <span>Состояние: <span id="mcpremote-status">…</span></span>
+              <button type="button" id="mcpremote-start-btn">Запустить</button>
+              <button type="button" id="mcpremote-stop-btn" class="secondary">Остановить</button>
+              <span id="mcpremote-error" class="error-text"></span>
+            </div>
+            <div class="agent-state-row" id="mcpremote-url-row">
+              <span>Адрес подключения: <code id="mcpremote-url">…</code></span>
+              <button type="button" id="mcpremote-copy-url-btn" class="secondary">Копировать</button>
+            </div>
+            <div class="form-row">
+              <label>Адрес (интерфейс)
+                <input type="text" name="remote_host" />
+              </label>
+              <label>Порт
+                <input type="number" name="remote_port" min="1" max="65535" />
+              </label>
+            </div>
+            <small class="field-hint">127.0.0.1 — только эта машина. Чтобы подключались с других машин,
+              укажите 0.0.0.0 (токен обязателен всегда).</small>
+            <label>Профиль инструментов
+              <input type="text" name="remote_profile" />
+              <small class="field-hint">default, cursor, all (все инструменты), auto (по клиенту).
+                Скрытые профилем инструменты остаются доступны через tool_find → bpmkit_call.</small>
+            </label>
+            <label>Токен доступа
+              <span class="secret-row">
+                <input type="text" name="remote_token_ref" />
+                <button type="button" class="set-secret-btn secondary" data-ref-field="remote_token_ref">Задать…</button>
+                <span class="secret-status" data-ref-status="remote_token_ref"></span>
+              </span>
+              <small class="field-hint">Ссылка на секрет, а не сам токен; значение здесь не показывается.</small>
+            </label>
+            <div class="agent-state-row">
+              <span>Создать токен: <code id="mcpremote-token-hint">BPMkit.exe setup remote-token --generate --show</code></span>
+              <button type="button" id="mcpremote-copy-token-hint-btn" class="secondary">Копировать команду</button>
+            </div>
+            <small class="field-hint">Команду выполняют один раз в своём терминале: токен показывается там
+              и сохраняется в хранилище секретов. Клиенту токен передают заголовком
+              <code>Authorization: Bearer &lt;токен&gt;</code>.</small>
+            <label class="checkbox-label">
+              <input type="checkbox" name="remote_allow_query_token" />
+              Принимать токен и в адресе (<code>?token=…</code>)
+            </label>
+            <p class="field-hint field-hint-warn">Только для клиентов без заголовков (запись McpConnection
+              платформы ИИ-агентов BPMSoft 2.0): токен в адресе оседает в журналах прокси и в базе клиента.</p>
+            <p class="field-hint field-hint-warn" id="mcpremote-query-warn" hidden>Внимание: адрес не loopback, а TLS
+              здесь нет -- токен в адресе пойдёт по сети открытым текстом (HTTP). Используйте только в доверенной сети
+              или за обратным прокси с TLS.</p>
+            <label class="checkbox-label">
+              <input type="checkbox" name="remote_autostart" />
+              Запускать вместе с диспетчером
+            </label>
+            <small class="field-hint">Службы Windows нет: после перезагрузки хоста режим поднимется,
+              когда запустится диспетчер. Настройки применяются при следующем запуске.
+              Сервер продолжает работать и после закрытия диспетчера — остановить его можно только кнопкой «Остановить».</small>
             <div class="panel-toolbar pane-actions">
               <button type="submit">Сохранить</button>
             </div>
