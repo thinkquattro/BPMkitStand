@@ -84,6 +84,7 @@ from standkit_hub import redis_min
 from standkit_hub import security as _security
 from standkit_hub import self_version as _self_version
 from standkit_hub.agent_control import AgentControlError, AgentController
+from standkit_hub.remote_mode import RemoteModeController, RemoteModeError
 from standkit_hub import elevation as _elevation
 from standkit_hub import instance as _instance
 from standkit_hub.client import FederatedClient, RemoteCallError
@@ -2149,6 +2150,36 @@ def make_handler(
                 return
             self._send_json(200, {"ok": stopped})
 
+        # --- API: удалённый режим BPMkit (serve-http) ---
+
+        def _remote_controller(self) -> RemoteModeController:
+            return RemoteModeController(_load_config(config_path))
+
+        def _api_remote_status(self) -> None:
+            self._send_json(200, self._remote_controller().status())
+
+        def _api_remote_start(self) -> None:
+            controller = self._remote_controller()
+            try:
+                result = controller.start()
+            except RemoteModeError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            payload = controller.status()
+            payload.update({"ok": True, "log_path": result.log_path})
+            self._send_json(200, payload)
+
+        def _api_remote_stop(self) -> None:
+            controller = self._remote_controller()
+            try:
+                stopped = controller.stop()
+            except RemoteModeError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            payload = controller.status()
+            payload["ok"] = stopped
+            self._send_json(200, payload)
+
         # --- API: права администратора ---
 
         def _api_hub_elevation(self) -> None:
@@ -3062,6 +3093,12 @@ def make_handler(
                 self._api_agent_status()
                 return
 
+            if path == "/api/remote/status":
+                if not self._authorize_read():
+                    return
+                self._api_remote_status()
+                return
+
             if path == "/api/license":
                 # Сводка лицензии — обычное чтение (в ней нет ни ключа, ни конверта).
                 if not self._authorize_read():
@@ -3186,6 +3223,17 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_agent_stop()
+                return
+
+            if path == "/api/remote/start":
+                if not self._authorize_mutation():
+                    return
+                self._api_remote_start()
+                return
+            if path == "/api/remote/stop":
+                if not self._authorize_mutation():
+                    return
+                self._api_remote_stop()
                 return
 
             if path == _STAND_REGISTER_PATH:

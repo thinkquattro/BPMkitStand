@@ -43,6 +43,7 @@ from standkit_hub.config import HubConfig
 from standkit_hub import hub_logging as _hub_logging
 from standkit_hub.mutex import acquire_hub_mutex
 from standkit_hub import preload as _preload
+from standkit_hub import remote_mode as _remote_mode
 from standkit_hub.elevation import ReparseGuardError, read_handoff, refusal_text, write_result_atomic
 from standkit_hub.security import InsecureBindError, generate_session_token
 from standkit_hub.server import DEFAULT_HUB_PORT, HubAlreadyRunning, bind_hub_server
@@ -299,6 +300,13 @@ def _cmd_hub_stop(state_file: Path, run_dir: Path) -> int:
         return 1
     print(f"[standkit-hub] диспетчер (pid={state.pid}) остановлен")
     return 0
+
+
+def _remote_autostart(config: HubConfig) -> None:
+    """Фоновый автозапуск удалённого режима; не бросает."""
+    refusal = _remote_mode.autostart(config)
+    if refusal:
+        _log.warning(f"удалённый режим BPMkit не запущен автоматически: {refusal}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -711,6 +719,13 @@ def main(argv: list[str] | None = None) -> int:
     # раньше. Повторный `clear_state` в `_serve.finally` безвреден.
     httpd.instance_state_file = state_file
     _instance.clear_unauthorized(state_file)  # новый процесс -- новый токен
+
+    # Удалённый режим BPMkit (serve-http) поднимается вместе с диспетчером, если
+    # включён remote_autostart. В фоновом потоке: ожидание /healthz не задерживает запуск
+    # дашборда; отказ (нет токена, порт занят) -- строка в журнал, а не падение.
+    if getattr(config, "remote_autostart", False):
+        threading.Thread(target=_remote_autostart, args=(config,), daemon=True,
+                         name="standkit-remote-autostart").start()
 
     if args.result_file:
         # Успех: сервер реально поднялся на порту (GAP-311 В4/В5) — старый

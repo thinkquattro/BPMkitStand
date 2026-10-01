@@ -39,6 +39,16 @@ _DEFAULT_LOCKOUT_MAX_FAILURES = 5
 _DEFAULT_LOCKOUT_WINDOW_SEC = 300.0
 _DEFAULT_REFRESH_INTERVAL_SEC = 10
 
+# Удалённый режим BPMkit (``BPMkit.exe serve-http``): значения по умолчанию.
+# Порт -- 8766, а не 8765 как у самого serve-http: 8765 по умолчанию занимает локальный
+# агент диспетчера, и две кнопки «Запустить» с одним портом дрались бы между собой.
+# Токен по умолчанию -- тот же ref, что у serve-http (DEFAULT_TOKEN_REF сервера BPMkit).
+DEFAULT_REMOTE_HOST = "127.0.0.1"
+DEFAULT_REMOTE_PORT = 8766
+DEFAULT_REMOTE_PROFILE = "default"
+DEFAULT_REMOTE_PATH = "/mcp"
+DEFAULT_REMOTE_TOKEN_REF = "bpmsoft-mcp:remote:token"
+
 # Через сколько минут простоя диспетчер выходит сам (Д-3/GAP-276). 0 — выключено.
 # 30 минут — компромисс: дольше типичной паузы в работе (не закрываем диспетчер
 # под руками у человека, отошедшего за кофе), но заметно короче рабочего дня, за
@@ -65,6 +75,26 @@ def normalize_theme(value: object) -> str:
     if isinstance(value, str) and value.strip().lower() in HUB_THEMES:
         return value.strip().lower()
     return _DEFAULT_THEME
+
+
+def normalize_remote_port(value: object) -> int:
+    """Порт удалённого режима: целое 1..65535, иначе дефолт (мусор из ручной правки
+    конфига не должен ронять запуск диспетчера -- ошибку покажет кнопка «Запустить»)."""
+    if isinstance(value, bool):
+        return DEFAULT_REMOTE_PORT
+    try:
+        port = int(str(value).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_REMOTE_PORT
+    return port if 1 <= port <= 65535 else DEFAULT_REMOTE_PORT
+
+
+def normalize_remote_text(value: object, default: str, *, lower: bool = False) -> str:
+    """Строковая настройка удалённого режима: обрезанная, пустое -- дефолт."""
+    text = str(value if value is not None else "").strip()
+    if lower:
+        text = text.lower()
+    return text or default
 
 
 def normalize_idle_shutdown_min(value: object) -> int:
@@ -298,6 +328,19 @@ class HubConfig:
     lockout_max_failures: int = _DEFAULT_LOCKOUT_MAX_FAILURES
     lockout_window_sec: float = _DEFAULT_LOCKOUT_WINDOW_SEC
 
+    # --- Удалённый режим BPMkit (``BPMkit.exe serve-http``) ---
+    # Токен -- ТОЛЬКО ссылка (remote_token_ref) на секрет; само значение сюда не попадает
+    # (инвариант SECURITY.md: в конфиге только ``*_ref``).
+    remote_host: str = DEFAULT_REMOTE_HOST
+    remote_port: int = DEFAULT_REMOTE_PORT
+    remote_profile: str = DEFAULT_REMOTE_PROFILE
+    remote_token_ref: str = DEFAULT_REMOTE_TOKEN_REF
+    # Принимать токен и в адресе (?token=...) -- для клиентов без заголовков
+    # (McpConnection платформы ИИ-агентов BPMSoft 2.0). Токен в адресе оседает в журналах.
+    remote_allow_query_token: bool = False
+    # Поднимать удалённый режим вместе с диспетчером.
+    remote_autostart: bool = False
+
     # --- Канал доставки обновлений издателя (пакет standkit_companion) ---
     # Секция присутствует в конфиге ВСЕГДА, даже в free-редакции без пакета: так форма
     # настроек и файл конфига не меняют форму при установке платной редакции, и
@@ -401,6 +444,16 @@ class HubConfig:
                 kwargs[key] = CompanionSettings.from_dict(value)
             elif key == "theme":
                 kwargs[key] = normalize_theme(value)
+            elif key == "remote_port":
+                kwargs[key] = normalize_remote_port(value)
+            elif key == "remote_host":
+                kwargs[key] = normalize_remote_text(value, DEFAULT_REMOTE_HOST)
+            elif key == "remote_profile":
+                kwargs[key] = normalize_remote_text(value, DEFAULT_REMOTE_PROFILE, lower=True)
+            elif key == "remote_token_ref":
+                kwargs[key] = normalize_remote_text(value, DEFAULT_REMOTE_TOKEN_REF)
+            elif key in ("remote_allow_query_token", "remote_autostart"):
+                kwargs[key] = bool(value)
             elif key == "idle_shutdown_min":
                 kwargs[key] = normalize_idle_shutdown_min(value)
             else:
