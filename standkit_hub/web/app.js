@@ -2625,7 +2625,9 @@
     // ⟳ — подпись меняет вложенный <span>, не весь textContent кнопки (иначе иконка
     // стирается).
     const checkBtnLabel = byId("updates-check-btn-label");
-    if (checkBtnLabel) checkBtnLabel.textContent = paid ? "Проверить обновления" : "Проверить";
+    // 02.10.2026: подпись одна для обеих редакций.
+    if (checkBtnLabel) checkBtnLabel.textContent = "Проверить обновления";
+    syncWhatsNewButtons();
 
     const checkedAt = byId("updates-checked-at");
     if (checkedAt) {
@@ -2788,7 +2790,8 @@
     if (installBtn) {
       installBtn.hidden = !staged;
       if (staged && !companionBusy && installBtn.dataset.idleLabel === undefined) {
-        installBtn.textContent = `Установить обновление ${staged.version}`;
+        // 02.10.2026: версия уже в чипе справа («доступна X») — на кнопке только стрелка к нему.
+        installBtn.textContent = "Установить →";
       }
     }
     // Установщик готов, а тихая подмена бинаря этой версии недоступна (GAP-463) —
@@ -3332,7 +3335,7 @@
     // Пока кнопка занята, её подпись держит setButtonBusy — перерисовка статуса
     // не имеет права затереть спиннер (иначе он исчезает на середине действия).
     if (!companionBusy && install.dataset.idleLabel === undefined) {
-      install.textContent = staged ? `Установить ${staged}` : "Установить";
+      install.textContent = "Установить →";
     }
     // GAP-528: кнопка «Установить» — только когда действительно есть что ставить
     // тихим обновлением (staged/hasNew без требования установщика), а не всегда.
@@ -3374,8 +3377,6 @@
    * переживать перезагрузку страницы и здесь не сохраняется. */
   function renderWhatsNew(status) {
     const rel = releasesBlock(status);
-    const box = byId("upd-whatsnew");
-    if (!box) return;
 
     const staged = rel.staged_version || "";
     const current = rel.current_version || "";
@@ -3401,38 +3402,145 @@
     // запросе) — показываем их независимо от совпадения с `notesVersion`.
     const showIssues = issues.length > 0;
 
-    if (!showNotes && !showIssues) {
-      box.hidden = true;
-      return;
-    }
+    lastWhatsNew = (showNotes || showIssues)
+      ? {
+          version: targetVersion || notesVersion,
+          notes: showNotes ? notes.map(String) : [],
+          issues: showIssues ? issues.map(String) : [],
+        }
+      : null;
+    syncWhatsNewButtons();
+  }
 
-    const summary = byId("upd-whatsnew-summary");
-    if (summary) summary.textContent = `Что нового в ${targetVersion || notesVersion}`;
+  // Правка владельца 02.10.2026: «Что нового» — кнопка у версии MCP (окно
+  // «Обновления» и «О программе») и одна модалка. Release-notes есть только в
+  // редакции с лицензией (их отдаёт бэкенд через канал); в свободной кнопок нет.
+  // var, не let: syncWhatsNewButtons зовётся из renderMcpVersion, который может
+  // сработать раньше, чем исполнение дойдёт до этой строки (TDZ).
+  var lastWhatsNew = null;
 
-    const notesEl = byId("upd-whatsnew-notes");
+  function syncWhatsNewButtons() {
+    const paid = !!companionAvailable && licenseChannelOk();
+    const show = paid && !!lastWhatsNew;
+    ["upd-whatsnew-btn", "about-whatsnew-btn"].forEach((id) => {
+      const btn = byId(id);
+      if (!btn) return;
+      btn.hidden = !show;
+      if (show && lastWhatsNew.version) btn.title = `Что нового в ${lastWhatsNew.version}`;
+    });
+  }
+
+  // Правка владельца 02.10.2026: категории заметок — по задачам пользователя, в
+  // фиксированном порядке; «Главное» первым. Генератор (dev-репо,
+  // tools/gen_release_notes.py) кладёт пункты строками «**Категория.** текст»,
+  // важные — первыми; окно показывает первые WHATSNEW_VISIBLE пунктов категории,
+  // остальное — по клику «и ещё N». Неизвестная категория встаёт перед «Другое».
+  const WHATSNEW_ORDER = [
+    "Главное",
+    "Обновления от BPMSoft",
+    "Удалённые стенды и BPMSoft 2.0",
+    "Данные и пакеты",
+    "Страницы и схемы",
+    "Документы",
+    "Надёжность и исправления",
+    "Другое",
+  ];
+  const WHATSNEW_VISIBLE = 5;
+
+  /** Строки клиентского блока приходят как «**Категория.** текст» — группируем по
+   * категории, разметку `**` не показываем. Строки без префикса — в «Другое». */
+  function groupReleaseNotes(lines) {
+    const byName = {};
+    const seen = [];
+    lines.forEach((raw) => {
+      let line = String(raw).replace(/^\s*[-*]\s+/, "").trim();
+      if (!line) return;
+      let name = "";
+      const m = line.match(/^\*\*(.+?)\*\*\s*(.*)$/);
+      if (m) {
+        name = m[1].replace(/[.:]\s*$/, "").trim();
+        line = m[2].trim();
+      }
+      line = line.replace(/\*\*/g, "");
+      // Заглавной делаем только кириллицу: «doc-creator», «fs_probe» — имена, их не трогаем.
+      if (/^[а-яё]/.test(line)) line = line.charAt(0).toUpperCase() + line.slice(1);
+      const key = name || "Другое";
+      if (!byName[key]) {
+        byName[key] = { name: key, items: [] };
+        seen.push(key);
+      }
+      byName[key].items.push(line);
+    });
+    const rank = (name) => {
+      const i = WHATSNEW_ORDER.indexOf(name);
+      if (i >= 0) return i;
+      return WHATSNEW_ORDER.length - 1.5; // перед «Другое»
+    };
+    return seen
+      .map((k, i) => ({ g: byName[k], i }))
+      .sort((x, y) => rank(x.g.name) - rank(y.g.name) || x.i - y.i)
+      .map((x) => x.g);
+  }
+
+  function openWhatsNew() {
+    const data = lastWhatsNew;
+    const overlay = byId("whatsnew-overlay");
+    if (!data || !overlay) return;
+    const title = byId("whatsnew-title");
+    if (title) title.textContent = data.version ? `Что нового в ${data.version}` : "Что нового";
+    const notesEl = byId("whatsnew-notes");
     if (notesEl) {
       notesEl.innerHTML = "";
-      notes.forEach((line) => {
-        const li = document.createElement("li");
-        li.textContent = String(line);
-        notesEl.appendChild(li);
+      groupReleaseNotes(data.notes).forEach((g) => {
+        const wrap = document.createElement("div");
+        wrap.className = "whatsnew-group" + (g.name === "Главное" ? " whatsnew-group-main" : "");
+        const h = document.createElement("div");
+        h.className = "whatsnew-group-title";
+        h.textContent = g.name;
+        const ul = document.createElement("ul");
+        const extra = [];
+        g.items.forEach((text, idx) => {
+          const li = document.createElement("li");
+          li.textContent = text;
+          if (idx >= WHATSNEW_VISIBLE) {
+            li.hidden = true;
+            extra.push(li);
+          }
+          ul.appendChild(li);
+        });
+        wrap.appendChild(h);
+        wrap.appendChild(ul);
+        if (extra.length) {
+          const more = document.createElement("button");
+          more.type = "button";
+          more.className = "link-btn whatsnew-more";
+          more.textContent = `и ещё ${extra.length}`;
+          more.addEventListener("click", () => {
+            extra.forEach((li) => { li.hidden = false; });
+            more.remove();
+          });
+          wrap.appendChild(more);
+        }
+        notesEl.appendChild(wrap);
       });
-      notesEl.hidden = !showNotes;
     }
-
-    const issuesBox = byId("upd-whatsnew-issues");
-    const issuesEl = byId("upd-whatsnew-issues-list");
+    const issuesBox = byId("whatsnew-issues");
+    const issuesEl = byId("whatsnew-issues-list");
     if (issuesEl) {
       issuesEl.innerHTML = "";
-      issues.forEach((line) => {
+      data.issues.forEach((text) => {
         const li = document.createElement("li");
-        li.textContent = String(line);
+        li.textContent = text;
         issuesEl.appendChild(li);
       });
     }
-    if (issuesBox) issuesBox.hidden = !showIssues;
+    if (issuesBox) issuesBox.hidden = data.issues.length === 0;
+    overlay.hidden = false;
+  }
 
-    box.hidden = false;
+  function closeWhatsNew() {
+    const overlay = byId("whatsnew-overlay");
+    if (overlay) overlay.hidden = true;
   }
 
   // --- GAP-523: карточка «Диспетчер стендов» (kind=hub) ---
@@ -3472,7 +3580,9 @@
       if (applyBtn) applyBtn.hidden = true;
       if (stageBtn) stageBtn.hidden = true;
       // GAP-528: строка с `<code>`-командой — ТОЛЬКО когда есть что ставить.
-      if (pipBox) pipBox.hidden = !hasNew;
+      // 02.10.2026: иконка копирования стоит рядом с командой — команда видна
+      // всегда в pip-режиме вместе с ней.
+      if (pipBox) pipBox.hidden = false;
       // GAP-528, правка владельца: иконка «копировать» — ВСЕГДА в pip-режиме,
       // независимо от того, есть новая версия или нет (её ждут и просто «на
       // всякий случай», не только рядом с объявленным обновлением).
@@ -3607,7 +3717,7 @@
 
     const pipBox = byId("upd-self-pip");
     const pipCmd = byId("upd-self-pip-cmd");
-    if (pipBox) pipBox.hidden = !(hasNew && mode !== "frozen");
+    if (pipBox) pipBox.hidden = mode === "frozen";
     if (pipCmd) pipCmd.textContent = (data && data.pip_command) || "python -m pip install -U standkit";
 
     // GAP-528, правка владельца: та же иконка-копия, что в платной редакции —
@@ -3824,7 +3934,7 @@
         const text = cmdEl ? cmdEl.textContent : "";
         try {
           await navigator.clipboard.writeText(text);
-          toast("Скопировано");
+          toast("Команда pip скопирована");
         } catch (e) {
           toast("Не удалось скопировать — выделите текст вручную");
         }
@@ -3848,6 +3958,25 @@
     const installOverlayCloseBtn = byId("install-overlay-close-btn");
     if (installOverlayCloseBtn) installOverlayCloseBtn.addEventListener("click", hideInstallOverlay);
     byId("btn-updates").addEventListener("click", openUpdatesDialog);
+    document.querySelectorAll("[data-whatsnew-open]").forEach((btn) => {
+      btn.addEventListener("click", openWhatsNew);
+    });
+    const whatsNewClose = byId("whatsnew-close-btn");
+    if (whatsNewClose) whatsNewClose.addEventListener("click", closeWhatsNew);
+    const whatsNewOverlay = byId("whatsnew-overlay");
+    if (whatsNewOverlay) {
+      whatsNewOverlay.addEventListener("click", (e) => {
+        if (e.target === whatsNewOverlay) closeWhatsNew();
+      });
+    }
+    // Escape закрывает только «Что нового», окно «Обновления» под ней остаётся.
+    document.addEventListener("keydown", (e) => {
+      const ov = byId("whatsnew-overlay");
+      if (e.key === "Escape" && ov && !ov.hidden) {
+        e.stopImmediatePropagation();
+        closeWhatsNew();
+      }
+    }, true);
     byId("updates-close-btn").addEventListener("click", closeUpdatesDialog);
     // GAP-528: одна кнопка «Проверить [обновления]» в подвале — платная редакция
     // дёргает канал издателя, свободная — self-version force-check.
@@ -4129,6 +4258,7 @@
     const rel = releasesBlock(lastCompanionStatus);
     const version = String(lic.mcp_version || rel.current_version || "").trim();
 
+    syncWhatsNewButtons();
     const mcpVersionEl = byId("about-mcp-version");
     if (mcpVersionEl) {
       mcpVersionEl.textContent = version

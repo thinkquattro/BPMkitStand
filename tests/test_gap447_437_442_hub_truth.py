@@ -369,15 +369,35 @@ def test_ui_restart_note_names_running_version_when_known():
         "плашка перезапуска обязана читать версию РЕАЛЬНО работающего процесса")
 
 
-def test_ui_has_whatsnew_spoiler_collapsed_by_default():
-    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
-    css = (_web_dir() / "style.css").read_text(encoding="utf-8")
+def test_ui_whatsnew_categories_fixed_order_and_fold():
+    """Правка владельца 02.10.2026: категории заметок — по задачам пользователя в
+    фиксированном порядке, «Главное» первым, «Другое» последним; в категории видно
+    5 пунктов, остальное — по «и ещё N»."""
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
-    assert '<details class="upd-whatsnew" id="upd-whatsnew" hidden>' in html, (
-        "свёрнут по умолчанию — нативный <details> без атрибута open, и по умолчанию "
-        "ещё и hidden (нечего показывать, пока не пришли данные)")
-    assert ".upd-whatsnew" in css
-    assert "renderWhatsNew" in js
+    order = ["Главное", "Обновления от BPMSoft", "Удалённые стенды и BPMSoft 2.0",
+             "Данные и пакеты", "Страницы и схемы", "Документы",
+             "Надёжность и исправления", "Другое"]
+    block = js[js.index("const WHATSNEW_ORDER"):js.index("const WHATSNEW_VISIBLE")]
+    positions = [block.index(f'"{name}"') for name in order]
+    assert positions == sorted(positions)
+    assert "const WHATSNEW_VISIBLE = 5;" in js
+    assert "и ещё ${extra.length}" in js
+
+
+def test_ui_whatsnew_is_button_and_modal_paid_only():
+    """Правка владельца 02.10.2026: «Что нового» — кнопка у версии MCP в окне
+    «Обновления» и в «О программе», содержимое — одна модалка; кнопки скрыты по
+    умолчанию и показываются только в редакции с лицензией (release-notes с бэка)."""
+    html = (_web_dir() / "index.html").read_text(encoding="utf-8")
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    assert 'id="whatsnew-overlay" class="modal-overlay" hidden' in html
+    for btn_id in ("upd-whatsnew-btn", "about-whatsnew-btn"):
+        start = html.index(f'id="{btn_id}"')
+        tag = html[html.rfind("<button", 0, start):html.index(">", start) + 1]
+        assert "hidden" in tag and "data-whatsnew-open" in tag
+    assert '<details class="upd-whatsnew"' not in html, "спойлер заменён кнопкой"
+    assert "renderWhatsNew" in js and "syncWhatsNewButtons" in js
+    assert "licenseChannelOk()" in js[js.index("function syncWhatsNewButtons"):][:400]
 
 
 # ==========================================================================================
@@ -495,8 +515,10 @@ def test_gap528b_status_column_is_a_dedicated_grid_cell():
         needle = f'<div class="upd-status">\n              <span class="upd-chip" id="{chip_id}"'
         assert needle in html, f"чип {chip_id} обязан лежать в своей колонке .upd-status"
     assert ".upd-status {" in css
-    # 4 колонки фиксированной ширины — статус и действия не "плавают".
-    assert "grid-template-columns: 34px minmax(0, 1fr) 112px 136px" in css
+    # 4 колонки фиксированной ширины — статус и действия не "плавают"; с 02.10.2026
+    # действия ЛЕВЕЕ статуса (order 3/4), окно 600px.
+    assert "grid-template-columns: 34px minmax(0, 1fr) 128px 104px" in css
+    assert "order: 3;" in css and "order: 4;" in css
 
 
 def test_gap528b_check_button_moved_to_header_no_footer():
@@ -528,7 +550,8 @@ def test_gap528b_no_restart_button_in_updates_window():
 
 
 def test_gap528b_pip_copy_is_an_icon_button_always_visible_in_pip_mode():
-    """Копирование pip-команды — иконка-кнопка 30×30 (не текст «⧉ pip»), лежит
+    """Копирование pip-команды — иконка-кнопка без текста, стоит рядом с самой
+    командой в `.upd-pip` (02.10.2026), лежит
     в колонке действий и не привязана к наличию новой версии: `hidden` в
     разметке (JS решает видимость по режиму hub/self, не по update_available)."""
     html = (_web_dir() / "index.html").read_text(encoding="utf-8")
@@ -539,6 +562,9 @@ def test_gap528b_pip_copy_is_an_icon_button_always_visible_in_pip_mode():
         tag = html[html.rfind("<button", 0, start):html.index(">", start) + 1]
         assert "hidden" in tag, f"{btn_id} по умолчанию скрыта, показывает JS"
         assert "<svg" in html[start:start + 400], f"{btn_id} обязана быть SVG-иконкой"
+        pip_box = html.rfind('<div class="upd-pip"', 0, start)
+        assert pip_box != -1 and html.find("</div>", pip_box) > start, (
+            f"{btn_id} стоит рядом с командой, внутри .upd-pip (02.10.2026)")
         assert "⧉" not in html[start - 5:start], f"{btn_id} больше не текстовая кнопка"
     assert "Скопировать команду обновления: python -m pip install -U standkit" in html
     # Не завязано на конкретный <code>-контейнер по видимости — копия работает

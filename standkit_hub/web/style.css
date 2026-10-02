@@ -587,6 +587,50 @@ body {
   margin-left: auto;
 }
 
+/* Правка владельца 02.10.2026: «Проверить обновления» — над колонкой статуса,
+   левее крестика (крестик — в углу поверх, вне потока). */
+.modal-box-updates .modal-header {
+  padding-right: 40px;
+  align-items: flex-start;
+}
+
+.modal-box-updates .upd-header-actions {
+  align-items: flex-end;
+}
+
+.modal-box-updates .upd-header-check-btn {
+  font-size: 12.5px;
+  padding: 4px 7px;
+  gap: 4px;
+}
+
+.modal-box-updates .upd-checked-at {
+  white-space: nowrap;
+}
+
+/* Команда pip и иконка копирования рядом с ней. */
+.upd-pip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.upd-pip[hidden] {
+  display: none;
+}
+
+.upd-pip .upd-icon-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.modal-box-updates .modal-header .modal-close-btn {
+  position: absolute;
+  top: 6px;
+  right: 4px;
+}
+
 /* GAP-528: «проверено N назад» — мелко под кнопкой «Проверить», не рядом с ней:
    шапка не растягивает окно по ширине. */
 .upd-checked-at {
@@ -2163,7 +2207,10 @@ span.value-has-reason {
 /* --- Окно «Обновления» ----------------------------------------------------- */
 
 .modal-box-updates {
-  width: 700px;
+  /* Правка владельца 02.10.2026: 700 → 600 px только за счёт переноса строк
+     в колонке текста и кнопок, ничего не убрано. */
+  width: 600px;
+  position: relative;
   max-width: calc(100vw - 32px);
 }
 
@@ -2181,7 +2228,9 @@ span.value-has-reason {
    версии слева, из-за чего зелёный чип "гулял" по горизонтали между строками). */
 .upd-row {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 112px 136px;
+  /* Правка владельца 02.10.2026: кнопки ЛЕВЕЕ статуса — порядок колонок
+     иконка | текст | действия | статус задан `order` (разметку строк не трогаем). */
+  grid-template-columns: 34px minmax(0, 1fr) 128px 104px;
   gap: 12px;
   align-items: center;
   padding: 10px 0;
@@ -2377,15 +2426,112 @@ span.value-has-reason {
 }
 
 .upd-action {
+  order: 3;
   display: flex;
   flex-direction: row;
+  /* 02.10.2026: кнопки прижаты к колонке статуса справа от них; две кнопки
+     или длинная подпись переносятся, а не распирают окно. */
+  justify-content: flex-end;
   flex-wrap: wrap;
-  /* GAP-528: иконки/кнопки — сразу за колонкой статуса, не у дальнего края. */
-  justify-content: flex-start;
-  flex-wrap: nowrap;
-  white-space: nowrap;
+  white-space: normal;
   align-items: center;
   gap: 6px;
+}
+
+.upd-row .upd-status {
+  order: 4;
+}
+
+.upd-row .upd-action button {
+  font-size: 12.5px;
+  padding: 5px 9px;
+  line-height: 1.25;
+  text-align: center;
+}
+
+/* Подписанные кнопки с иконкой: «Копировать pip», «Папка». */
+.upd-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.upd-copy-btn svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+/* «Что нового» — ссылка-кнопка рядом с версией (окно обновлений, «О программе»). */
+.link-btn.upd-whatsnew-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--bpmkit-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.link-btn.upd-whatsnew-btn[hidden] {
+  display: none;
+}
+
+.link-btn.upd-whatsnew-btn:hover span {
+  text-decoration: underline;
+}
+
+.modal-box-whatsnew {
+  width: 560px;
+  max-width: calc(100vw - 32px);
+}
+
+.whatsnew-body {
+  max-height: calc(100vh - 160px);
+  overflow: auto;
+}
+
+.whatsnew-group {
+  margin: 0 0 10px;
+}
+
+.whatsnew-group-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.whatsnew-group ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+
+.whatsnew-group li[hidden] {
+  display: none;
+}
+
+.whatsnew-group-main {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bpmkit-bg);
+}
+
+.link-btn.whatsnew-more {
+  margin: 2px 0 0 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--bpmkit-primary);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.link-btn.whatsnew-more:hover {
+  text-decoration: underline;
 }
 
 .upd-action button[hidden] {
@@ -2434,11 +2580,11 @@ span.value-has-reason {
 /* GAP-523: команда pip для карточки «Диспетчер стендов» в pip-режиме — сам
    pip диспетчер не запускает, только показывает команду и кнопку «Копировать». */
 .upd-pip {
-  margin-top: 10px;
+  margin-top: 8px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
 }
 
 .upd-pip[hidden] {
