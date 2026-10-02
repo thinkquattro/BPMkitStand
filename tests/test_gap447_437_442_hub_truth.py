@@ -606,3 +606,13 @@ def test_gap528b_state_summary_exposes_new_available_field():
     summary = state.summary()
     assert "new_available" in summary["patterns"]
     assert summary["patterns"]["new_available"] is False
+
+
+def test_ui_whatsnew_shown_whenever_backend_has_notes_and_single_checked_line():
+    """02.10.2026 (живой хост владельца): MCP 1.2.26 при заметках бэкенда для 1.2.19 —
+    кнопки «Что нового» не было (требовалось совпадение версий). Теперь заметки
+    показываются всегда, с их версией в заголовке. И «проверено только что» больше не
+    пишется второй строкой — только updates-checked-at."""
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    assert "const showNotes = !!notesVersion && notes.length > 0;" in js
+    assert 'textContent = "проверено только что"' not in js
