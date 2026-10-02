@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Поиск локальной копии кукбука BPMkit (инструкции пользователя MCP) для меню
-«Справка» дашборда (GAP-522, 24.09.2026).
+«Справка» дашборда.
 
 **Зачем.** Кнопка «?» в шапке открывала только кукбук самого диспетчера
 (`/static/cookbook.html`, BPMkitStand). Инструкции пользователя BPMkit — что
@@ -11,14 +11,13 @@
 
 * профиль — ``%APPDATA%\\BPMkit\\docs\\cookbook.html`` (``bpmkit_config_dir()/docs``):
   туда кладёт документ установщик и туда же доставляет свежие редакции канал
-  обновлений (``standkit_companion/cookbook.py``, GAP-361);
+  обновлений (``standkit_companion/cookbook.py``);
 * поставка — ``{app}\\docs\\cookbook.html`` рядом с установленным MCP. Каталог
   установки хаб узнаёт из маркера работающего MCP ``mcp_runtime.json``
-  (поле ``binary`` = ``{app}\\server\\BPMkit.exe``, GAP-447) — тот же путь, что
+  (поле ``binary`` = ``{app}\\server\\BPMkit.exe``) — тот же путь, что
   у ``standkit_companion.cookbook._shipped_path``.
 
-Побеждает НОВЕЙШАЯ копия — те же правила, что у ``installed_version`` канала
-(GAP-429): числовой префикс версии из ``<meta name="bpmkit-cookbook-version">``
+Побеждает НОВЕЙШАЯ копия — те же правила, что у ``installed_version`` канала: числовой префикс версии из ``<meta name="bpmkit-cookbook-version">``
 посегментно целыми числами, при равенстве — время файла; копия без
 разбираемой версии уступает любой с версией.
 

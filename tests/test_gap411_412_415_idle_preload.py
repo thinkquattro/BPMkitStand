@@ -567,7 +567,7 @@ def test_installer_artifact_is_refused_by_the_client(tmp_path):
     with pytest.raises(ChannelError) as exc:
         _ensure_artifact_applicable(src, dest)
     assert exc.value.kind == "artifact_type_mismatch"
-    assert "ADR-0048" in str(exc.value)
+    assert "отдельным типом артефакта" in str(exc.value)
 
 
 @pytest.mark.parametrize("name", ["BPMkit-Setup-1.1.120.exe", "bpmkit_setup_1.1.120.exe"])

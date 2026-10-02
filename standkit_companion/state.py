@@ -65,7 +65,7 @@ def _default_state() -> dict:
             "since_id": None,
             "seeded": False,
             "root": "",
-            # GAP-437: размер поставочной базы, посчитанный при seed (см.
+            # размер поставочной базы, посчитанный при seed (см.
             # `patterns.seed_override_root`/`patterns._count_shipped_patterns`). `None` —
             # размер ещё не считался ЧЕСТНО (не «база пуста»).
             "shipped_count": None,
@@ -74,7 +74,7 @@ def _default_state() -> dict:
             "last_detail": "",
             "last_bundle_sha256": "",
             "applied": [],
-            # GAP-528: признак «последний проход канала реально что-то применил или
+            # признак «последний проход канала реально что-то применил или
             # отозвал» — единственный надёжный сигнал «есть новые паттерны», раз сам
             # `sync` дренирует очередь целиком за один тик (см. `patterns.sync`) и
             # отдельного «доступно, но не скачано» состояния у канала нет. Кнопка
@@ -82,7 +82,7 @@ def _default_state() -> dict:
             # дельту total_available, которая после того же тика уже не отличима от
             # «всё было применено раньше».
             "had_new_last_run": False,
-            # GAP-528: ожидающие у издателя после курсора (`patterns.peek`).
+            # ожидающие у издателя после курсора (`patterns.peek`).
             "pending_count": 0,
             "pending_more": False,
         },
@@ -97,17 +97,17 @@ def _default_state() -> dict:
             "current": None,
             "restart_required": False,
             "history": [],
-            # GAP-447: что реально работает СЕЙЧАС (маркер `mcp_runtime.json`), отдельно
+            # что реально работает СЕЙЧАС (маркер `mcp_runtime.json`), отдельно
             # от того, что канал СЧИТАЕТ установленным (`current`) — до перезапуска это два
             # разных факта. `None` — маркера ни разу не было видно.
             "running_version": None,
             "running_started_at": None,
-            # GAP-442: состав обновления и известные проблемы (`GET /v1/version/latest`),
+            # состав обновления и известные проблемы (`GET /v1/version/latest`),
             # попутный запрос при проверке релиза — см. `releases._update_release_notes`.
             "release_notes_version": None,
             "release_notes": [],
             "known_issues": [],
-            # GAP-463: издатель объявил, что версия `release_notes_version` ставится
+            # издатель объявил, что версия `release_notes_version` ставится
             # ТОЛЬКО установщиком (`requires_installer` в `GET /v1/version/latest`,
             # булево, СИММЕТРИЧНО остальным полям попутного запроса выше). `False` —
             # значение по умолчанию и единственно верная трактовка отсутствия поля,
@@ -115,7 +115,7 @@ def _default_state() -> dict:
             # со старым бэкендом — см. докстринг `releases._update_release_notes`).
             "requires_installer": False,
         },
-        # GAP-361: узкий поток кукбука. Отдельная секция, а не поле внутри
+        # узкий поток кукбука. Отдельная секция, а не поле внутри
         # `releases`, — по той же причине, по которой отдельный модуль
         # `cookbook.py`: у документа свой жизненный цикл, и он не должен ни
         # занимать слот `staged` бинаря, ни участвовать в откате релизов.
@@ -127,7 +127,7 @@ def _default_state() -> dict:
             "last_sync_at": None,
             "installed": None,
         },
-        # Обратный проход канала (GAP-260/GAP-248 п.2): единственный поток,
+        # Обратный проход канала: единственный поток,
         # который не ПРИНИМАЕТ, а ОТДАЁТ. Свой слот по той же причине, что у
         # кукбука: у него свой исход («офлайн» здесь — норма, а не ошибка) и
         # своя строка в UI; мешать его в `patterns` значило бы объявлять
@@ -147,7 +147,7 @@ def _default_state() -> dict:
             "etag": None,
             "revoked_ids": [],
         },
-        # GAP-523: узкий поток самообновления диспетчера (kind=hub). Своя
+        # узкий поток самообновления диспетчера (kind=hub). Своя
         # секция, а не поле `releases` — предмет другой (бинарь диспетчера,
         # не бинарь MCP), свой стейджинг, свой цикл "подготовлено/запущено".
         "hub": {
@@ -163,7 +163,7 @@ def _default_state() -> dict:
             "partial": None,
             "self_update_launched": None,
         },
-        # GAP-288: узкий поток скиллов/плагина (kind=skills). Установленная
+        # узкий поток скиллов/плагина (kind=skills). Установленная
         # версия — не тут, а в маркере `%APPDATA%\\BPMkit\\skills\\installed.json`
         # (источник правды делят все процессы, включая CLI); здесь — только
         # то, что канал сам скачал/применил в ЭТОМ пробуждении.
@@ -311,7 +311,7 @@ class CompanionState:
         skl = self.skills
         staged = rel.get("staged") or {}
         current = rel.get("current") or {}
-        # GAP-528 п.2а: `current_version` пуст (свежая установка/маркер не
+        #: `current_version` пуст (свежая установка/маркер не
         # писался) — подставляем версию РЕАЛЬНО работающего процесса
         # (`running_version`, маркер `mcp_runtime.json`) вместо честного, но
         # бесполезного для человека `None`. Источник помечается ОТДЕЛЬНЫМ
@@ -325,7 +325,7 @@ class CompanionState:
             current_version_source = "running"
         rel_known_latest = rel.get("known_latest")
         rel_staged_version = staged.get("version")
-        # GAP-528 п.2в: подготовленная версия ИЛИ известная более новая, чем
+        #: подготовленная версия ИЛИ известная более новая, чем
         # действующая (маркер/приближение выше) — сравнивать строкой нельзя
         # ("0.9.0" > "0.10.0" как строки), только посегментно.
         releases_update_available = bool(rel_staged_version) or (
@@ -338,7 +338,7 @@ class CompanionState:
         return {
             "patterns": {
                 "applied_count": len(applied),
-                # GAP-241: самая свежая версия среди применённых паттернов — сводка для
+                # самая свежая версия среди применённых паттернов — сводка для
                 # верхнего уровня статуса канала (см. server.py::_patterns_summary).
                 # `None`, если сравнивать не с чем (пусто/поле версии не заполнено).
                 "latest_version": _latest_pattern_version(applied),
@@ -348,13 +348,13 @@ class CompanionState:
                 "root": pat.get("root"),
                 "seeded": bool(pat.get("seeded")),
                 "cursor": {"since": pat.get("since"), "since_id": pat.get("since_id")},
-                # GAP-437: размер поставочной базы (см. `patterns.seed_override_root`) и
+                # размер поставочной базы (см. `patterns.seed_override_root`) и
                 # честная ОЦЕНКА фактически доступной базы (поставочная + применённая
                 # дельта). `None` у обоих — размер поставочной базы ещё не посчитан, и
                 # выдумывать его нельзя (см. докстринг `_default_state`).
                 "shipped_count": shipped_count,
                 "total_available": total_available,
-                # GAP-528: True — последний завершённый проход канала применил или
+                # True — последний завершённый проход канала применил или
                 # отозвал хотя бы один паттерн (`had_new_last_run`, см. `patterns.sync`).
                 # Кнопка «Загрузить новые» в окне «Обновления» видна только при этом
                 # флаге; повторный тик без дельты сбрасывает его сам.
@@ -370,29 +370,29 @@ class CompanionState:
                 "known_latest": rel_known_latest,
                 "staged_version": staged.get("version"),
                 "staged_signed": staged.get("signed"),
-                # GAP-528 п.2а: с фолбэком на `running_version`, когда маркер
+                #: с фолбэком на `running_version`, когда маркер
                 # канала пуст — см. вычисление `current_version` выше.
                 "current_version": current_version,
                 "current_version_source": current_version_source,
                 "restart_required": bool(rel.get("restart_required")),
                 "rollback_available": bool(rel.get("history")),
                 "resume_bytes": (rel.get("partial") or {}).get("bytes"),
-                # GAP-447: версия и момент старта РЕАЛЬНО работающего процесса (маркер
+                # версия и момент старта РЕАЛЬНО работающего процесса (маркер
                 # `mcp_runtime.json`), отдельно от того, что канал считает установленным
                 # (`current_version` выше). `None` — маркера не видно.
                 "running_version": running_version,
                 "running_started_at": rel.get("running_started_at"),
-                # GAP-442: состав обновления/известные проблемы, попутный запрос
+                # состав обновления/известные проблемы, попутный запрос
                 # `GET /v1/version/latest` при проверке релиза.
                 "release_notes_version": rel.get("release_notes_version"),
                 "release_notes": list(rel.get("release_notes") or []),
                 "known_issues": list(rel.get("known_issues") or []),
-                # GAP-463: `True` — обновление до `release_notes_version` ставится
+                # `True` — обновление до `release_notes_version` ставится
                 # установщиком, канал его не стейджит и не подменяет им бинарь (см.
                 # `releases.stage`/`releases.apply_staged`); UI диспетчера не должен
                 # предлагать тихую установку в этом состоянии.
                 "requires_installer": bool(rel.get("requires_installer")),
-                # GAP-528 п.2в: подготовленная ЛИБО известная более новая версия —
+                #: подготовленная ЛИБО известная более новая версия —
                 # UI прячет кнопку «Установить», когда ставить нечего.
                 "update_available": releases_update_available,
             },

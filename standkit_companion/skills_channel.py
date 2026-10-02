@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Канал обновления скиллов/плагина (kind=skills) — GAP-288.
+"""Канал обновления скиллов/плагина (kind=skills).
 
-Третий узкий поток по образцу установщика (ADR-0048): своя пара
+Третий узкий поток по образцу установщика: своя пара
 `meta`/`signature` под `/v1/content/skills/...`, свой стейджинг, свой сайдкар
 с ОБЯЗАТЕЛЬНЫМ `kind="skills"`. Предмет — `bpmkit-skills-<mcp_version>.plugin`
-(ZIP, собирает `packaging/build_plugin.py` dev-репо), версия в имени —
+(ZIP, собирает сборка поставки), версия в имени —
 версия САМОГО MCP (`manifest.json`), НЕ версия `standkit` (в отличие от
 `hub_channel.py`).
 
@@ -418,7 +418,7 @@ def staged_skills_info(state) -> Optional[dict]:
 def skills_status(state) -> dict:
     """Карточка канала для `/api/companion/status`.
 
-    Установленная версия (GAP-528 п.2б): если маркера `installed.json` ещё
+    Установленная версия: если маркера `installed.json` ещё
     нет (свежая установка, канал ещё ни разу не применял скиллы), берём
     версию ЗАПУЩЕННОГО MCP из `mcp_runtime.json` — то же приближение, что
     `_current_skills_version` уже использует для сетевого `check_skills`, но
@@ -428,7 +428,7 @@ def skills_status(state) -> dict:
     "running" — приближение по `mcp_runtime.json"), чтобы UI мог показать
     это отличие, а не выдать приближение за точный факт.
 
-    `update_available` (GAP-528 п.2в): подготовленная версия (`staged`) ЛИБО
+    `update_available`: подготовленная версия (`staged`) ЛИБО
     известная более новая, чем действующая (маркер или приближение выше).
     """
     installed = read_installed_marker()
@@ -492,7 +492,7 @@ def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
 
 def _extract_plugin(archive: Path, dist_root: Path) -> Path:
     """Распаковать `.plugin` в `dist_root`, вернуть путь к дереву `skills/`
-    внутри распакованного (контракт `packaging/build_plugin.py` dev-репо —
+    внутри распакованного (контракт сборки плагина —
     архив несёт папку `skills/` на верхнем уровне)."""
     dist_root.mkdir(parents=True, exist_ok=True)
     try:
@@ -650,7 +650,7 @@ def install_summary_lite() -> dict:
 
 def install_summary(ctx) -> dict:
     """`{app_dir, plugin_dir, clients:[{id, name, skills_installed}]}` для
-    карточки «Скиллы и плагин» (GAP-288, контракт серии).
+    карточки «Скиллы и плагин».
 
     `clients` — пересечение того, что ЗНАЕТ CLI (`setup detect-clients`, best
     effort — отсутствие CLI не роняет карточку целиком, просто список пуст) с

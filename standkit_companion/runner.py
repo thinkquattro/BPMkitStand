@@ -85,7 +85,7 @@ RUN_ORDER = ("revocations", "patterns", "releases")
 #: переводил «что разрешено» в «что вызвать» через свою таблицу соответствия.
 ACTIONS = ("sync_patterns", "check_update", "stage_update", "apply_update",
            "rollback", "refresh_revocations", "stage_installer", "apply_installer",
-           # GAP-523/GAP-288: два новых узких потока (ADR-0048) — диспетчер (kind=hub)
+           # два новых узких потока — диспетчер (kind=hub)
            # и скиллы/плагин (kind=skills). Оба — ТОЛЬКО явные действия человека, ни один
            # не тикает планировщиком (симметрично apply_update/rollback, см. run_action).
            "check_hub", "stage_hub", "apply_hub",
@@ -195,7 +195,7 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
     без файла — это «нечего применять».
 
     `apply_update` дополнительно гасится, когда подготовленный файл — это именно ТА
-    версия, которую издатель объявил ставящейся установщиком (GAP-463, гонка описана в
+    версия, которую издатель объявил ставящейся установщиком (гонка описана в
     докстринге `releases.apply_staged`): кнопка не должна обещать действие, которое
     `run_action` всё равно honest-но отклонит. `stage_update` НЕ гасится здесь заранее —
     в отличие от `apply_update` он не привязан к одной версии (им адресуются к конкретной
@@ -211,7 +211,7 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
     skills_staged = False
     if state is not None:
         try:
-            # GAP-279: «Установить обновление» установщиком — только когда подготовленный
+            # «Установить обновление» установщиком — только когда подготовленный
             # и проверенный установщик ЛЕЖИТ на диске (та же логика «запись без файла —
             # нечего применять», что у `apply_update`).
             installer_staged = releases.installer_status(state)["staged"] is not None
@@ -228,7 +228,7 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
             history = False
             staged_requires_installer = False
         try:
-            # GAP-523: кнопка «Установить обновление диспетчера» — только когда
+            # кнопка «Установить обновление диспетчера» — только когда
             # подготовленный exe ЛЕЖИТ на диске (та же логика «запись без файла —
             # нечего применять», что у apply_update/apply_installer выше).
             hub_staged = hub_channel.staged_hub_info(state) is not None
@@ -247,7 +247,7 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
         "refresh_revocations": enabled,
         "stage_installer": enabled,
         "apply_installer": enabled and installer_staged,
-        # GAP-523: «Проверить»/«Скачать» доступны всегда при включённом канале
+        # «Проверить»/«Скачать» доступны всегда при включённом канале
         # (frozen-only отказ — честный typed-отказ из stage_hub/apply_self_update,
         # а не заранее погашенная кнопка: pip-режим тоже имеет право нажать
         # «Проверить», просто получит карточку PyPI, а не exe-стейджинг).
@@ -337,7 +337,7 @@ class CompanionRunner:
         # Отказ, случившийся вне отдельного цикла (нечитаемый конфиг, сбой самого
         # планировщика). Наружу уходит только через `status()`.
         self._last_error = ""
-        # Обратный проход очереди находок — ОДИН на пробуждение (GAP-413). Метка
+        # Обратный проход очереди находок — ОДИН на пробуждение. Метка
         # пробуждения и исход первого прохода: второй несущий цикл того же
         # пробуждения берёт исход отсюда, а не зовёт поставку повторно.
         self._wake_token = 0
@@ -382,7 +382,7 @@ class CompanionRunner:
 
     # -- расписание --------------------------------------------------------------------
     def _interval_of(self, settings, cycle: str) -> float:
-        # GAP-241: у отзыва больше нет своего интервала в настройках — он идёт с той же
+        # у отзыва больше нет своего интервала в настройках — он идёт с той же
         # частотой, что и паттерны (см. CompanionSettings.revocations и докстринг класса).
         source_cycle = "patterns" if cycle == "revocations" else cycle
         cycle_settings = getattr(settings, source_cycle, None)
@@ -395,7 +395,7 @@ class CompanionRunner:
     def _enabled(self, settings, cycle: str) -> bool:
         """Включён ли цикл: главный рубильник И флаг самого цикла.
 
-        GAP-241: отзыв (``revocations``) — ИСКЛЮЧЕНИЕ. Собственный флаг цикла
+        отзыв (``revocations``) — ИСКЛЮЧЕНИЕ. Собственный флаг цикла
         (``settings.revocations.enabled``) больше не спрашивается: отзыв обязан
         тикать вместе с главным рубильником канала БЕЗ отдельной настройки — риск
         того, что человек выключит именно его и продолжит применять паттерны без
@@ -463,7 +463,7 @@ class CompanionRunner:
 
     # -- выполнение --------------------------------------------------------------------
     def _sync_cookbook(self, session) -> Optional[dict]:
-        """Доставка кукбука попутно с любым обновлением (GAP-361, требование
+        """Доставка кукбука попутно с любым обновлением (требование
         владельца 17.09.2026: «при ЛЮБОМ обновлении — MCP, диспетчера,
         паттернов — если у издателя есть более новая версия кукбука, она
         доставляется»).
@@ -495,7 +495,7 @@ class CompanionRunner:
             return {"applied": False, "reason": "error", "detail": str(exc)}
 
     def _begin_wake(self) -> None:
-        """Новое пробуждение планировщика — сбрасывает счётчик попутчиков (GAP-413).
+        """Новое пробуждение планировщика — сбрасывает счётчик попутчиков.
 
         Ограничение «один проход очереди находок» относится к ПРОБУЖДЕНИЮ, а не к
         жизни процесса: иначе диспетчер, проживший неделю, разгрузил бы очередь
@@ -505,8 +505,7 @@ class CompanionRunner:
         self._wake_token += 1
 
     def _sync_candidates(self, settings) -> Optional[dict]:
-        """Обратный проход: разгрузка локальной очереди находок вендору
-        (GAP-260, GAP-248 п.2 «автоматический flush очереди сабмишенов»).
+        """Обратный проход: разгрузка локальной очереди находок вендору («автоматический flush очереди сабмишенов»).
 
         Тем же попутчиком, что кукбук, и по той же причине: у очереди нет
         собственного расписания, она едет на уже состоявшемся пробуждении
@@ -524,7 +523,7 @@ class CompanionRunner:
         уехали находки — не повод объявить неудачей синхронизацию паттернов
         или проверку релиза, которые уже отработали.
 
-        ОДИН ПРОХОД ЗА ПРОБУЖДЕНИЕ (GAP-413). Попутчик висит на ДВУХ несущих
+        ОДИН ПРОХОД ЗА ПРОБУЖДЕНИЕ. Попутчик висит на ДВУХ несущих
         циклах — паттернах и релизах, — и когда сроки обоих наступают в одну
         секунду (после старта диспетчера это ровно так: первый тик общий),
         поставку просили разгрузить очередь ДВАЖДЫ. Цена двойного прохода не
@@ -569,7 +568,7 @@ class CompanionRunner:
         поставке не тронуто, и до нажатия кнопки продолжает работать прежняя версия.
         Отдельный регресс-тест проверяет, что планировщик `apply_staged` не трогает.
 
-        GAP-463: `requires_installer` гасит автостейдж ТЕМ ЖЕ способом, что и
+        `requires_installer` гасит автостейдж ТЕМ ЖЕ способом, что и
         `available` — условием, а не исключением. `releases.stage` и сама отказала бы
         typed-ошибкой, но она НЕ retriable (`errors.KIND_TITLES`), и просочись это
         исключение сюда, `_execute` пометил бы весь цикл `releases` остановленным
@@ -586,7 +585,7 @@ class CompanionRunner:
                                     check.get("target") or "latest")
         if (check.get("available") and check.get("requires_installer")
                 and bool(getattr(settings, "auto_stage_release", False))):
-            # GAP-279: версия ставится установщиком — заранее скачиваем и проверяем ЕГО
+            # версия ставится установщиком — заранее скачиваем и проверяем ЕГО
             # (не запускаем: запуск — только кнопкой человека, SECURITY.md §4.1).
             installer = self._stage_installer_quietly(session, check)
         return {"check": check, "staged": staged, "installer": installer,
@@ -594,7 +593,7 @@ class CompanionRunner:
                 "candidates": self._sync_candidates(settings)}
 
     def _stage_installer_quietly(self, session, check: dict) -> Optional[dict]:
-        """Попутная подготовка установщика (GAP-279) без права уронить проверку.
+        """Попутная подготовка установщика без права уронить проверку.
 
         Проверка релиза — главное: её результат (номер новой версии) обязан дойти до
         человека, даже если установщик не опубликован или не скачался. Поэтому любой
@@ -834,8 +833,8 @@ class CompanionRunner:
                 return releases.rollback(self._state, self._session(settings).ctx,
                                          version=version)
             if action == "apply_installer":
-                # GAP-279: «Установить обновление» — ЗАПУСК подготовленного установщика
-                # (ADR-0048 п.4/п.5). Сперва «есть ли что ставить», потом контекст — тот
+                # «Установить обновление» — ЗАПУСК подготовленного установщика
+                #. Сперва «есть ли что ставить», потом контекст — тот
                 # же порядок, что у `apply_update`.
                 if releases.installer_status(self._state)["staged"] is None:
                     raise ChannelError(
@@ -845,7 +844,7 @@ class CompanionRunner:
                 return releases.apply_installer(self._state, self._session(settings).ctx,
                                                 target=version)
             if action == "apply_hub":
-                # GAP-523: тот же порядок, что apply_installer — «есть ли что
+                # тот же порядок, что apply_installer — «есть ли что
                 # применять» раньше контекста лицензии.
                 if hub_channel.staged_hub_info(self._state) is None:
                     raise ChannelError(
@@ -861,7 +860,7 @@ class CompanionRunner:
                         kind="nothing_staged")
                 return skills_channel.apply_skills(self._state, self._session(settings).ctx)
             if action == "check_hub" and not hub_channel.is_frozen_hub():
-                # GAP-523: pip-режим проверяется через PyPI, БЕЗ лицензионного
+                # pip-режим проверяется через PyPI, БЕЗ лицензионного
                 # конверта — резолв контекста (запуск CLI) здесь только лишний
                 # процесс. exe-режим по-прежнему идёт общим путём ниже (сессия).
                 return hub_channel.check_hub_pypi()
@@ -894,13 +893,13 @@ class CompanionRunner:
                     result["cookbook"] = self._sync_cookbook(session)
                 return result
             if action == "check_update":
-                # GAP-241: «Проверить обновление» = проверка И подготовка найденного.
+                # «Проверить обновление» = проверка И подготовка найденного.
                 # Два раздельных нажатия («проверить», потом «подготовить») были чистой
                 # церемонией: ни одно из них не подменяет бинарь — скачанный файл лежит в
                 # стейджинге до явного «Применить» (SECURITY.md §4.1). Отдельное действие
                 # `stage_update` остаётся рабочим: им адресуются к КОНКРЕТНОЙ версии.
                 #
-                # GAP-463: найденную версию с `requires_installer` эта опортунистическая
+                # найденную версию с `requires_installer` эта опортунистическая
                 # подготовка тоже пропускает — БЕЗ исключения, тем же способом, что и
                 # планировщик (`_run_releases`). Причина та же: «Проверить обновление» —
                 # это в первую очередь ПРОВЕРКА, и её результат (номер новой версии, нотсы)
@@ -914,14 +913,14 @@ class CompanionRunner:
                     staged = releases.stage(session.client, self._state, session.ctx,
                                             check.get("target") or "latest")
                 if check.get("available") and check.get("requires_installer"):
-                    # GAP-279: версию ставит установщик — готовим ЕГО, чтобы кнопка
+                    # версию ставит установщик — готовим ЕГО, чтобы кнопка
                     # «Установить обновление» стала доступна одним нажатием проверки.
                     installer = self._stage_installer_quietly(session, check)
                 result = dict(check)
                 result["staged"] = staged
                 result["installer"] = installer
                 result["cookbook"] = self._sync_cookbook(session)
-                # GAP-528: «Проверить» в окне «Обновления» заодно узнаёт, ждут ли новые
+                # «Проверить» в окне «Обновления» заодно узнаёт, ждут ли новые
                 # паттерны у издателя (без применения — их грузит кнопка «Загрузить
                 # новые» или плановый тик). Сбой подсчёта проверку не роняет.
                 try:
@@ -995,10 +994,10 @@ class CompanionRunner:
             "cycles": cycles,
             "context": self._context_status(settings),
             "actions": available_actions(settings, self._state),
-            # GAP-279: подготовленный/запущенный установщик — для предпросмотра «MCP A→B,
+            # подготовленный/запущенный установщик — для предпросмотра «MCP A→B,
             # диспетчер C→D» и для страницы, ждущей перезапуска диспетчера установщиком.
             "installer": self._installer_status(),
-            # GAP-523/GAP-288: карточки «Диспетчер стендов» и «Скиллы и плагин».
+            # карточки «Диспетчер стендов» и «Скиллы и плагин».
             "hub": self._hub_status(),
             "skills": self._skills_status(),
             "install": self._install_summary(),

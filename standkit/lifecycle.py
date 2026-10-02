@@ -151,7 +151,7 @@ def start(
 ) -> Optional[int]:
     """
     Запускает стенд, если он ещё не запущен. Диспетчер по ``stand.host_kind``
-    (см. ADR-0001, docs/adr/0001-hosting-backends.md): kestrel — ТЕКУЩИЙ код
+    (см. docs/adr/0001-hosting-backends.md): kestrel — ТЕКУЩИЙ код
     (см. ``_kestrel_start``) без изменений; iis/docker/k8s — соответствующий
     бэкенд ``standkit.hosting``. ``startup_check_delay`` применяется только к
     kestrel-ветке.
@@ -283,7 +283,7 @@ def _kestrel_start(
 
     Приватная функция kestrel-пути — вызывается диспетчером ``start()`` и
     напрямую из ``standkit.hosting.KestrelBackend`` (во избежание рекурсии
-    диспетчер↔бэкенд, см. ADR-0001).
+    диспетчер↔бэкенд).
     """
     _require_local(stand)
 

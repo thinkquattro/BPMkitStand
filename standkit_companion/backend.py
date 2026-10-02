@@ -471,7 +471,7 @@ class BackendClient:
                  max_bytes: Optional[int] = None) -> dict:
         """Скачать файл в `dest` потоком, при необходимости — с докачкой.
 
-        `max_bytes` — потолок артефакта, fail-closed (GAP-414). `None` (по
+        `max_bytes` — потолок артефакта, fail-closed. `None` (по
         умолчанию) — потолка нет, прежнее поведение. Когда он задан, проверок
         ДВЕ, и обе обязательны:
 

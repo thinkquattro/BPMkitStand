@@ -128,7 +128,7 @@ def _install_windows() -> ShortcutResult:
     try:
         # run_console, а не голый subprocess.run: установку ярлыка запускают в
         # т.ч. из хаба под pythonw (окно «Настройки»), и PowerShell мигнул бы
-        # консолью прямо в лицо пользователю (тот же класс, что GAP-138).
+        # консолью прямо в лицо пользователю.
         proc = run_console(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True,
