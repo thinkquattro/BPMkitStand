@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Помощник самообновления диспетчера (`--apply-self-update`) — GAP-523.
+"""Помощник самообновления диспетчера (`--apply-self-update`).
 
 Этот модуль исполняется ВТОРЫМ процессом: тем самым exe, который
 `hub_channel.apply_self_update` скачал, проверил (подпись, `kind="hub"`,
@@ -181,7 +181,7 @@ def run_self_update_helper(*, target: str, wait_pid: int,
     _log.info("самообновление диспетчера: %s подменён, запускаю новую версию", target_path)
     launch_log = target_path.parent / "self_update_launch.log"
     try:
-        # `spawn_hidden` — ЕДИНАЯ точка запуска процессов пакета (GAP-138,
+        # `spawn_hidden` — ЕДИНАЯ точка запуска процессов пакета (
         # см. `standkit.platform.spawn_hidden`): голый `subprocess.Popen` вне
         # `standkit/platform.py` запрещён и стережётся `tests/test_no_window.py`.
         # Обычный старт диспетчера — обязан обойтись без своего консольного

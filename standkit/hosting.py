@@ -2,13 +2,13 @@
 Hosting backends — как стенд ХОСТИТСЯ на своей машине (kestrel-процесс
 standkit / IIS Application Pool / Docker-контейнер), ортогонально
 ``standkit.models.Transport`` (тот определяет, ГДЕ управлять стендом:
-локально или через агента). См. ADR-0001
+локально или через агента). См.
 (docs/adr/0001-hosting-backends.md).
 
 Только стандартная библиотека Python (``subprocess``, ``shutil``,
 ``pathlib``) — как и весь пакет ``standkit``. Внешние утилиты запускаются
 ТОЛЬКО через ``standkit.platform.run_console`` (скрытое консольное окно на
-Windows, GAP-138), а не через ``subprocess.run`` напрямую.
+Windows), а не через ``subprocess.run`` напрямую.
 
 Соглашения об ошибках:
   - ``start``/``stop``/``restart``/``read_logs`` бросают ``HostingError`` с
@@ -111,7 +111,7 @@ class IisElevationError(HostingError):
 
 @runtime_checkable
 class HostingBackend(Protocol):
-    """Единый протокол бэкенда хостинга — см. ADR-0001."""
+    """Единый протокол бэкенда хостинга."""
 
     def start(
         self, stand: Stand, *, run_dir: Optional[Path] = None, log_dir: Optional[Path] = None
@@ -198,8 +198,7 @@ def _run(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> subprocess.Com
     чем ``text=True, encoding='utf-8'``, для консольных утилит в OEM-кодировке.
     Запуск — через ``platform.run_console`` (на Windows добавляет
     ``CREATE_NO_WINDOW``): поллер хаба зовёт appcmd из процесса без своей
-    консоли, и голый ``subprocess.run`` мигал бы окном на каждый вызов
-    (GAP-138)."""
+    консоли, и голый ``subprocess.run`` мигал бы окном на каждый вызов."""
     try:
         proc = run_console(cmd, capture_output=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -397,7 +396,7 @@ def _appcmd_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> sub
     if _process_is_elevated() is False:
         raise IisElevationError(text + ELEVATION_HINT) from last
     if _looks_like_transient_rpc(text):
-        # Живьём 16.09.2026 (iis19, диспетчер с правами): `appcmd start site`
+        # Живьём 16.09.2026 (диспетчер с правами): `appcmd start site`
         # при ОСТАНОВЛЕННОЙ службе W3SVC отвечает тем же 0x80010006, что и
         # транзиентный обрыв. Подсказка «повторите» там бесполезна — сначала
         # сверяемся с состоянием служб.
@@ -417,7 +416,7 @@ def _appcmd_checked(cmd: list[str], *, timeout: float = _DEFAULT_TIMEOUT) -> sub
 
 
 def _tcp_fallback(stand: Stand) -> bool:
-    """Фолбэк-проба «жив ли стенд» по открытому TCP-порту (см. ADR-0001)."""
+    """Фолбэк-проба «жив ли стенд» по открытому TCP-порту."""
     from standkit import health as _health  # локальный импорт — избегаем цикла
 
     return _health.tcp_open(stand.stand_host, stand.stand_port)
@@ -437,7 +436,7 @@ class KestrelBackend:
     Вызывает ПРИВАТНЫЕ функции ``lifecycle._kestrel_*`` напрямую (а не
     публичные ``lifecycle.start``/``stop``/``restart``/``is_running``),
     чтобы избежать рекурсии диспетчер(``lifecycle``) → бэкенд(``hosting``) →
-    диспетчер(``lifecycle``) — см. ADR-0001. Импорт ``lifecycle`` — локальный
+    диспетчер(``lifecycle``). Импорт ``lifecycle`` — локальный
     (внутри методов), чтобы не создавать цикл модулей при импорте
     ``standkit.hosting``.
     """
@@ -509,7 +508,7 @@ def _is_wow64_process() -> bool:
         import ctypes
         from ctypes import wintypes
 
-        # Приватный WinDLL, не глобальный ctypes.windll.kernel32 (GAP-311
+        # Приватный WinDLL, не глобальный ctypes.windll.kernel32 (
         # M6) — та же причина, что у standkit.platform.current_user_sid:
         # явные argtypes на общем хендле затронули бы других вызывающих.
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -534,7 +533,7 @@ def _resolve_appcmd() -> str:
     (elevation классифицируется отдельно, по stderr самого appcmd, см.
     ``IisElevationError`` ниже).
 
-    WOW64 (GAP-311 п.2): если текущий процесс 32-битный на 64-битной Windows
+    WOW64: если текущий процесс 32-битный на 64-битной Windows
     (``_is_wow64_process``) и существует ``%WINDIR%\\Sysnative\\inetsrv\\appcmd.exe``
     — используем ЕГО. ``Sysnative`` — псевдо-каталог, который File System
     Redirector НЕ трогает: путь через него всегда указывает на настоящий
@@ -967,7 +966,7 @@ class IisBackend:
         # он учитывает stand.logs_dir и ищет подкаталог логов по факту, без
         # учёта регистра. Жёсткое ``stand_dir / "logs"`` тут не годилось: на
         # POSIX-контуре каталог называется "Logs", и read_logs возвращал None
-        # при живых логах (GAP-006).
+        # при живых логах.
         directory: Optional[Path] = (
             Path(stand.iis_stdout_log_dir)
             if stand.iis_stdout_log_dir

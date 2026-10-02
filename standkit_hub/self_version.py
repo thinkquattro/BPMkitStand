@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""GAP-528: проверка версии диспетчера БЕЗ лицензии, stdlib-only.
+"""проверка версии диспетчера БЕЗ лицензии, stdlib-only.
 
 Зачем отдельный модуль. `standkit_companion/hub_channel.py::check_hub_pypi` уже
 делает то же самое — best-effort сверку `standkit` с PyPI для pip-режима, — но

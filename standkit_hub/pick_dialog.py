@@ -9,7 +9,7 @@
 
 Как это устроено. Хаб — локальный процесс на машине оператора, поэтому диалог
 поднимается ШТАТНЫМ средством ОС и только stdlib'ом (`subprocess` через
-`standkit.platform.run_console`, GAP-138):
+`standkit.platform.run_console`):
 
 * **Windows** — PowerShell с `System.Windows.Forms`: `OpenFileDialog` для файла,
   `FolderBrowserDialog` для каталога. Два обязательных условия, без которых диалог
