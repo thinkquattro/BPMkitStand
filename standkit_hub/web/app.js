@@ -3396,15 +3396,18 @@
     // иначе установленную): бэкенд всегда отдаёт `release_notes` про свою «latest», и
     // если она разошлась с тем, что видит канал доставки, показать её текст значило бы
     // выдумать состав чужой версии.
-    const showNotes = !!targetVersion && !!notesVersion &&
-      String(notesVersion) === String(targetVersion) && notes.length > 0;
+    // 02.10.2026 (владелец): заметки показываются ВСЕГДА, когда бэкенд их отдал, —
+    // с номером их версии в заголовке («Что нового в X»). Раньше показ требовал
+    // совпадения с установленной/подготовленной версией и на хосте новее
+    // опубликованной (или старее без подготовленной) кнопки не было вовсе.
+    const showNotes = !!notesVersion && notes.length > 0;
     // Известные проблемы сервер уже отфильтровал по УСТАНОВЛЕННОЙ версии (`current` в
     // запросе) — показываем их независимо от совпадения с `notesVersion`.
     const showIssues = issues.length > 0;
 
     lastWhatsNew = (showNotes || showIssues)
       ? {
-          version: targetVersion || notesVersion,
+          version: showNotes ? notesVersion : (targetVersion || notesVersion),
           notes: showNotes ? notes.map(String) : [],
           issues: showIssues ? issues.map(String) : [],
         }
@@ -3751,7 +3754,7 @@
       const data = await apiSend("POST", "/api/hub/self-version/check", {});
       renderSelfVersionRow(data);
       renderUpdatesBadge(lastCompanionStatus);
-      if (statusEl) statusEl.textContent = "проверено только что";
+      // «проверено …» показывает строка updates-checked-at — второй раз не пишем.
       applyUpdatesEditionView();
     } catch (e) {
       if (errorEl) errorEl.textContent = describeApiError(e);
@@ -3886,7 +3889,7 @@
       const data = await apiSend("POST", path, {});
       toast(COMPANION_ACTION_DONE[action] || "Готово");
       if (action === "check_update") {
-        byId("updates-check-status").textContent = "проверено только что";
+        // «проверено …» — в строке updates-checked-at (обновит renderCompanionStatus).
       }
       if (data && data.status) {
         companionBusy = false;
