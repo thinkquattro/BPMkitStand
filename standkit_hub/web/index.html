@@ -1233,7 +1233,7 @@
         <div class="upd-header-actions">
           <button type="button" class="secondary upd-header-check-btn" id="updates-check-btn" data-companion-action="check_update" title="Проверить обновления">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 1 2.64 6.36"/><path d="M3 21v-6h6"/></svg>
-            <span id="updates-check-btn-label">Проверить</span>
+            <span id="updates-check-btn-label">Проверить обновления</span>
           </button>
           <span id="updates-checked-at" class="status-text upd-checked-at"></span>
           <span id="updates-check-status" class="status-text upd-checked-at"></span>
@@ -1304,9 +1304,9 @@
               <!-- GAP-279 (ADR-0048): установка обновления подписанным установщиком целиком
                    (MCP + диспетчер + скиллы + документация). Видна, только когда установщик
                    скачан и проверен; сценарий — app.js::installUpdateFlow. -->
-              <button type="button" id="upd-installer-btn" data-companion-action="apply_installer" hidden>Установить обновление</button>
+              <button type="button" id="upd-installer-btn" data-companion-action="apply_installer" hidden>Установить →</button>
               <button type="button" id="upd-installer-stage-btn" class="secondary" data-companion-action="stage_installer" hidden>Скачать установщик</button>
-              <button type="button" id="upd-install-btn" data-companion-action="apply_update" hidden>Установить</button>
+              <button type="button" id="upd-install-btn" data-companion-action="apply_update" hidden>Установить →</button>
               <button type="button" id="upd-rollback-btn" class="secondary" data-companion-action="rollback" hidden>Откатить</button>
             </div>
           </div>
@@ -1327,6 +1327,9 @@
               <div class="upd-detail" id="upd-hub-detail" hidden></div>
               <div class="upd-pip" id="upd-hub-pip" hidden>
                 <code id="upd-hub-pip-cmd">python -m pip install -U standkit</code>
+                <button type="button" class="secondary upd-icon-btn" id="upd-hub-pip-copy-btn" hidden title="Скопировать команду обновления: python -m pip install -U standkit" aria-label="Скопировать команду pip">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
+                </button>
               </div>
               <div class="upd-restart" id="upd-hub-wait-note" hidden>
                 <strong>Диспетчер обновляется…</strong><span> сейчас он завершится и перезапустится новой версией — окно обновится само.</span>
@@ -1336,13 +1339,9 @@
               <span class="upd-chip" id="upd-hub-chip" hidden></span>
             </div>
             <div class="upd-action">
-              <button type="button" id="upd-hub-apply-btn" data-companion-action="apply_hub" hidden>Установить</button>
+              <button type="button" id="upd-hub-apply-btn" data-companion-action="apply_hub" hidden>Установить →</button>
               <button type="button" class="secondary" id="upd-hub-stage-btn" data-companion-action="stage_hub" hidden>Скачать</button>
               <!-- GAP-528: pip-режим — ВСЕГДА видна (не только при доступной версии). -->
-              <button type="button" class="secondary upd-copy-btn" id="upd-hub-pip-copy-btn" hidden title="Скопировать команду обновления: python -m pip install -U standkit">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
-                <span class="upd-copy-label">Копировать pip</span>
-              </button>
             </div>
           </div>
 
@@ -1368,9 +1367,8 @@
             <div class="upd-action">
               <button type="button" id="upd-skills-apply-btn" data-companion-action="apply_skills" hidden>Обновить скиллы</button>
               <button type="button" class="secondary" id="upd-skills-stage-btn" data-companion-action="stage_skills" hidden>Скачать</button>
-              <button type="button" class="secondary upd-copy-btn" id="upd-skills-open-folder-btn" data-hub-open-folder="plugin" title="Открыть папку плагина">
+              <button type="button" class="secondary upd-icon-btn" id="upd-skills-open-folder-btn" data-hub-open-folder="plugin" title="Открыть папку плагина">
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
-                <span>Папка</span>
               </button>
             </div>
           </div>
@@ -1391,6 +1389,9 @@
               <div class="upd-detail" id="upd-self-detail" hidden></div>
               <div class="upd-pip" id="upd-self-pip" hidden>
                 <code id="upd-self-pip-cmd">python -m pip install -U standkit</code>
+                <button type="button" class="secondary upd-icon-btn" id="upd-self-pip-copy-btn" hidden title="Скопировать команду обновления: python -m pip install -U standkit" aria-label="Скопировать команду pip">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
+                </button>
               </div>
             </div>
             <div class="upd-status">
@@ -1399,10 +1400,6 @@
             <div class="upd-action">
               <!-- GAP-528: та же иконка-копия, что в платной редакции, ВСЕГДА в
                    pip-режиме; в режиме установщика (frozen) — скрыта. -->
-              <button type="button" class="secondary upd-copy-btn" id="upd-self-pip-copy-btn" hidden title="Скопировать команду обновления: python -m pip install -U standkit">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
-                <span class="upd-copy-label">Копировать pip</span>
-              </button>
             </div>
           </div>
           <div class="upd-lock" id="upd-lock">

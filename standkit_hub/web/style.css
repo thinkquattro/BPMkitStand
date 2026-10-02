@@ -587,20 +587,15 @@ body {
   margin-left: auto;
 }
 
-/* Правка владельца 02.10.2026: шапка окна обновлений — сетка с теми же правыми
-   краями, что у строк: «Проверить» стоит над колонкой статуса (левый край
-   группы = левый край чипов), крестик — в углу поверх, вне сетки. */
+/* Правка владельца 02.10.2026: «Проверить обновления» — над колонкой статуса,
+   левее крестика (крестик — в углу поверх, вне потока). */
 .modal-box-updates .modal-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 104px;
-  column-gap: 12px;
-  align-items: start;
+  padding-right: 40px;
+  align-items: flex-start;
 }
 
 .modal-box-updates .upd-header-actions {
-  margin-left: 0;
-  align-items: flex-start;
-  min-width: 0;
+  align-items: flex-end;
 }
 
 .modal-box-updates .upd-header-check-btn {
@@ -610,8 +605,24 @@ body {
 }
 
 .modal-box-updates .upd-checked-at {
-  white-space: normal;
-  line-height: 1.3;
+  white-space: nowrap;
+}
+
+/* Команда pip и иконка копирования рядом с ней. */
+.upd-pip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.upd-pip[hidden] {
+  display: none;
+}
+
+.upd-pip .upd-icon-btn {
+  width: 26px;
+  height: 26px;
 }
 
 .modal-box-updates .modal-header .modal-close-btn {
@@ -2545,11 +2556,11 @@ span.value-has-reason {
 /* GAP-523: команда pip для карточки «Диспетчер стендов» в pip-режиме — сам
    pip диспетчер не запускает, только показывает команду и кнопку «Копировать». */
 .upd-pip {
-  margin-top: 10px;
+  margin-top: 8px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
 }
 
 .upd-pip[hidden] {

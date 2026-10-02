@@ -535,8 +535,8 @@ def test_gap528b_no_restart_button_in_updates_window():
 
 
 def test_gap528b_pip_copy_is_an_icon_button_always_visible_in_pip_mode():
-    """Копирование pip-команды — кнопка с иконкой и подписью «Копировать pip»
-    (02.10.2026: из одной иконки было непонятно, что копируется), лежит
+    """Копирование pip-команды — иконка-кнопка без текста, стоит рядом с самой
+    командой в `.upd-pip` (02.10.2026), лежит
     в колонке действий и не привязана к наличию новой версии: `hidden` в
     разметке (JS решает видимость по режиму hub/self, не по update_available)."""
     html = (_web_dir() / "index.html").read_text(encoding="utf-8")
@@ -547,7 +547,9 @@ def test_gap528b_pip_copy_is_an_icon_button_always_visible_in_pip_mode():
         tag = html[html.rfind("<button", 0, start):html.index(">", start) + 1]
         assert "hidden" in tag, f"{btn_id} по умолчанию скрыта, показывает JS"
         assert "<svg" in html[start:start + 400], f"{btn_id} обязана быть SVG-иконкой"
-        assert "Копировать pip" in html[start:start + 700], f"{btn_id} — с подписью"
+        pip_box = html.rfind('<div class="upd-pip"', 0, start)
+        assert pip_box != -1 and html.find("</div>", pip_box) > start, (
+            f"{btn_id} стоит рядом с командой, внутри .upd-pip (02.10.2026)")
         assert "⧉" not in html[start - 5:start], f"{btn_id} больше не текстовая кнопка"
     assert "Скопировать команду обновления: python -m pip install -U standkit" in html
     # Не завязано на конкретный <code>-контейнер по видимости — копия работает
@@ -557,7 +559,7 @@ def test_gap528b_pip_copy_is_an_icon_button_always_visible_in_pip_mode():
 
 
 def test_gap528b_plugin_folder_button_is_icon_only():
-    """«Папка плагина» — кнопка с SVG папки и короткой подписью «Папка», с
+    """«Папка плагина» — иконка-кнопка (SVG папки), не текстовая надпись, с
     title, называющим путь."""
     html = (_web_dir() / "index.html").read_text(encoding="utf-8")
     assert ">Папка плагина<" not in html

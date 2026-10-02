@@ -2625,8 +2625,8 @@
     // ⟳ — подпись меняет вложенный <span>, не весь textContent кнопки (иначе иконка
     // стирается).
     const checkBtnLabel = byId("updates-check-btn-label");
-    // 02.10.2026: подпись одна для обеих редакций — кнопка стоит над узкой колонкой статуса.
-    if (checkBtnLabel) checkBtnLabel.textContent = "Проверить";
+    // 02.10.2026: подпись одна для обеих редакций.
+    if (checkBtnLabel) checkBtnLabel.textContent = "Проверить обновления";
     syncWhatsNewButtons();
 
     const checkedAt = byId("updates-checked-at");
@@ -2790,7 +2790,8 @@
     if (installBtn) {
       installBtn.hidden = !staged;
       if (staged && !companionBusy && installBtn.dataset.idleLabel === undefined) {
-        installBtn.textContent = `Установить обновление ${staged.version}`;
+        // 02.10.2026: версия уже в чипе справа («доступна X») — на кнопке только стрелка к нему.
+        installBtn.textContent = "Установить →";
       }
     }
     // Установщик готов, а тихая подмена бинаря этой версии недоступна (GAP-463) —
@@ -3334,7 +3335,7 @@
     // Пока кнопка занята, её подпись держит setButtonBusy — перерисовка статуса
     // не имеет права затереть спиннер (иначе он исчезает на середине действия).
     if (!companionBusy && install.dataset.idleLabel === undefined) {
-      install.textContent = staged ? `Установить ${staged}` : "Установить";
+      install.textContent = "Установить →";
     }
     // GAP-528: кнопка «Установить» — только когда действительно есть что ставить
     // тихим обновлением (staged/hasNew без требования установщика), а не всегда.
@@ -3537,7 +3538,9 @@
       if (applyBtn) applyBtn.hidden = true;
       if (stageBtn) stageBtn.hidden = true;
       // GAP-528: строка с `<code>`-командой — ТОЛЬКО когда есть что ставить.
-      if (pipBox) pipBox.hidden = !hasNew;
+      // 02.10.2026: иконка копирования стоит рядом с командой — команда видна
+      // всегда в pip-режиме вместе с ней.
+      if (pipBox) pipBox.hidden = false;
       // GAP-528, правка владельца: иконка «копировать» — ВСЕГДА в pip-режиме,
       // независимо от того, есть новая версия или нет (её ждут и просто «на
       // всякий случай», не только рядом с объявленным обновлением).
@@ -3672,7 +3675,7 @@
 
     const pipBox = byId("upd-self-pip");
     const pipCmd = byId("upd-self-pip-cmd");
-    if (pipBox) pipBox.hidden = !(hasNew && mode !== "frozen");
+    if (pipBox) pipBox.hidden = mode === "frozen";
     if (pipCmd) pipCmd.textContent = (data && data.pip_command) || "python -m pip install -U standkit";
 
     // GAP-528, правка владельца: та же иконка-копия, что в платной редакции —
@@ -3890,11 +3893,6 @@
         try {
           await navigator.clipboard.writeText(text);
           toast("Команда pip скопирована");
-          const label = pipCopyBtn.querySelector(".upd-copy-label");
-          if (label) {
-            label.textContent = "Скопировано ✓";
-            setTimeout(() => { label.textContent = "Копировать pip"; }, 2000);
-          }
         } catch (e) {
           toast("Не удалось скопировать — выделите текст вручную");
         }
