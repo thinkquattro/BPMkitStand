@@ -369,6 +369,21 @@ def test_ui_restart_note_names_running_version_when_known():
         "плашка перезапуска обязана читать версию РЕАЛЬНО работающего процесса")
 
 
+def test_ui_whatsnew_categories_fixed_order_and_fold():
+    """Правка владельца 02.10.2026: категории заметок — по задачам пользователя в
+    фиксированном порядке, «Главное» первым, «Другое» последним; в категории видно
+    5 пунктов, остальное — по «и ещё N»."""
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    order = ["Главное", "Обновления от BPMSoft", "Удалённые стенды и BPMSoft 2.0",
+             "Данные и пакеты", "Страницы и схемы", "Документы",
+             "Надёжность и исправления", "Другое"]
+    block = js[js.index("const WHATSNEW_ORDER"):js.index("const WHATSNEW_VISIBLE")]
+    positions = [block.index(f'"{name}"') for name in order]
+    assert positions == sorted(positions)
+    assert "const WHATSNEW_VISIBLE = 5;" in js
+    assert "и ещё ${extra.length}" in js
+
+
 def test_ui_whatsnew_is_button_and_modal_paid_only():
     """Правка владельца 02.10.2026: «Что нового» — кнопка у версии MCP в окне
     «Обновления» и в «О программе», содержимое — одна модалка; кнопки скрыты по

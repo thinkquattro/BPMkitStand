@@ -2510,6 +2510,30 @@ span.value-has-reason {
   line-height: 1.5;
 }
 
+.whatsnew-group li[hidden] {
+  display: none;
+}
+
+.whatsnew-group-main {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bpmkit-bg);
+}
+
+.link-btn.whatsnew-more {
+  margin: 2px 0 0 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--bpmkit-primary);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.link-btn.whatsnew-more:hover {
+  text-decoration: underline;
+}
+
 .upd-action button[hidden] {
   display: none;
 }

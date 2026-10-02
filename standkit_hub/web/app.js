@@ -3430,11 +3430,28 @@
     });
   }
 
-  /** Строки клиентского блока приходят как «**Область.** текст» — группируем по
-   * области, разметку `**` не показываем. Строки без префикса — в «Прочее». */
+  // Правка владельца 02.10.2026: категории заметок — по задачам пользователя, в
+  // фиксированном порядке; «Главное» первым. Генератор (dev-репо,
+  // tools/gen_release_notes.py) кладёт пункты строками «**Категория.** текст»,
+  // важные — первыми; окно показывает первые WHATSNEW_VISIBLE пунктов категории,
+  // остальное — по клику «и ещё N». Неизвестная категория встаёт перед «Другое».
+  const WHATSNEW_ORDER = [
+    "Главное",
+    "Обновления от BPMSoft",
+    "Удалённые стенды и BPMSoft 2.0",
+    "Данные и пакеты",
+    "Страницы и схемы",
+    "Документы",
+    "Надёжность и исправления",
+    "Другое",
+  ];
+  const WHATSNEW_VISIBLE = 5;
+
+  /** Строки клиентского блока приходят как «**Категория.** текст» — группируем по
+   * категории, разметку `**` не показываем. Строки без префикса — в «Другое». */
   function groupReleaseNotes(lines) {
-    const groups = [];
     const byName = {};
+    const seen = [];
     lines.forEach((raw) => {
       let line = String(raw).replace(/^\s*[-*]\s+/, "").trim();
       if (!line) return;
@@ -3445,15 +3462,24 @@
         line = m[2].trim();
       }
       line = line.replace(/\*\*/g, "");
-      if (line) line = line.charAt(0).toUpperCase() + line.slice(1);
-      const key = name || "Прочее";
+      // Заглавной делаем только кириллицу: «doc-creator», «fs_probe» — имена, их не трогаем.
+      if (/^[а-яё]/.test(line)) line = line.charAt(0).toUpperCase() + line.slice(1);
+      const key = name || "Другое";
       if (!byName[key]) {
         byName[key] = { name: key, items: [] };
-        groups.push(byName[key]);
+        seen.push(key);
       }
       byName[key].items.push(line);
     });
-    return groups;
+    const rank = (name) => {
+      const i = WHATSNEW_ORDER.indexOf(name);
+      if (i >= 0) return i;
+      return WHATSNEW_ORDER.length - 1.5; // перед «Другое»
+    };
+    return seen
+      .map((k, i) => ({ g: byName[k], i }))
+      .sort((x, y) => rank(x.g.name) - rank(y.g.name) || x.i - y.i)
+      .map((x) => x.g);
   }
 
   function openWhatsNew() {
@@ -3467,18 +3493,34 @@
       notesEl.innerHTML = "";
       groupReleaseNotes(data.notes).forEach((g) => {
         const wrap = document.createElement("div");
-        wrap.className = "whatsnew-group";
+        wrap.className = "whatsnew-group" + (g.name === "Главное" ? " whatsnew-group-main" : "");
         const h = document.createElement("div");
         h.className = "whatsnew-group-title";
         h.textContent = g.name;
         const ul = document.createElement("ul");
-        g.items.forEach((text) => {
+        const extra = [];
+        g.items.forEach((text, idx) => {
           const li = document.createElement("li");
           li.textContent = text;
+          if (idx >= WHATSNEW_VISIBLE) {
+            li.hidden = true;
+            extra.push(li);
+          }
           ul.appendChild(li);
         });
         wrap.appendChild(h);
         wrap.appendChild(ul);
+        if (extra.length) {
+          const more = document.createElement("button");
+          more.type = "button";
+          more.className = "link-btn whatsnew-more";
+          more.textContent = `и ещё ${extra.length}`;
+          more.addEventListener("click", () => {
+            extra.forEach((li) => { li.hidden = false; });
+            more.remove();
+          });
+          wrap.appendChild(more);
+        }
         notesEl.appendChild(wrap);
       });
     }
