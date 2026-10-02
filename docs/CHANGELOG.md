@@ -1652,6 +1652,12 @@
 [0.12.12]: https://pypi.org/project/standkit/0.12.12/
 [0.12.11]: https://pypi.org/project/standkit/0.12.11/
 [0.12.10]: https://pypi.org/project/standkit/0.12.10/
+[0.12.8]: https://pypi.org/project/standkit/0.12.8/
+[0.12.5]: https://pypi.org/project/standkit/0.12.5/
+[0.12.4]: https://pypi.org/project/standkit/0.12.4/
+[0.12.3]: https://pypi.org/project/standkit/0.12.3/
+[0.12.2]: https://pypi.org/project/standkit/0.12.2/
+[0.12.1]: https://pypi.org/project/standkit/0.12.1/
 [0.11.5]: https://pypi.org/project/standkit/0.11.5/
 [0.11.4]: https://pypi.org/project/standkit/0.11.4/
 [0.11.3]: https://pypi.org/project/standkit/0.11.3/
