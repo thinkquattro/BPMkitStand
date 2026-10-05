@@ -6,7 +6,7 @@ OS-абстракция запуска процессов: скрытый (headl
 ``spawn_hidden`` — ДОЛГОЖИВУЩИЙ фоновый процесс (стенд, агент), ``run_console``
 — КОРОТКАЯ внешняя консольная утилита (appcmd/sc/docker/kubectl/taskkill/
 powershell), результат которой нужен здесь и сейчас. Прямой ``subprocess.run``
-в остальных модулях пакета запрещён (GAP-138): без ``CREATE_NO_WINDOW``
+в остальных модулях пакета запрещён: без ``CREATE_NO_WINDOW``
 родитель без собственной консоли — ``pythonw``, служба — рождает мигающее
 чёрное окно на каждый вызов.
 
@@ -71,7 +71,7 @@ def run_console(cmd: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
     консольному ребёнку — на экране это всплывающее и тут же исчезающее чёрное
     окно (плюс `conhost.exe`/`OpenConsole.exe` в списке процессов). Из
     обычного терминала дефект не виден: там ребёнок наследует консоль
-    родителя. Ровно так GAP-138 и дожил до владельца: поллер хаба раз в ~12 с
+    родителя. Ровно так и дожил до владельца: поллер хаба раз в ~12 с
     опрашивал IIS-стенд двумя ``appcmd`` — два мигающих окна.
 
     Поэтому НИ ОДИН модуль пакета не зовёт ``subprocess.run`` напрямую: флаг
@@ -222,7 +222,7 @@ def _configure_sid_winapi(advapi32, kernel32) -> None:
     конвертирует переданный Python ``int`` по умолчанию как обычный ``int``
     (32 бита), а НЕ как указатель/хендл (64 бита на x64 Windows) — верхняя
     половина адреса SID/хендла токена молча обрубается, и вызов либо падает,
-    либо (хуже) отдаёт мусорный SID без единого исключения. Ревью GAP-311
+    либо (хуже) отдаёт мусорный SID без единого исключения. Ревью
     поймало это именно на ``ConvertSidToStringSidW`` — токен и хендлы страдают
     от того же класса ошибки.
 
@@ -291,7 +291,7 @@ def current_user_sid() -> Optional[str]:
     процесс. Реестр стендов, ключи шифрования секретов и файлы диспетчера в
     ``run_dir``/``%APPDATA%`` привязаны к профилю КОНКРЕТНОГО пользователя
     Windows, поэтому повышение прав «не под собой» для диспетчера означает не
-    ускорение, а потерю доступа к собственным данным (GAP-311 п.4). SID, а не
+    ускорение, а потерю доступа к собственным данным. SID, а не
     имя — потому что имя переименовывается, а SID пользователя неизменен.
 
     ``None`` — не Windows либо ЛЮБОЙ сбой (WinAPI недоступен, ctypes упал):
@@ -305,7 +305,7 @@ def current_user_sid() -> Optional[str]:
         import ctypes
         from ctypes import wintypes
 
-        # ПРИВАТНЫЙ WinDLL (не глобальный ctypes.windll.*, GAP-311 M6):
+        # ПРИВАТНЫЙ WinDLL (не глобальный ctypes.windll.* M6):
         # `_configure_sid_winapi` мутирует `argtypes`/`restype` функций на
         # объекте DLL — на глобальном `ctypes.windll.advapi32`/`kernel32`
         # это меняло бы поведение ЛЮБОГО другого кода пакета, который зовёт
@@ -345,8 +345,7 @@ def current_user_sid() -> Optional[str]:
 def current_user_name() -> Optional[str]:
     """
     Человекочитаемое имя ТЕКУЩЕГО пользователя ОС — для текста отказа при
-    повышении прав под другой учётной записью (``standkit_hub.elevation``,
-    GAP-311 п.4) и для поля ``user`` в ``GET /api/hub/elevation``.
+    повышении прав под другой учётной записью (``standkit_hub.elevation``) и для поля ``user`` в ``GET /api/hub/elevation``.
 
     На Windows предпочитаем ``ДОМЕН\\Имя`` из ``USERDOMAIN``/``USERNAME`` —
     ровно так Windows подписывает учётку в самом диалоге UAC, поэтому текст
@@ -367,7 +366,7 @@ def current_user_name() -> Optional[str]:
 
 
 def _configure_session_id_winapi(kernel32) -> None:
-    """``argtypes``/``restype`` для ``ProcessIdToSessionId`` (GAP-445) --
+    """``argtypes``/``restype`` для ``ProcessIdToSessionId`` --
     вынесена отдельно для тестируемости на Linux заглушками, тем же приёмом,
     что ``_configure_sid_winapi``/``_configure_process_time_winapi``."""
     from ctypes import wintypes
@@ -380,7 +379,7 @@ def current_session_id(pid: Optional[int] = None) -> Optional[int]:
     """
     Номер сеанса служб терминалов (Terminal Services session id) процесса
     ``pid`` (по умолчанию -- ТЕКУЩЕГО процесса), через WinAPI
-    ``ProcessIdToSessionId`` (GAP-445).
+    ``ProcessIdToSessionId``.
 
     ЗАЧЕМ. Именованный мьютекс диспетчера (``standkit_hub.mutex.HUB_MUTEX_NAME``)
     и Windows SID (``current_user_sid`` выше) отвечают на РАЗНЫЕ вопросы:
@@ -428,7 +427,7 @@ def current_session_id(pid: Optional[int] = None) -> Optional[int]:
 def _configure_process_time_winapi(kernel32) -> None:
     """
     ``argtypes``/``restype`` для ``OpenProcess``/``GetProcessTimes``/
-    ``CloseHandle`` (GAP-311 Н1) — вынесена отдельно для тестируемости на
+    ``CloseHandle`` — вынесена отдельно для тестируемости на
     Linux заглушками, тем же приёмом, что ``_configure_sid_winapi``.
     """
     import ctypes
@@ -465,7 +464,7 @@ def _windows_process_create_time(kernel32, pid: int) -> Optional[float]:
     """
     Читает время СОЗДАНИЯ процесса через ``OpenProcess`` (только
     ``PROCESS_QUERY_LIMITED_INFORMATION`` — минимум прав, достаточный даже
-    для чужой учётки/сервиса) + ``GetProcessTimes`` (GAP-311 Н1). Вынесена
+    для чужой учётки/сервиса) + ``GetProcessTimes``. Вынесена
     отдельно от ``process_create_time``, чтобы принимать готовый ``kernel32``
     в тестах (заглушка вместо реального ``ctypes.WinDLL``).
     """
@@ -498,7 +497,7 @@ def _linux_process_create_time(pid: int, *, proc_root: Optional[Path] = None) ->
     """
     Время СОЗДАНИЯ процесса из ``/proc/<pid>/stat`` (поле 22, ``starttime`` —
     в тиках с момента загрузки системы) + ``btime`` из ``/proc/stat`` (момент
-    загрузки, Unix epoch) — GAP-311 Н1. ``proc_root`` — точка подмены для
+    загрузки, Unix epoch). ``proc_root`` — точка подмены для
     тестов (реальный ``/proc`` на CI недетерминирован).
     """
     root = Path(proc_root) if proc_root else Path("/proc")
@@ -531,7 +530,7 @@ def _linux_process_create_time(pid: int, *, proc_root: Optional[Path] = None) ->
 def process_create_time(pid: int) -> Optional[float]:
     """
     Unix epoch секунд, когда процесс ``pid`` был СОЗДАН ОС — не когда мы его
-    впервые увидели (GAP-311 Н1).
+    впервые увидели.
 
     ЗАЧЕМ. Единственный надёжный признак «это тот же самый процесс между
     двумя проверками», устойчивый к переиспользованию pid: сверка «файл
@@ -586,7 +585,7 @@ def stop(
       2. ожидание до ``timeout`` секунд с опросом раз в ``poll_interval``;
       3. если не завершился — жёстко: ``SIGKILL`` / ``taskkill /F``.
 
-    ``tree`` (Windows-специфично, GAP-311 Б1) — включать ли ``/T`` (дерево
+    ``tree`` — включать ли ``/T`` (дерево
     процессов) в ``taskkill``. ``True`` (по умолчанию) — прежнее поведение,
     нужное для остановки самого СТЕНДА (kestrel вместе со своими детьми).
     ``False`` — убить ТОЛЬКО указанный pid: обязателен, когда таргет — сам
@@ -652,7 +651,7 @@ def _is_alive_windows(pid: int) -> bool:
     except Exception:
         # Фолбэк на tasklist, если ctypes-путь недоступен по какой-то причине.
         # Через run_console — иначе фолбэк сам мигал бы консольным окном
-        # (GAP-138); проверка кода возврата не нужна, важно лишь наличие pid
+        #; проверка кода возврата не нужна, важно лишь наличие pid
         # в выводе.
         try:
             proc = run_console(

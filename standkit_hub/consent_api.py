@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Согласия MCP («Данные и телеметрия») глазами диспетчера — GAP-332.
+"""Согласия MCP («Данные и телеметрия») глазами диспетчера.
 
 Тот же принцип, что у ``standkit_hub/license_api.py`` (см. докстринг там —
 здесь не повторяется целиком): своей логики согласий у диспетчера НЕТ и быть
@@ -23,7 +23,7 @@
 «Данные и телеметрия» обязан быть виден и в свободной редакции — согласия не
 зависят от лицензии вовсе (даже без лицензии MCP собирает обезличенную
 телеметрию, если пользователь её не отключил). `find_cli` здесь — та же
-тонкая обёртка над общим `standkit.cli_resolve` (GAP-273), что у license_api.py
+тонкая обёртка над общим `standkit.cli_resolve`, что у license_api.py
 (см. его докстринг про порядок резолва: настройка → env → автодетект бинаря →
 запуск из исходников).
 
@@ -32,7 +32,7 @@
 * нет понятия «редакция» (`edition`) — согласия видны независимо от лицензии,
   поле в ответе называется `available` (булево), а не `edition`;
 * `consent-info` не бывает `ok: false` по существу (CLI отвечает `rc=0` всегда
-  — контракт GAP-332), но старая версия MCP без модуля `consent` вернёт
+  ), но старая версия MCP без модуля `consent` вернёт
   `{"ok": false, "error": …}` — это тоже «недоступно», а не 500;
 * мутация — ОДНА функция `consent_set` с набором флагов (не три разных, как у
   лицензии): контракт CLI принимает любое подмножество из четырёх флагов за
@@ -82,7 +82,7 @@ __all__ = [
 CONSENT_INFO_TAIL = ("setup", "consent-info", "--json")
 CONSENT_SET_TAIL = ("setup", "consent-set")
 
-#: Флаг → имя опции CLI. Порядок — порядок отображения в UI (GAP-332: сначала
+#: Флаг → имя опции CLI. Порядок — порядок отображения в UI (сначала
 #: телеметрия использования, затем журнал обращений, затем два вида кандидатов).
 CONSENT_FLAGS: dict = {
     "analytics": "--analytics",
@@ -168,7 +168,7 @@ def find_cli(settings, *, extra_roots: Optional[Sequence] = None) -> Optional[li
 # Запуск CLI
 # ------------------------------------------------------------------------------------
 def _default_run(argv: list, *, timeout: float = _CLI_TIMEOUT_S) -> tuple:
-    """Запуск через ЕДИНУЮ точку `standkit.platform.run_console` (GAP-138)."""
+    """Запуск через ЕДИНУЮ точку `standkit.platform.run_console`."""
     try:
         proc = run_console(list(argv), capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout)
@@ -229,7 +229,7 @@ def _run_json(settings, tail: Sequence[str], *, run: Optional[Callable] = None,
         # за пустым `detail` из ветки `ok:false` ниже.
         raise ConsentCliError(failure, detail=_clip(stderr) or f"код возврата {rc}")
     if not payload.get("ok", True):
-        # Контракт GAP-332: `consent-info` отвечает `ok:false` только когда в
+        # Контракт `consent-info` отвечает `ok:false` только когда в
         # MCP нет модуля согласий вовсе (старая версия) — это «недоступно»,
         # а не «согласий нет» (см. докстринг модуля).
         raise ConsentCliError(

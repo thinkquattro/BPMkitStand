@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Именованный Windows-мьютекс диспетчера стендов BPMkit-hub.exe (GAP-229/GAP-284).
+"""Именованный Windows-мьютекс диспетчера стендов BPMkit-hub.exe.
 
-Контекст. Диспетчер (GAP-225, PyInstaller onefile) до этого модуля не сигналил о своей
+Контекст. Диспетчер до этого модуля не сигналил о своей
 работе никак: `standkit_companion/mcp_mutex.py` умеет только ЧИТАТЬ серверный мьютекс
 (SERVER_MUTEX_NAME -- первоисточник BPMkit/server/bpmkit/core.py, отдельный репозиторий
 `bpmsoft-mcp`), а собственного мьютекса у диспетчера не было вовсе. Два живых замера это
 подтвердили:
-  * GAP-229 (04.09.2026): деинсталляция BPMkit при ЗАПУЩЕННОМ диспетчере возвращала rc=0 и
+  * (04.09.2026): деинсталляция BPMkit при ЗАПУЩЕННОМ диспетчере возвращала rc=0 и
     оставляла на диске единственный файл `BPMkit-hub.exe` -- живой процесс держал его
     открытым, а деинсталлятор об этом ничего не знал (у СЕРВЕРА такой гард уже был принят
     живьём -- GAP-155б в поставке BPMkit, мьютекс SERVER_MUTEX_NAME, отказ ДО удаления
     файлов).
-  * GAP-284 (14.09.2026, приёмка 1.1.1 на VM): установка поверх РАБОТАЮЩЕГО диспетчера не
+  * (14.09.2026, приёмка 1.1.1 на VM): установка поверх РАБОТАЮЩЕГО диспетчера не
     блокировалась гейтом мастера (тот проверял только серверный мьютекс) -- занятый
     `BPMkit-hub.exe` доезжал до копирования, и Restart Manager показывал собственный диалог
     Windows вместо понятного сообщения BPMkit.
@@ -52,14 +52,14 @@ _hub_mutex_handle = None
 
 
 def _mutex_security_descriptor_sddl():
-    """SDDL дискреционного ACL мьютекса (GAP-311 В8).
+    """SDDL дискреционного ACL мьютекса.
 
     ЗАЧЕМ. Без явного дескриптора ``CreateMutexW(None, ...)`` создаёт мьютекс с ACL по
     умолчанию токена процесса-создателя. Если диспетчер поднят elevated (после
-    `standkit_hub.elevation` перезапуска УЖЕ elevated-учёткой, см. GAP-311 п.3-5), неэлевейтед
+    `standkit_hub.elevation` перезапуска УЖЕ elevated-учёткой, п.3-5), неэлевейтед
     процесс той же учётки (установщик, деинсталлятор, GUI-обёртка) не всегда может даже
     ОТКРЫТЬ такой мьютекс на SYNCHRONIZE -- Restart Manager и мастер Inno Setup (см. модульный
-    docstring) в этом случае не увидят "диспетчер жив" и ведут себя как при GAP-229/GAP-284.
+    docstring) в этом случае не увидят "диспетчер жив" и ведут себя как при отсутствии диспетчера.
 
     Права: SYSTEM (``SY``) и Administrators (``BA``) -- полный доступ (``GA``, на случай
     диагностики/восстановления руками из-под системной учётки); владелец elevated-процесса --
@@ -84,7 +84,7 @@ def _mutex_security_descriptor_sddl():
 
 def _configure_mutex_sd_winapi(advapi32, kernel32):
     """Явные ``argtypes``/``restype`` для WinAPI-вызовов построения security descriptor
-    (GAP-311 В8) -- та же причина, что у ``standkit.platform._configure_sid_winapi``: без
+ -- та же причина, что у ``standkit.platform._configure_sid_winapi``: без
     явного ``argtypes`` ctypes может усечь 64-битный указатель (``PSECURITY_DESCRIPTOR``,
     возвращаемый по ссылке) до 32 бит на x64, молча повредив дескриптор вместо явной ошибки.
 
@@ -108,7 +108,7 @@ def _configure_mutex_sd_winapi(advapi32, kernel32):
 
 def _sddl_to_security_attributes(advapi32, kernel32, sddl):
     """Строит ``SECURITY_ATTRIBUTES`` из SDDL-строки через
-    ``ConvertStringSecurityDescriptorToSecurityDescriptorW`` (GAP-311 В8).
+    ``ConvertStringSecurityDescriptorToSecurityDescriptorW``.
 
     Возвращает ``(sa, sd_ptr)`` при успехе -- ``sa`` передаётся в ``CreateMutexW`` через
     ``ctypes.byref``, ``sd_ptr`` вызывающая сторона обязана освободить через
@@ -149,7 +149,7 @@ def _win_create_mutex_handle(name):
     «ошибка WinAPI не роняет старт диспетчера» обязан быть зелёным и там (см.
     tests/test_hub_mutex.py, конвенция -- tests/test_server_mutex.py поставки BPMkit).
 
-    С явным security descriptor (GAP-311 В8, см. `_mutex_security_descriptor_sddl`) -- ЛЮБАЯ
+    С явным security descriptor (В8, см. `_mutex_security_descriptor_sddl`) -- ЛЮБАЯ
     ошибка на этапе его построения (``advapi32`` недоступен, SDDL не распарсился и т.п.)
     ПОДАВЛЯЕТСЯ здесь же и приводит к откату на прежнее поведение --
     ``CreateMutexW(None, ...)`` с ACL по умолчанию: мьютекс лучше создать с более широким
@@ -183,7 +183,7 @@ def _win_create_mutex_handle(name):
 
 def acquire_hub_mutex():
     """Создаёт именованный Windows-мьютекс HUB_MUTEX_NAME, живущий до конца процесса
-    (GAP-229/GAP-284) -- сигнал установщику/деинсталлятору BPMkit (Inno Setup,
+ -- сигнал установщику/деинсталлятору BPMkit (Inno Setup,
     ServerMutexRunning/HubMutexRunning в packaging/installer/bpmkit_installer.iss
     репозитория bpmsoft-mcp), что диспетчер стендов запущен. `standkit_hub.__main__.main()`
     зовёт эту функцию непосредственно перед началом обслуживания HTTP -- ПОСЛЕ того, как
