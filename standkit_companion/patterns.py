@@ -1,11 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Канал паттернов: приём дельты с бэкенда издателя и укладка её в базу паттернов MCP.
+"""Канал паттернов: метаданные межрелизных паттернов с бэкенда издателя — индекс без тел.
 
-Зачем модуль. Клиентский MCP читает библиотеку паттернов из markdown-файлов на диске
-(`BPMkit/server/bpmkit/patterns.py`), кэша у него нет — новый файл виден сразу, без
-перезапуска. Значит доставка обновлений сводится к аккуратной записи файлов в тот корень,
-который читатель считает своим. Вся сложность — в слове «аккуратной»; ниже перечислены
-решения, каждое из которых закрывает конкретный способ тихо сломать базу паттернов.
+**Онлайн-выдача.** Тела межрелизных паттернов на диск клиента НЕ пишутся. Компаньон кладёт
+в override-корень только индекс метаданных `dev/patterns_updates_index.json` — в том же
+формате, что и поставочный `dev/patterns_index.json` (заголовок раздела, краткое описание,
+ключ `pat:<id>`), а тело раздела клиентский MCP берёт с бэкенда издателя по лицензии
+(`pattern_get`). Отсутствие тела в ответе `sync` — норма, а не ошибка формата; если старый
+бэкенд всё же прислал `body_markdown`, тело игнорируется и на диск не попадает.
+
+Файлы прежней раскладки — `dev/patterns_<area>_updates.md` и управляемый блок
+«Канал обновлений» в `dev/patterns_index.md` — удаляются `migrate_legacy` при первом же
+проходе новой версии. Это штатная часть перехода, а не потеря данных: те же разделы
+доступны онлайн по ключу из индекса.
+
+Остальная механика канала (курсор, пагинация, отзыв) не изменилась; ниже — решения,
+каждое из которых закрывает конкретный способ тихо сломать индекс.
 
 **1. Курсор — ПАРА `(since, since_id)`.** Курсор только по времени теряет строки с
 одинаковой меткой на границе страницы, поэтому сервер отдаёт `next_since` + `next_since_id`
@@ -31,23 +40,22 @@
 **6. `bundle_sha256` — ЦЕЛОСТНОСТЬ, НЕ ПОДЛИННОСТЬ.** Он считается по тому же массиву,
 что и приехал, поэтому ловит только порчу в канале (обрыв, кривой прокси, битая склейка),
 но никак не подмену злоумышленником — тот пересчитает сумму вместе с телом. Ни в логах,
-ни в UI этот механизм не называется подписью: подпись паттернов — отдельная опция
-(`require_pattern_signature`), и путать их значит обещать пользователю защиту, которой нет.
+ни в UI этот механизм не называется подписью: путать их значит обещать пользователю
+защиту, которой нет.
 
-**7. Порча одной записи не валит канал.** Несовпадение `content_sha256` — причина
-выбросить ОДИН паттерн (с явной причиной в отчёте), а не всю страницу; несовпадение
-`bundle_sha256` — наоборот, повод отбросить страницу целиком и НЕ двигать курсор, чтобы
-следующий тик перезапросил её же.
+**7. Тела не хранятся и не проверяются.** `content_sha256` и подпись относятся к телу,
+которого у компаньона больше нет: их проверяет сторона, выдающая тело (MCP при онлайн-
+запросе). Несовпадение `bundle_sha256` по-прежнему отбрасывает страницу целиком и НЕ двигает
+курсор, чтобы следующий тик перезапросил её же.
 
-**8. Файлы — проекция состояния.** `state.patterns["applied"]` хранит полные записи, а
-файлы рисуются из них целиком при каждом применении (`render`). Поэтому отзыв паттерна —
-это удаление записи из состояния плюс перерисовка, а не хирургия по markdown, которая
-ломается на любом нестандартном оформлении тела.
+**8. Индекс — проекция состояния.** `state.patterns["applied"]` хранит только метаданные
+записей, а индекс рисуется из них целиком при каждом применении (`render`). Отзыв паттерна —
+удаление записи из состояния плюс перерисовка.
 
-**9. Скачанное НИКОГДА не дописывается в поставочные файлы.** Обновления едут в отдельные
-`dev/patterns_<area>_updates.md`, а в индексе занимают управляемый блок между маркерами;
-всё, что вне маркеров, — рукописный текст издателя, он не трогается никогда. Причина
-простая: дописывание в чужой файл делает отзыв и откат неразрешимой задачей.
+**9. Поставочные файлы не трогаются.** Межрелизный индекс — отдельный файл
+`dev/patterns_updates_index.json`; поставочный `patterns_index.json` и рукописный
+`patterns_index.md` компаньон не меняет (единственное исключение — однократная вычистка
+управляемого блока прежней версии, см. `migrate_legacy`).
 
 **10. Override-корень заменяет поставочный ЦЕЛИКОМ.** У читателя приоритет такой:
 env `BPMKIT_PATTERNS_PATH` → автодетект `<package_root>/skills/bpmsoft-dev/references`;
@@ -55,17 +63,14 @@ merge двух корней он не делает. Значит первое ж
 всё поставочное дерево в override (`seed_override_root`) — иначе половина базы паттернов
 исчезнет молча, и заметят это не сегодня, а когда паттерн понадобится.
 
-Правила читателя, под которые здесь генерируется markdown (вычитаны из его кода):
+Формат индекса (совпадает с поставочным `patterns_index.json`, который читает MCP):
 
-* корень валиден, только если в нём есть `dev/patterns_index.md`;
-* файлы библиотеки — `<root>/dev/patterns_*.md`, кроме самого индекса;
-* заголовок раздела — `^#{2,4}\\s+(.*\\S)\\s*$` (уровни 2..4; ровно один `#` не считается);
-* описание раздела — первая непустая строка после заголовка, если она не начинается с `#`;
-* индекс: секции по `^##\\s+(?!#)(.*)$`, файл-подсказка — первое `` `имя.md` `` в заголовке
-  секции (приоритет) либо в теле, строки паттернов — `^\\|\\s*\\*\\*(.+?)\\*\\*\\s*\\|...`;
-* фильтр `area` срабатывает, если `area.lower()` — подстрока файла-подсказки либо токен её
-  basename (разбиение по не-`[a-z0-9]`). Поэтому `patterns_js_ui_updates.md` находится по
-  `area="js_ui"` ровно так же, как поставочный `patterns_js_ui.md`.
+    {"format": 1, "note": "...", "files": [{"file": "dev/patterns_<area>_updates.md",
+     "area": "<area>_updates", "sections": [{"heading": "...", "level": 3,
+     "snippet": "...", "key": "pat:<id>"}]}]}
+
+`file` — виртуальное имя для группировки и фильтра `area` у читателя; файла с таким именем
+на диске нет. `snippet` — однострочное описание из метаданных (≤160 символов, без кода).
 
 Модуль stdlib-only и НЕ импортирует `backend`/`context` в рантайме: от клиента ему нужен
 единственный метод `get_json`, от контекста — набор атрибутов. Это же делает его
@@ -90,9 +95,12 @@ if TYPE_CHECKING:  # только для аннотаций — в рантай�
 
 __all__ = [
     "SYNC_PATH",
+    "STATS_PATH",
+    "STATS_TIMEOUT_SEC",
     "MANAGED_BEGIN",
     "MANAGED_END",
     "UPDATES_SUFFIX",
+    "UPDATES_INDEX_NAME",
     "PAGE_LIMIT",
     "MAX_LIMIT",
     "parse_version",
@@ -101,41 +109,58 @@ __all__ = [
     "bundle_sha256",
     "content_sha256",
     "seed_override_root",
+    "migrate_legacy",
+    "build_index",
     "render",
     "sync",
-    "peek",
+    "fetch_stats",
+    "stats_from_error",
+    "stats_line",
     "snapshot",
     "restore",
 ]
 
 # --------------------------------------------------------------------------------------
-# Контракт эндпоинта
+# Контракт эндпоинтов
 # --------------------------------------------------------------------------------------
 SYNC_PATH = "/v1/content/patterns/sync"
+# Счётчик библиотеки на сервере для окна «Обновления»: тот же конверт лицензии, что у
+# `sync`, ответ `{"sections": int, "updates": int, "updated_at": "ISO"}`.
+STATS_PATH = "/v1/content/patterns/stats"
+# Окно «Обновления» не должно ждать сеть: счётчик — справочная строка, а не операция.
+STATS_TIMEOUT_SEC = 5.0
 
-# Размер страницы. Дефолт сервера — 200, потолок — 500; берём дефолт: страницы с телами
-# паттернов весят сотни килобайт, гнаться за потолком незачем.
+# Размер страницы. Дефолт сервера — 200, потолок — 500; страницы теперь без тел и лёгкие,
+# но дефолт сервера менять незачем.
 PAGE_LIMIT = 200
 MAX_LIMIT = 500
 
 # --------------------------------------------------------------------------------------
 # Раскладка на диске
 # --------------------------------------------------------------------------------------
+# Маркеры управляемого блока ПРЕЖНЕЙ раскладки (индекс-markdown). Новая версия блок не
+# пишет — маркеры нужны только миграции, чтобы его вычистить.
 MANAGED_BEGIN = "<!-- BPMKIT-COMPANION-BEGIN -->"
 MANAGED_END = "<!-- BPMKIT-COMPANION-END -->"
 
-# Суффикс имени файла области. Он НАРОЧНО отличает наши файлы от поставочных
-# (`patterns_js_ui.md` против `patterns_js_ui_updates.md`): по имени всегда видно, что
-# файл сгенерирован каналом и его можно удалить целиком, а фильтр `area` у читателя
-# срабатывает одинаково на обоих.
+# Суффикс области. В индексе он отличает межрелизные разделы от поставочных
+# (`patterns_js_ui.md` против `patterns_js_ui_updates.md`), а фильтр `area` у читателя
+# срабатывает одинаково на обоих. Те же имена прежняя раскладка использовала для файлов
+# с телами — по ним миграция и находит, что удалить.
 UPDATES_SUFFIX = "_updates"
 UPDATES_PREFIX = "patterns_"
 
 DEV_SUBDIR = "dev"
 INDEX_NAME = "patterns_index.md"
+UPDATES_INDEX_NAME = "patterns_updates_index.json"
+INDEX_FORMAT = 1
+INDEX_NOTE = "Generated by companion: metadata of inter-release patterns (no bodies)"
+# Уровень заголовка раздела в индексе — как у разделов поставочной библиотеки.
+SECTION_LEVEL = 3
+KEY_PREFIX = "pat:"
 
-# Заголовок файла области и индекса. Обычный HTML-комментарий: регексы читателя его не
-# видят, а человек, открывший файл руками, сразу понимает, почему его правки пропадут.
+# Заголовок созданного с нуля индекса-markdown. Обычный HTML-комментарий: регексы
+# читателя его не видят, а человек, открывший файл руками, понимает, откуда он взялся.
 _GENERATED_NOTE = ("<!-- Файл сгенерирован каналом обновлений BPMkitStand Companion. "
                    "Правки будут потеряны при следующем применении. -->")
 
@@ -148,31 +173,35 @@ _EMPTY_INDEX = (
     "паттернов был валиден для клиентского MCP.\n"
 )
 
-# Имя области, под которым едет всё, что не удалось привести к безопасному имени файла.
+# Имя области, под которым едет всё, что не удалось привести к безопасному имени.
 _FALLBACK_AREA = "other"
-# Потолок длины имени области. Имя приходит ИЗ СЕТИ и становится именем файла — длину
-# ограничиваем так же жёстко, как набор символов.
+# Потолок длины имени области. Имя приходит ИЗ СЕТИ и становится частью имени в индексе
+# (и в прежней раскладке — именем файла), поэтому длина ограничена так же жёстко, как набор
+# символов.
 _MAX_AREA_LEN = 48
 
-# Описание паттерна в индексе. Длинная строка ломает читаемость таблицы, поэтому режется.
-_SUMMARY_MAX = 200
-_DEFAULT_SUMMARY = "Паттерн из канала обновлений издателя"
+# Краткое описание раздела в индексе: одна строка, без кода.
+_SNIPPET_MAX = 160
+_SNIPPET_FIELDS = ("snippet", "summary", "description")
 
-# Поля записи паттерна, которые сохраняются в состоянии. Всё лишнее из ответа
-# отбрасывается: состояние не должно расти от каждого нового поля сервера.
+# Поля записи, которые сохраняются в состоянии. Тела (`body_markdown`) и подписи сюда
+# НЕ входят: компаньон их больше не хранит, даже если старый бэкенд их прислал.
 _RECORD_KEYS = (
-    "id", "title", "body_markdown", "version", "min_mcp_version", "area", "proof",
-    "pattern_type", "published_at", "updated_at", "status", "content_sha256",
-    "signature", "sig_key_id",
+    "id", "title", "version", "min_mcp_version", "area", "proof",
+    "pattern_type", "published_at", "updated_at", "status", "section_key", "snippet",
 )
 
 # Статусы, при которых запись считается отозванной даже без флага `deleted`.
 _REVOKED_STATUSES = frozenset({"revoked", "deleted"})
 
-_HEADING_IN_BODY_RE = re.compile(r"^(#{1,6})(\s+)(.*)$")
+# Отказы, означающие «нет действующей лицензии» (а не «нет связи»), — для строки окна.
+_LICENSE_KINDS = frozenset({"no_license", "invalid_envelope", "signature_invalid",
+                            "not_yet_valid", "expired", "revoked"})
+
 # Ограда блока кода: до трёх пробелов отступа, затем 3+ символа ` или ~.
 _FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _AREA_BAD_RE = re.compile(r"[^a-z0-9_]+")
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
 
 
 # --------------------------------------------------------------------------------------
@@ -242,16 +271,6 @@ def _updates_rel(area: str) -> str:
     Windows сломал бы и поиск подсказки, и совпадение области.
     """
     return f"{DEV_SUBDIR}/{_updates_name(area)}"
-
-
-def _area_from_name(name: str) -> str:
-    """Обратное преобразование имени файла в область — чтобы понять, чей это файл."""
-    stem = name[:-3] if name.endswith(".md") else name
-    if stem.startswith(UPDATES_PREFIX):
-        stem = stem[len(UPDATES_PREFIX):]
-    if stem.endswith(UPDATES_SUFFIX):
-        stem = stem[:-len(UPDATES_SUFFIX)]
-    return stem
 
 
 # --------------------------------------------------------------------------------------
@@ -405,154 +424,142 @@ def seed_override_root(shipped_root: Any, override_root: Any, *,
 
 
 # --------------------------------------------------------------------------------------
-# Рендер markdown
+# Миграция прежней раскладки
+# --------------------------------------------------------------------------------------
+def _strip_managed_block(text: str) -> str:
+    """Убрать управляемый блок прежней версии, не тронув НИЧЕГО за маркерами.
+
+    Текст вне маркеров — рукописный индекс издателя: голова и хвост берутся срезами
+    исходной строки. Пустые строки, которыми прежняя версия отделяла блок от текста,
+    подрезаются, чтобы файл вернулся к виду «до канала», а не копил переводы строк.
+    """
+    begin = text.find(MANAGED_BEGIN)
+    end = text.find(MANAGED_END)
+    if begin == -1 or end == -1 or end <= begin:
+        return text
+    head = text[:begin]
+    tail = text[end + len(MANAGED_END):]
+    # Файл мог быть сохранён с CRLF (правка руками на Windows) — переводы строк
+    # подрезаются в обоих видах, а дописывается тот, что уже есть в файле.
+    newline = "\r\n" if "\r\n" in text else "\n"
+    if not tail.strip("\r\n"):
+        stripped = head.rstrip("\r\n")
+        return stripped + newline if stripped else ""
+    return head + tail.lstrip("\r\n")
+
+
+def migrate_legacy(override_root: Any) -> dict:
+    """Убрать из override-корня всё, что писала прежняя версия канала.
+
+    Прежняя раскладка клала тела межрелизных паттернов в `dev/patterns_<area>_updates.md`
+    и вживляла управляемый блок в `dev/patterns_index.md`. Теперь тела выдаются онлайн,
+    и эти файлы — устаревшие копии, которые к тому же расходились бы с сервером после
+    первого же отзыва. Удаление — штатная часть перехода.
+
+    Маска ловит ТОЛЬКО имена канала (`patterns_*_updates.md`): поставочный
+    `patterns_js_ui.md` под неё не попадает. Операция идемпотентна — на чистом корне ничего
+    не делает и файлы не трогает.
+    """
+    dev = Path(override_root) / DEV_SUBDIR
+    removed: list = []
+    if dev.is_dir():
+        for path in sorted(dev.glob(f"{UPDATES_PREFIX}*{UPDATES_SUFFIX}.md")):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ChannelError(f"Не удалось удалить {path}", kind="local_io",
+                                   detail=str(exc)) from None
+            removed.append(str(path))
+
+    index_cleaned = False
+    index = dev / INDEX_NAME
+    if index.is_file():
+        text = _read_text(index)
+        if MANAGED_BEGIN in text:
+            cleaned = _strip_managed_block(text)
+            if not cleaned.strip():
+                # Индекс состоял из одного блока (корень создан каналом с нуля): пустым
+                # оставлять нельзя — читатель признаёт корень только при живом индексе.
+                cleaned = _EMPTY_INDEX
+            if cleaned != text:
+                _write_text(index, cleaned)
+                index_cleaned = True
+    return {"files_removed": removed, "index_cleaned": index_cleaned}
+
+
+# --------------------------------------------------------------------------------------
+# Индекс метаданных
 # --------------------------------------------------------------------------------------
 def _text_of(value: Any) -> str:
     """Однострочная нормализация текста из сети: без переводов строк и лишних пробелов."""
     return " ".join(str(value if value is not None else "").split())
 
 
-def _escape_cell(value: str) -> str:
-    """Экранирование для ячейки таблицы. `|` внутри значения разорвал бы строку на две
-    ячейки, и строка перестала бы соответствовать regex читателя."""
-    return value.replace("|", r"\|")
+def _heading(rec: dict) -> str:
+    return _text_of(rec.get("title")) or f"Паттерн #{rec.get('id')}"
 
 
-def _row_title(rec: dict) -> str:
-    """Заголовок для строки индекса: без `**` и без `|`.
+def _snippet_of(item: dict) -> str:
+    """Краткое описание раздела из МЕТАДАННЫХ записи: одна строка, без кода, ≤160 символов.
 
-    `**` снимается потому, что regex читателя нежадный (`\\*\\*(.+?)\\*\\*`) и на вложенном
-    выделении обрезал бы название на полуслове.
+    Тело паттерна для описания не используется намеренно — даже если старый бэкенд его
+    прислал: тело компаньону больше не принадлежит. Нет описания в метаданных — пустая
+    строка (читатель индекса это допускает).
     """
-    title = _text_of(rec.get("title")).replace("**", "")
-    title = _escape_cell(title)
-    if not title:
-        title = f"Паттерн #{rec.get('id')}"
-    return title
-
-
-def _shift_headings(body: str) -> str:
-    """Сдвинуть заголовки тела на уровень глубже, НЕ трогая содержимое блоков кода.
-
-    Тело паттерна почти всегда начинается с `## Задача` — вставленное как есть, оно
-    оказалось бы на одном уровне с заголовком самого паттерна, и раздел «поехал» бы:
-    читатель считает разделом каждый `^#{2,4}`. Сдвиг гарантирует, что единственный
-    заголовок второго уровня в файле — название паттерна.
-
-    Внутри ограждённых блоков (``` / ~~~) строки не трогаются: там `#` — это комментарий
-    shell/python или markdown-пример, и «починка» уровня испортила бы работающий код.
-    Уровень результата не опускается ниже третьего (иначе `# Заголовок` из тела снова
-    стал бы разделом верхнего уровня) и не превышает шестого.
-    """
-    lines = str(body or "").splitlines()
-    out = []
-    fence = ""  # символ активной ограды: "" = мы вне блока кода
-    for line in lines:
-        match = _FENCE_RE.match(line)
-        if match:
-            marker = match.group(1)[0]
-            if not fence:
-                fence = marker
-            elif marker == fence:
-                fence = ""
-            out.append(line)
+    for field in _SNIPPET_FIELDS:
+        raw = item.get(field)
+        if not isinstance(raw, str) or not raw.strip():
             continue
-        if fence:
-            out.append(line)
+        lines = []
+        for line in raw.splitlines():
+            if _FENCE_RE.match(line):
+                break  # всё, что ниже ограды кода, в описание не идёт
+            lines.append(line)
+        text = _text_of(" ".join(lines).replace("**", "").replace("`", ""))
+        if not text:
             continue
-        heading = _HEADING_IN_BODY_RE.match(line)
-        if heading:
-            level = min(6, max(3, len(heading.group(1)) + 1))
-            out.append("#" * level + heading.group(2) + heading.group(3))
-            continue
-        out.append(line)
-    return "\n".join(out)
-
-
-def _summary(rec: dict) -> str:
-    """Описание паттерна одной строкой — для колонки «Когда использовать» в индексе.
-
-    Берётся первая содержательная строка тела (не заголовок, не ограда кода) — ровно то,
-    что читатель считает описанием раздела. `**` снимаются по его же правилу.
-    """
-    for raw in str(rec.get("body_markdown") or "").splitlines():
-        if _FENCE_RE.match(raw):
-            break
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        line = line.lstrip(">").strip()
-        line = _text_of(line.replace("**", ""))
-        if not line:
-            continue
-        if len(line) > _SUMMARY_MAX:
-            line = line[:_SUMMARY_MAX].rstrip() + "…"
-        return _escape_cell(line)
-    return _DEFAULT_SUMMARY
-
-
-def _render_area_file(area: str, records: list) -> str:
-    """Файл одной области: шапка-комментарий и по разделу второго уровня на паттерн."""
-    parts = [_GENERATED_NOTE, "",
-             f"<!-- Область: {area}. Источник: канал обновлений издателя BPMkit. -->", ""]
-    for rec in records:
-        title = _text_of(rec.get("title")) or f"Паттерн #{rec.get('id')}"
-        parts.append(f"## {title}")
-        parts.append("")
-        body = _shift_headings(rec.get("body_markdown"))
-        if body.strip():
-            parts.append(body.strip("\n"))
-            parts.append("")
-    return "\n".join(parts).rstrip("\n") + "\n"
-
-
-def _managed_block(groups: dict) -> str:
-    """Управляемый блок индекса: по секции на область. Пустые группы → пустая строка,
-    то есть блок из индекса исчезает целиком (а не остаётся пустым огрызком)."""
-    if not groups:
-        return ""
-    lines = [MANAGED_BEGIN, "", _GENERATED_NOTE, ""]
-    for area in sorted(groups):
-        lines.append(f"## Канал обновлений: {area} (`{_updates_rel(area)}`)")
-        lines.append("")
-        lines.append("| Паттерн | Когда использовать |")
-        lines.append("|---------|--------------------|")
-        for rec in groups[area]:
-            lines.append(f"| **{_row_title(rec)}** | {_summary(rec)} |")
-        lines.append("")
-    lines.append(MANAGED_END)
-    return "\n".join(lines)
-
-
-def _with_managed_block(text: str, block: str) -> str:
-    """Вживить/обновить/убрать управляемый блок, не тронув НИЧЕГО за маркерами.
-
-    Текст вне маркеров — рукописный индекс издателя. Он переносится посимвольно: и голова,
-    и хвост берутся срезами исходной строки. Единственная вольность — при ПЕРВОЙ вставке
-    подрезаются пустые строки в конце файла, иначе каждый цикл «вставили-убрали» добавлял
-    бы по переводу строки.
-    """
-    begin = text.find(MANAGED_BEGIN)
-    end = text.find(MANAGED_END)
-    if begin != -1 and end != -1 and end > begin:
-        head = text[:begin]
-        tail = text[end + len(MANAGED_END):]
-        if not block:
-            return head + tail
-        return head + block + tail
-    if not block:
+        if len(text) > _SNIPPET_MAX:
+            text = text[:_SNIPPET_MAX - 1].rstrip() + "…"
         return text
-    if not text.strip():
-        return block + "\n"
-    return text.rstrip("\n") + "\n\n" + block + "\n"
+    return ""
+
+
+def _section_key(rec: dict) -> str:
+    key = _text_of(rec.get("section_key"))
+    return key if key.startswith(KEY_PREFIX) else f"{KEY_PREFIX}{rec.get('id')}"
+
+
+def build_index(applied: list) -> dict:
+    """Записи состояния → объект индекса в формате поставочного `patterns_index.json`.
+
+    Порядок групп и разделов не зависит от порядка приезда страниц — иначе файл
+    «дёргался» бы на ровном месте и перезаписывался без изменения содержания.
+    """
+    groups: dict = {}
+    for rec in applied or []:
+        groups.setdefault(sanitize_area(rec.get("area")), []).append(rec)
+    files = []
+    for area in sorted(groups):
+        records = sorted(groups[area],
+                         key=lambda r: (_as_int(r.get("id")) or 0, _heading(r)))
+        files.append({
+            "file": _updates_rel(area),
+            "area": f"{area}{UPDATES_SUFFIX}",
+            "sections": [{"heading": _heading(rec), "level": SECTION_LEVEL,
+                          "snippet": str(rec.get("snippet") or ""),
+                          "key": _section_key(rec)} for rec in records],
+        })
+    return {"format": INDEX_FORMAT, "note": INDEX_NOTE, "files": files}
 
 
 def render(applied: list, override_root: Any) -> dict:
-    """Перерисовать файлы канала из состояния.
+    """Перерисовать индекс метаданных из состояния (и вычистить прежнюю раскладку).
 
     Полная перерисовка, а не инкремент: только так отзыв паттерна и откат к снимку
-    получаются корректными по построению. Файлы, чья область опустела, удаляются —
-    пустой `patterns_<area>_updates.md` иначе остался бы висеть в выдаче читателя.
+    получаются корректными по построению. Файл пишется атомарно и только при реальном
+    изменении содержимого.
     """
     root = Path(override_root)
     dev = root / DEV_SUBDIR
@@ -562,45 +569,20 @@ def render(applied: list, override_root: Any) -> dict:
         raise ChannelError(f"Не удалось создать каталог {dev}", kind="local_io",
                            detail=str(exc)) from None
 
-    groups: dict = {}
-    for rec in applied or []:
-        groups.setdefault(sanitize_area(rec.get("area")), []).append(rec)
-    for records in groups.values():
-        # Порядок разделов в файле не должен зависеть от порядка приезда страниц —
-        # иначе дифф файла «взрывается» на ровном месте.
-        records.sort(key=lambda r: (_as_int(r.get("id")) or 0, _text_of(r.get("title"))))
-
+    legacy = migrate_legacy(root)
+    index = build_index(applied)
     written: list = []
-    removed: list = []
-
-    for area in sorted(groups):
-        path = dev / _updates_name(area)
-        if _write_if_changed(path, _render_area_file(area, groups[area])):
-            written.append(str(path))
-
-    # Осиротевшие файлы канала. Маска ловит ТОЛЬКО наши имена — поставочный
-    # `patterns_js_ui.md` под неё не попадает и удалён быть не может.
-    for path in sorted(dev.glob(f"{UPDATES_PREFIX}*{UPDATES_SUFFIX}.md")):
-        if _area_from_name(path.name) in groups:
-            continue
-        try:
-            path.unlink()
-        except OSError as exc:
-            raise ChannelError(f"Не удалось удалить {path}", kind="local_io",
-                               detail=str(exc)) from None
-        removed.append(str(path))
-
-    index = dev / INDEX_NAME
-    updated_index = _with_managed_block(_read_text(index), _managed_block(groups))
-    if not updated_index.strip():
-        updated_index = _EMPTY_INDEX
-    if _write_if_changed(index, updated_index):
-        written.append(str(index))
-
+    path = dev / UPDATES_INDEX_NAME
+    text = json.dumps(index, ensure_ascii=False, indent=2) + "\n"
+    if _write_if_changed(path, text):
+        written.append(str(path))
+    if legacy["index_cleaned"]:
+        written.append(str(dev / INDEX_NAME))
     return {
         "files_written": written,
-        "files_removed": removed,
-        "areas": {area: len(recs) for area, recs in sorted(groups.items())},
+        "files_removed": list(legacy["files_removed"]),
+        "areas": {entry["area"][:-len(UPDATES_SUFFIX)]: len(entry["sections"])
+                  for entry in index["files"]},
     }
 
 
@@ -615,17 +597,34 @@ def _as_int(value: Any) -> Optional[int]:
 
 
 def _normalize(item: dict) -> dict:
-    """Запись сервера → запись состояния: только известные поля, id — целым.
+    """Запись сервера → запись состояния: только метаданные, id — целым.
 
-    Лишние поля отбрасываются намеренно: состояние читает и пишет каждый тик, и
-    неограниченный рост от новых полей сервера — это рост файла на диске у пользователя.
+    Тело (`body_markdown`), подписи и прочие поля отбрасываются намеренно: тело выдаётся
+    онлайн и компаньону не принадлежит, даже если его прислал старый бэкенд; а
+    неограниченный рост состояния от новых полей сервера — это рост файла на диске.
     """
     rec = {key: item.get(key) for key in _RECORD_KEYS}
     rec["id"] = _as_int(item.get("id"))
     rec["title"] = str(item.get("title") or "")
-    rec["body_markdown"] = str(item.get("body_markdown") or "")
     rec["area"] = str(item.get("area") or "")
+    rec["snippet"] = _snippet_of(item)
+    rec["section_key"] = _section_key(rec)
     return rec
+
+
+def _metadata_only(rec: dict) -> dict:
+    """Запись из состояния прежней версии (с телом) → только метаданные.
+
+    Прежняя версия хранила в состоянии полные тела; при первом проходе новой они
+    вычищаются и из состояния, а не только с диска.
+    """
+    if not isinstance(rec, dict):
+        return rec
+    clean = {key: rec.get(key) for key in _RECORD_KEYS}
+    if not clean.get("snippet"):
+        clean["snippet"] = _snippet_of(rec)
+    clean["section_key"] = _section_key(clean)
+    return clean
 
 
 def _is_tombstone(item: dict) -> bool:
@@ -642,7 +641,7 @@ def _check_page(payload: Any) -> list:
     Несовпадение `bundle_sha256` отбрасывает страницу ЦЕЛИКОМ и не двигает курсор:
     следующий тик перезапросит ровно её же. Отсутствующая сумма (старый сервер) проверку
     не проваливает — иначе клиент перестал бы работать с любой версией бэкенда, кроме
-    последней; порчу тел в этом случае ловит `content_sha256` каждой записи.
+    последней.
     """
     if not isinstance(payload, dict):
         raise ChannelError("Ответ дельты паттернов не похож на объект",
@@ -670,41 +669,115 @@ def _skip(rid: Any, rec: dict, reason: str, note: str) -> dict:
             "area": str(rec.get("area") or ""), "reason": reason, "note": note}
 
 
-def peek(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext") -> dict:
-    """Сколько паттернов ждёт у издателя ПОСЛЕ текущего курсора — без применения (кнопка «Загрузить новые» в окне «Обновления» видна только когда
-    ждущие есть). Один запрос той же страницы `sync` с тем же курсором; курсор,
-    файлы и применённые записи НЕ трогаются. Результат — в `patterns.pending_count`
-    (+ `pending_more`: за страницей есть ещё), сводка отдаёт его как
-    `new_available`. До первой синхронизации (`seeded` ложно) — не считаем:
-    первый проход и так применит поставку целиком.
+def _int_field(payload: dict, key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ChannelError("Счётчик паттернов на сервере не разобран", kind="bad_response",
+                           detail=f"поле {key}: {value!r}")
+    return value
+
+
+def fetch_stats(client: "BackendClient", *, timeout: float = STATS_TIMEOUT_SEC) -> dict:
+    """Сколько разделов библиотеки паттернов на сервере и когда она обновлялась.
+
+    Справочный запрос для окна «Обновления»: курсор, индекс и состояние НЕ трогаются.
+    Таймаут короткий — строка в окне не стоит того, чтобы ждать сеть. Отказ поднимается
+    наверх типизированным: что из него показать, решает `stats_from_error`.
     """
-    block = state.patterns
-    if not block.get("seeded"):
-        return {"pending": 0, "more": False, "skipped": "not_seeded"}
-    params: dict = {"limit": min(PAGE_LIMIT, MAX_LIMIT)}
-    mcp_version = str(getattr(ctx, "mcp_version", "") or "").strip()
-    if mcp_version:
-        params["mcp_version"] = mcp_version
-    cursor_since = block.get("since")
-    cursor_id = block.get("since_id")
-    if cursor_since is not None and cursor_id is not None:
-        params["since"] = cursor_since
-        params["since_id"] = cursor_id
-    payload, _headers = client.get_json(SYNC_PATH, params=params)
-    items = _check_page(payload)
-    pending = len(items)
-    more = bool(isinstance(payload, dict) and payload.get("has_more"))
-    block["pending_count"] = pending
-    block["pending_more"] = more
+    if hasattr(client, "has_envelope") and not client.has_envelope:
+        raise ChannelError("Лицензионный ключ не найден на этой машине", kind="no_license")
+    try:
+        payload, _headers = client.get_json(STATS_PATH, timeout=timeout)
+    except TypeError:
+        # Подставной клиент без параметра таймаута (тесты, старые обёртки).
+        payload, _headers = client.get_json(STATS_PATH)
+    if not isinstance(payload, dict):
+        raise ChannelError("Ответ счётчика паттернов не похож на объект",
+                           kind="bad_response",
+                           detail=f"тип тела: {type(payload).__name__}")
+    sections = _int_field(payload, "sections")
+    updates = _int_field(payload, "updates")
+    updated_at = payload.get("updated_at")
     from .state import utc_now_iso  # локально: state.py сам импортирует patterns
-    block["pending_checked_at"] = utc_now_iso()
-    state.save()
-    return {"pending": pending, "more": more}
+    return {
+        "status": "ok",
+        "sections": sections,
+        "updates": updates,
+        "total": sections + updates,
+        "updated_at": updated_at if isinstance(updated_at, str) else None,
+        "checked_at": utc_now_iso(),
+        "detail": "",
+    }
+
+
+def stats_from_error(exc: BaseException) -> dict:
+    """Отказ запроса счётчика → запись для окна: «лицензия не активна» или «нет связи».
+
+    Всё, что не про лицензию, для человека означает одно — сервер сейчас не ответил
+    (сеть, таймаут, ошибка бэкенда, непонятный ответ); подробность остаётся в `detail`.
+    """
+    from .state import utc_now_iso  # локально: state.py сам импортирует patterns
+    kind = str(getattr(exc, "kind", "") or "")
+    status = "no_license" if kind in _LICENSE_KINDS else "offline"
+    detail = str(exc)[:200]
+    return {"status": status, "kind": kind or "unknown", "detail": detail,
+            "checked_at": utc_now_iso()}
+
+
+def _plural_sections(count: int) -> str:
+    n = abs(int(count))
+    tens = n % 100
+    ones = n % 10
+    if 11 <= tens <= 14:
+        word = "разделов"
+    elif ones == 1:
+        word = "раздел"
+    elif 2 <= ones <= 4:
+        word = "раздела"
+    else:
+        word = "разделов"
+    return f"{n} {word}"
+
+
+def _date_ru(value: Any) -> str:
+    """ISO-метка → `ДД.ММ.ГГГГ` (дата как есть в метке, без пересчёта зоны)."""
+    match = _ISO_DATE_RE.match(str(value or "").strip())
+    if not match:
+        return ""
+    year, month, day = match.groups()
+    return f"{day}.{month}.{year}"
+
+
+def stats_line(stats: Optional[dict]) -> str:
+    """Строка пункта «Паттерны» в окне «Обновления».
+
+    `ok` — «Паттерны: N разделов на сервере, библиотека обновлена ДД.ММ.ГГГГ, доступ по
+    лицензии» (N = разделы + межрелизные обновления); нет лицензии — «доступ по
+    лицензии: лицензия не активна»; сеть/ошибка — «нет связи с сервером».
+    """
+    stats = stats if isinstance(stats, dict) else {}
+    status = stats.get("status")
+    if status == "ok":
+        total = int(stats.get("total") if stats.get("total") is not None
+                    else int(stats.get("sections") or 0) + int(stats.get("updates") or 0))
+        parts = [f"Паттерны: {_plural_sections(total)} на сервере"]
+        date = _date_ru(stats.get("updated_at"))
+        if date:
+            parts.append(f"библиотека обновлена {date}")
+        parts.append("доступ по лицензии")
+        return ", ".join(parts)
+    if status == "no_license":
+        return "Паттерны: доступ по лицензии: лицензия не активна"
+    if status == "offline":
+        return "Паттерны: нет связи с сервером"
+    if status == "disabled":
+        return "Паттерны: канал обновлений выключен в настройках"
+    return "Паттерны: проверяем сервер…"
 
 
 def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext",
          settings: Any, *, max_pages: int = 200) -> dict:
-    """Полный проход канала паттернов: seed → пагинация → применение → рендер → состояние.
+    """Полный проход канала паттернов: seed → миграция → пагинация → индекс → состояние.
 
     `ChannelError` наружу НЕ ловится: решение «повторить, промолчать или показать
     пользователю» принимает планировщик по полям `retriable`/`user_visible`, и глушить
@@ -721,9 +794,10 @@ def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext"
             detail="пустой override_patterns_root в лицензионном контексте")
     shipped_root = str(getattr(ctx, "shipped_patterns_root", "") or "").strip()
     mcp_version = str(getattr(ctx, "mcp_version", "") or "").strip()
-    require_signature = bool(getattr(settings, "require_pattern_signature", False))
-
     seed = seed_override_root(shipped_root, override_root)
+    # Прежняя раскладка (тела на диске) вычищается ДО сети: переход на онлайн-выдачу не
+    # должен ждать первого удачного ответа сервера.
+    legacy = migrate_legacy(override_root)
     # сохраняем размер поставочной базы, только если он посчитан честно —
     # `None` (корень не задан/не читается) не должен затирать ранее известное значение.
     if seed.get("shipped_count") is not None:
@@ -736,9 +810,9 @@ def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext"
 
     current: dict = {}
     for rec in block.get("applied") or []:
-        rid = _as_int(rec.get("id"))
+        rid = _as_int(rec.get("id")) if isinstance(rec, dict) else None
         if rid is not None:
-            current[rid] = rec
+            current[rid] = _metadata_only(rec)
 
     fetched = 0
     applied_count = 0
@@ -778,20 +852,9 @@ def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext"
                     removed_count += 1
                 continue
 
+            # Тело (если старый бэкенд его прислал) отбрасывается здесь же: в состояние и
+            # на диск попадают только метаданные. Пустое тело — норма онлайн-выдачи.
             rec = _normalize(item)
-            expected = str(rec.get("content_sha256") or "").strip().lower()
-            if expected and content_sha256(rec["body_markdown"]) != expected:
-                skipped.append(_skip(rid, rec, "content_mismatch",
-                                     "контрольная сумма тела паттерна не сошлась"))
-                continue
-            if not rec["body_markdown"].strip():
-                skipped.append(_skip(rid, rec, "empty_body",
-                                     "пустое тело паттерна — записывать нечего"))
-                continue
-            if require_signature and not str(rec.get("signature") or "").strip():
-                skipped.append(_skip(rid, rec, "signature_required",
-                                     "включён строгий режим, а подписи у паттерна нет"))
-                continue
             min_version = str(rec.get("min_mcp_version") or "").strip()
             # Пустая версия MCP в контексте — не повод отфильтровать всё: сравнивать
             # не с чем, и серверный фильтр остаётся единственным. Иначе неизвестная
@@ -828,13 +891,8 @@ def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext"
     block["since_id"] = cursor_id
     block["seeded"] = True
     block["root"] = str(Path(override_root))
-    # «последний тик реально что-то поставил» — единственный сигнал, по
-    # которому UI показывает кнопку «Загрузить новые» (см. `state.py::summary`).
-    # Пустая дельта сбрасывает флаг сама, следующим тиком.
+    # «последний тик реально что-то поменял в индексе»; пустая дельта сбрасывает флаг.
     block["had_new_last_run"] = bool(applied_count or removed_count)
-    # очередь издателя только что осушена — ожидающих больше нет.
-    block["pending_count"] = 0
-    block["pending_more"] = False
     if last_bundle:
         block["last_bundle_sha256"] = last_bundle
     detail = (f"страниц {pages}, получено {fetched}, применено {applied_count}, "
@@ -852,7 +910,8 @@ def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext"
         "pages": pages,
         "cursor": {"since": cursor_since, "since_id": cursor_id},
         "files_written": files["files_written"],
-        "files_removed": files["files_removed"],
+        "files_removed": list(legacy["files_removed"]) + files["files_removed"],
+        "legacy_index_cleaned": bool(legacy["index_cleaned"]),
         "seed": seed,
     }
 

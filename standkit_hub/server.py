@@ -115,10 +115,12 @@ _log = _hub_logger()
 try:
     import standkit_companion as _companion
     from standkit_companion import context as _companion_context
+    from standkit_companion import patterns as _companion_patterns
     from standkit_companion import runner as _companion_runner
 except Exception:  # noqa: BLE001 - см. комментарий выше: битая платная редакция
     _companion = None
     _companion_context = None
+    _companion_patterns = None
     _companion_runner = None
 
 # Порт хаба по умолчанию. ФИКСИРОВАННЫЙ осознанно: раньше хаб стартовал на
@@ -2941,6 +2943,37 @@ def make_handler(
                 status["patterns"] = patterns
             self._send_json(200, status)
 
+        def _api_companion_patterns_stats(self) -> None:
+            """Счётчик библиотеки паттернов на сервере для окна «Обновления».
+
+            Тела паттернов выдаются онлайн по лицензии, загружать на диск нечего — окно
+            показывает только справку: сколько разделов на сервере и когда библиотека
+            обновлялась. Ответ НЕ ждёт сеть: отдаётся последнее известное значение, а
+            устаревшее обновляется в фоновом потоке канала (``refreshing: true`` —
+            UI перечитает чуть позже). Отказ превращается в строку «нет связи с
+            сервером»/«лицензия не активна», а не в ошибку ответа.
+            """
+            if not self._companion_guard():
+                return
+            if not self._companion_enabled():
+                stats = {"status": "disabled", "refreshing": False}
+                if _companion_patterns is not None:
+                    stats["line"] = _companion_patterns.stats_line(stats)
+                self._send_json(200, stats)
+                return
+            try:
+                runner = self._companion_scheduler()
+                if runner is None:
+                    # Канал включён, но планировщика нет — одноразовый раннер: фоновый
+                    # поток запишет результат в состояние, следующий опрос его увидит.
+                    runner = _companion_runner.build_runner(config_path)
+                stats = runner.patterns_stats()
+            except Exception as exc:  # noqa: BLE001 - справочная строка не роняет окно
+                stats = _companion_patterns.stats_from_error(exc)
+                stats["line"] = _companion_patterns.stats_line(stats)
+                stats["refreshing"] = False
+            self._send_json(200, stats)
+
         def _api_companion_action(self, action: str) -> None:
             """Одно явное действие человека (кнопка UI) → ``runner.run_action``.
 
@@ -3120,6 +3153,14 @@ def make_handler(
                 if not self._authorize_read():
                     return
                 self._api_companion_status()
+                return
+
+            if path == "/api/companion/patterns-stats":
+                # Справочный счётчик библиотеки паттернов на сервере — обычное чтение;
+                # сетевой запрос (если значение устарело) идёт в фоне, ответ мгновенный.
+                if not self._authorize_read():
+                    return
+                self._api_companion_patterns_stats()
                 return
 
             if path == "/api/hub/elevation":

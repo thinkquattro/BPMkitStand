@@ -346,21 +346,16 @@ def _web_dir() -> Path:
     return Path(server_module.__file__).parent / "web"
 
 
-def test_ui_has_four_distinct_pattern_row_states():
-    """GAP-528: окно переверстано по компактному макету («иконка | название +
-    статус-строка | кнопки» — updates_mockup_v2.html), и два прежних текстовых
-    состояния «новых нет»/«дельта применена» слились в одну строку с чипом
-    «актуально» — макет владельца не оставляет места под абзац-объяснение. Тест
-    по-прежнему держит различимость состояний «остановлен», «ни разу не
-    отрабатывал» и «отработал» (см. renderPatternsRow), просто по новым
-    текстам/чипу, а не по старой дословной фразе."""
+def test_ui_patterns_row_is_info_only_with_server_line():
+    """Пункт «Паттерны» в окне «Обновления» — только справка о библиотеке на сервере:
+    строку собирает канал (`patterns.server.line`), окно запрашивает счётчик отдельным
+    мгновенным GET, а остановленный цикл индекса виден строкой деталей."""
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
-    assert "Первая синхронизация паттернов ещё не проходила" in js
-    assert "Синхронизация паттернов остановлена" in js
-    # Состояние «отработал успешно» — единая строка с чипом «актуально», а не
-    # прежний развёрнутый текст (см. renderPatternsRow, ветки 3/4).
-    assert 'setChip("upd-patterns-chip", "ok", "актуально"' in js
-    assert "· автоматически, ${whenChecked}" in js
+    assert "/api/companion/patterns-stats" in js
+    assert "s.line ||" in js
+    assert 'setChip("upd-patterns-chip", "ok", "онлайн"' in js
+    assert "Индекс разделов не обновлён" in js
+    assert "refreshPatternsStats();" in js, "окно обязано запросить счётчик при открытии"
 
 
 def test_ui_restart_note_names_running_version_when_known():
@@ -587,25 +582,29 @@ def test_gap528b_plugin_folder_button_is_icon_only():
     assert "title=" in button_html
 
 
-def test_gap528b_patterns_button_only_when_new_available():
-    """«Загрузить новые» у паттернов — видна только когда канал сообщает
-    `patterns.new_available` (см. `standkit_companion.state.CompanionState.summary`);
-    в разметке кнопка по умолчанию `hidden`, JS решает по этому полю."""
+def test_patterns_row_has_no_download_buttons():
+    """Тела паттернов выдаются онлайн — у пункта «Паттерны» нет кнопок загрузки."""
     html = (_web_dir() / "index.html").read_text(encoding="utf-8")
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
-    assert '<button type="button" class="secondary" id="upd-patterns-apply-btn" data-companion-action="sync_patterns" hidden>Загрузить новые</button>' in html
-    assert "new_available" in js, (
-        "renderPatternsRow обязан читать summary.patterns.new_available")
+    assert "upd-patterns-apply-btn" not in html
+    assert 'data-companion-action="sync_patterns"' not in html
+    assert "Загрузить новые" not in html
+    assert "upd-patterns-apply-btn" not in js
+    assert "new_available" not in js
 
 
-def test_gap528b_state_summary_exposes_new_available_field():
-    """Бэкенд: `CompanionState.summary()["patterns"]["new_available"]` — поле
-    для кнопки «Загрузить новые», отдельное от `applied_count`/`total_available`."""
+def test_state_summary_exposes_server_stats_line():
+    """Бэкенд: `CompanionState.summary()["patterns"]["server"]` — счётчик библиотеки на
+    сервере с готовой строкой окна; до первого запроса — «проверяем сервер»."""
     from standkit_companion.state import CompanionState
     state = CompanionState(_web_dir() / "нет-такого-файла.json")
     summary = state.summary()
-    assert "new_available" in summary["patterns"]
-    assert summary["patterns"]["new_available"] is False
+    assert "new_available" not in summary["patterns"]
+    assert summary["patterns"]["server"]["line"] == "Паттерны: проверяем сервер…"
+    state.patterns["server"] = {"status": "ok", "sections": 40, "updates": 2,
+                                "updated_at": "2026-10-05T08:00:00Z"}
+    assert state.summary()["patterns"]["server"]["line"] == (
+        "Паттерны: 42 раздела на сервере, библиотека обновлена 05.10.2026, доступ по лицензии")
 
 
 def test_ui_whatsnew_shown_whenever_backend_has_notes_and_single_checked_line():

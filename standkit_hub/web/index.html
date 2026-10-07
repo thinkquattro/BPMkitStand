@@ -1221,7 +1221,7 @@
        свободная (`#upd-free-rows`) — только диспетчер по PyPI (`GET
        /api/hub/self-version`). Какой блок виден — решает
        app.js::applyUpdatesEditionView по факту ответа /api/companion/status.
-       Кнопка каждого канала («Загрузить новые»/«Установить»/«Скачать»/
+       Кнопка каждого канала («Установить»/«Скачать»/
        «Обновить скиллы») видна ТОЛЬКО когда есть что поставить — прячет её
        та же функция, что красит чип (см. render*Row в app.js); кнопки
        «Перезапустить» в окне больше нет — перезапуск диспетчера живёт в
@@ -1263,10 +1263,8 @@
               <span class="upd-chip" id="upd-patterns-chip" hidden></span>
             </div>
             <div class="upd-action">
-              <!-- видна ТОЛЬКО когда есть новые паттерны у издателя
-                   (`patterns.new_available` в summary канала, см. app.js::renderPatternsRow) —
-                   канал синхронизируется автоматически, кнопка — для «применить сейчас». -->
-              <button type="button" class="secondary" id="upd-patterns-apply-btn" data-companion-action="sync_patterns" hidden>Загрузить новые</button>
+              <!-- Кнопок нет: тела паттернов выдаются онлайн по лицензии, загружать
+                   нечего — пункт только информирует (см. app.js::renderPatternsRow). -->
             </div>
           </div>
 

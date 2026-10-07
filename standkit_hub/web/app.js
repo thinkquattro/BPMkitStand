@@ -239,16 +239,6 @@
     return `${n} дней`;
   }
 
-  function pluralPatterns(count) {
-    const n = Math.abs(Math.trunc(count));
-    const tens = n % 100;
-    if (tens >= 11 && tens <= 14) return `${n} паттернов`;
-    const ones = n % 10;
-    if (ones === 1) return `${n} паттерн`;
-    if (ones >= 2 && ones <= 4) return `${n} паттерна`;
-    return `${n} паттернов`;
-  }
-
   // --- тема (light/dark/auto) ---
   //
   // ИСТОЧНИК ПРАВДЫ — HubConfig.theme на сервере, а не localStorage браузера.
@@ -2564,6 +2554,8 @@
     const overlay = byId("updates-overlay");
     if (!overlay) return;
     overlay.hidden = false;
+    // Справка о библиотеке паттернов на сервере — отдельно и без ожидания.
+    refreshPatternsStats();
     // Оба запроса параллельно: платная редакция знает это только ПОСЛЕ ответа
     // /api/companion/status (503 у свободной), self-version отвечает всегда —
     // applyUpdatesEditionView разбирает исход обоих.
@@ -3216,71 +3208,66 @@
     node.hidden = !text;
   }
 
-  // Четыре РАЗНЫЕ состояния канала паттернов — раньше причина была видна
-  // только при `cycle.halted`/`status === "error"`, а пустая (успешная!) дельта и
-  // «ни разу не отрабатывал» выглядели ОДИНАКОВО, как «ещё не синхронизировались».
+  // Пункт «Паттерны» — только справка: тела паттернов выдаются онлайн по
+  // лицензии (MCP берёт раздел с сервера издателя), загружать на диск нечего,
+  // поэтому кнопок загрузки здесь нет. Строку собирает канал
+  // (`patterns.server.line`, см. standkit_companion.patterns.stats_line):
+  // «N разделов на сервере, библиотека обновлена ДД.ММ.ГГГГ, доступ по лицензии»,
+  // «доступ по лицензии: лицензия не активна» или «нет связи с сервером».
+  let patternsStatsLive = null;
+
+  /** Более свежий из двух снимков счётчика (по `checked_at`, ISO-метки UTC одного вида). */
+  function newerPatternsStats(a, b) {
+    if (!a) return b || null;
+    if (!b) return a;
+    return String(b.checked_at || "") > String(a.checked_at || "") ? b : a;
+  }
+
+  function renderPatternsServer(server) {
+    const metaEl = byId("upd-patterns-meta");
+    if (!metaEl) return;
+    const s = server || {};
+    metaEl.textContent = s.line || "Паттерны: проверяем сервер…";
+    if (s.status === "ok") {
+      setChip("upd-patterns-chip", "ok", "онлайн", "");
+    } else if (s.status === "no_license") {
+      setChip("upd-patterns-chip", "err", "нет лицензии", s.detail || "");
+    } else if (s.status === "offline") {
+      setChip("upd-patterns-chip", null, "нет связи", s.detail || "");
+    } else {
+      setChip("upd-patterns-chip", null, "", "");
+    }
+  }
+
   function renderPatternsRow(status) {
     const block = patternsBlock(status);
-    const summary = (status && status.patterns) || {};
     const cycle = ((status && status.cycles) || {}).patterns || {};
-    const metaEl = byId("upd-patterns-meta");
-
-    // правка владельца: «Загрузить новые» видна ТОЛЬКО когда у издателя ЖДУТ
-    // паттерны после курсора (`patterns.new_available` = `pending_count`, считает
-    // `patterns.peek` при «Проверить»; `sync` — плановый тик или эта кнопка —
-    // осушает очередь и сбрасывает счётчик).
-    const applyBtn = byId("upd-patterns-apply-btn");
-    if (applyBtn) applyBtn.hidden = !block.new_available;
-
-    // 1. Остановлен/ошибка — причина видна ВСЕГДА, не только при этих двух условиях.
+    renderPatternsServer(newerPatternsStats(patternsStatsLive, block.server || null));
+    // Индекс разделов (метаданные без тел) канал обновляет сам; если его цикл
+    // остановлен — причина видна строкой деталей, справка о сервере остаётся.
     const failed = !!cycle.halted || block.status === "error";
-    if (failed) {
-      const reason = cycle.halted ? (cycle.halt_reason || "повторы остановлены до вмешательства")
-                                   : (String(block.detail || "") || "ошибка синхронизации");
-      setChip("upd-patterns-chip", "err", "ошибка", reason);
-      metaEl.textContent = "Синхронизация паттернов остановлена";
-      setDetail("upd-patterns-detail", reason);
-      return;
+    const reason = !failed ? "" : (cycle.halted
+      ? (cycle.halt_reason || "повторы остановлены до вмешательства")
+      : (String(block.detail || "") || "ошибка обновления индекса"));
+    setDetail("upd-patterns-detail", reason ? `Индекс разделов не обновлён: ${reason}` : "");
+  }
+
+  /** Счётчик библиотеки на сервере: ответ мгновенный, сеть — в фоне канала
+   * (`refreshing: true` — перечитываем через полторы секунды, не больше 4 раз). */
+  async function refreshPatternsStats(attempt) {
+    const n = attempt || 0;
+    let data = null;
+    try {
+      data = await apiGet("/api/companion/patterns-stats");
+    } catch (e) {
+      return; // свободная редакция (503) и сбои хаба — строку не трогаем
     }
-
-    // 2. Канал ни разу не отрабатывал — честно так и сказать, без чипа.
-    if (!block.last_run_at) {
-      setChip("upd-patterns-chip", null, "", "");
-      metaEl.textContent = "Первая синхронизация паттернов ещё не проходила";
-      setDetail("upd-patterns-detail", "");
-      return;
+    patternsStatsLive = newerPatternsStats(patternsStatsLive, data);
+    if (data && !data.checked_at) patternsStatsLive = data;
+    renderPatternsServer(patternsStatsLive);
+    if (data && data.refreshing && n < 4) {
+      setTimeout(() => refreshPatternsStats(n + 1), 1500);
     }
-
-    const version = summary.version || block.latest_version || "";
-    const appliedCount = Number(summary.count ?? block.applied_count ?? 0);
-    const totalAvailable = block.total_available === null || block.total_available === undefined
-      ? null : Number(block.total_available);
-    const whenChecked = describeMoment(block.last_run_at);
-    const countText = pluralPatterns(totalAvailable !== null ? totalAvailable : appliedCount);
-
-    // Канал синхронизируется автоматически и молча держит базу актуальной — «доступна
-    // N» здесь смысла не имеет (издатель не публикует отдельную «версию базы» для
-    // сравнения): чип всегда «актуально», содержательная разница — в строке статуса.
-    if (block.new_available) {
-      const n = Number(block.pending_count || 0);
-      setChip("upd-patterns-chip", "new", n ? `новых: ${n}${block.pending_more ? "+" : ""}` : "есть новые", "");
-    } else {
-      setChip("upd-patterns-chip", "ok", "актуально", "");
-    }
-
-    // 3. Отработал успешно, новых у издателя нет — дельта пустая, это УСПЕХ, а не
-    // «не синхронизировались»: счётчик при этом — фактически доступная база (поставочная
-    // + всё, что применялось раньше), а не дельта последнего тика.
-    if (!appliedCount && !version) {
-      metaEl.textContent = `${countText} · автоматически, ${whenChecked}`;
-      setDetail("upd-patterns-detail", "");
-      return;
-    }
-
-    // 4. Отработал, дельта применена.
-    const verPart = version ? `версия базы ${version} · ` : "";
-    metaEl.textContent = `${verPart}${countText} · автоматически, ${whenChecked}`;
-    setDetail("upd-patterns-detail", "");
   }
 
   function renderMcpRow(status) {

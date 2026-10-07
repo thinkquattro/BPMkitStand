@@ -111,6 +111,15 @@ STARTUP_SPREAD_SEC = 60.0
 #: бэкенд издателя.
 MIN_INTERVAL_SEC = 60.0
 
+#: Сколько секунд счётчик библиотеки паттернов на сервере считается свежим: окно
+#: «Обновления» открывают часто, а строка в нём справочная — дёргать сервер на каждое
+#: открытие незачем.
+STATS_FRESH_SEC = 300.0
+
+#: Сколько фоновый запрос счётчика ждёт замок прогонов, чтобы сохранить результат на диск.
+#: Не дождался (идёт длинный тик) — результат остаётся в памяти, тик сохранит его сам.
+STATS_LOCK_WAIT_SEC = 10.0
+
 #: Статусы, которые пишут в состояние сами модули циклов. Всё, чего здесь нет (например
 #: `never` у ни разу не запускавшегося цикла), раннер трактует как успех: до сюда
 #: выполнение доходит только тогда, когда функция цикла вернулась без исключения.
@@ -343,6 +352,11 @@ class CompanionRunner:
         self._wake_token = 0
         self._candidates_wake_token = -1
         self._candidates_outcome: Optional[dict] = None
+        # Фоновый запрос счётчика паттернов на сервере (окно «Обновления»): не больше
+        # одного одновременно, свежесть — по монотонным часам.
+        self._stats_guard = threading.Lock()
+        self._stats_thread: Optional[threading.Thread] = None
+        self._stats_at: Optional[float] = None
 
     # -- настройки ---------------------------------------------------------------------
     def _load_settings_from_config(self):
@@ -551,9 +565,80 @@ class CompanionRunner:
         self._candidates_outcome = dict(outcome) if isinstance(outcome, dict) else outcome
         return outcome
 
+    # -- счётчик библиотеки паттернов на сервере ---------------------------------------
+    def _stats_with_session(self, session) -> dict:
+        """Счётчик библиотеки на сервере попутно с тиком/действием, уже под замком прогонов.
+
+        Сбой счётчика не роняет ни тик, ни действие: это справочная строка окна, отказ
+        превращается в «нет связи»/«лицензия не активна».
+        """
+        try:
+            stats = patterns.fetch_stats(session.client)
+        except Exception as exc:  # noqa: BLE001 - попутный запрос, best-effort
+            stats = patterns.stats_from_error(exc)
+        self._state.patterns["server"] = stats
+        self._stats_at = self._monotonic()
+        self._save_state()
+        return stats
+
+    def _fetch_stats_unlocked(self) -> dict:
+        """Резолв контекста и запрос счётчика БЕЗ замка прогонов (фоновый поток)."""
+        try:
+            settings = self.settings()
+            if not bool(getattr(settings, "enabled", False)):
+                return {"status": "disabled", "detail": "канал обновлений выключен",
+                        "checked_at": None}
+            session = self._session(settings)
+            return patterns.fetch_stats(session.client)
+        except Exception as exc:  # noqa: BLE001 - фоновый поток не имеет права умереть
+            return patterns.stats_from_error(exc)
+
+    def _refresh_stats_background(self) -> None:
+        stats = self._fetch_stats_unlocked()
+        self._stats_at = self._monotonic()
+        if self._run_lock.acquire(timeout=STATS_LOCK_WAIT_SEC):
+            try:
+                self._state.patterns["server"] = stats
+                self._save_state()
+            finally:
+                self._run_lock.release()
+        else:
+            # Замок занят длинным тиком: ключ уже существует, замена значения атомарна;
+            # на диск результат попадёт с ближайшим сохранением состояния.
+            self._state.patterns["server"] = stats
+
+    def patterns_stats(self, *, refresh: bool = True, force: bool = False,
+                       wait: float = 0.0) -> dict:
+        """Счётчик библиотеки паттернов на сервере для окна «Обновления» — без ожидания сети.
+
+        Отдаёт последнее известное значение (с готовой строкой `line`) и, если оно
+        устарело, запускает обновление в фоновом потоке (не больше одного одновременно).
+        `refreshing` — фоновый запрос ещё идёт; UI перечитает значение чуть позже.
+        `wait` — сколько секунд подождать фоновый запрос (CLI и тесты; UI передаёт 0).
+        """
+        with self._stats_guard:
+            thread = self._stats_thread
+            inflight = thread is not None and thread.is_alive()
+            stale = (force or self._stats_at is None
+                     or self._monotonic() - self._stats_at > STATS_FRESH_SEC)
+            if refresh and stale and not inflight:
+                thread = threading.Thread(target=self._refresh_stats_background,
+                                          name="companion-patterns-stats", daemon=True)
+                self._stats_thread = thread
+                thread.start()
+                inflight = True
+        if inflight and wait > 0 and thread is not None:
+            thread.join(wait)
+            inflight = thread.is_alive()
+        block = dict(self._state.patterns.get("server") or {})
+        block["line"] = patterns.stats_line(block)
+        block["refreshing"] = bool(inflight)
+        return block
+
     def _run_patterns(self, session, settings) -> dict:
         result = patterns.sync(session.client, self._state, session.ctx, settings)
         if isinstance(result, dict):
+            result["stats"] = self._stats_with_session(session)
             result["cookbook"] = self._sync_cookbook(session)
             result["candidates"] = self._sync_candidates(settings)
         return result
@@ -890,6 +975,7 @@ class CompanionRunner:
             if action == "sync_patterns":
                 result = patterns.sync(session.client, self._state, session.ctx, settings)
                 if isinstance(result, dict):
+                    result["stats"] = self._stats_with_session(session)
                     result["cookbook"] = self._sync_cookbook(session)
                 return result
             if action == "check_update":
@@ -920,13 +1006,10 @@ class CompanionRunner:
                 result["staged"] = staged
                 result["installer"] = installer
                 result["cookbook"] = self._sync_cookbook(session)
-                # «Проверить» в окне «Обновления» заодно узнаёт, ждут ли новые
-                # паттерны у издателя (без применения — их грузит кнопка «Загрузить
-                # новые» или плановый тик). Сбой подсчёта проверку не роняет.
-                try:
-                    result["patterns"] = patterns.peek(session.client, self._state, session.ctx)
-                except Exception as exc:  # noqa: BLE001 - попутный подсчёт, best-effort
-                    result["patterns"] = {"error": str(exc)[:200]}
+                # «Проверить» в окне «Обновления» заодно обновляет счётчик библиотеки
+                # паттернов на сервере (тела выдаются онлайн, загружать нечего). Сбой
+                # счётчика проверку не роняет.
+                result["patterns"] = self._stats_with_session(session)
                 return result
             if action == "stage_update":
                 return releases.stage(session.client, self._state, session.ctx,
