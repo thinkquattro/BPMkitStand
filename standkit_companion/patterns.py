@@ -678,7 +678,7 @@ def _int_field(payload: dict, key: str) -> int:
 
 
 def fetch_stats(client: "BackendClient", *, timeout: float = STATS_TIMEOUT_SEC) -> dict:
-    """Сколько разделов библиотеки паттернов на сервере и когда она обновлялась.
+    """Сколько паттернов в библиотеке на сервере и когда она обновлялась.
 
     Справочный запрос для окна «Обновления»: курсор, индекс и состояние НЕ трогаются.
     Таймаут короткий — строка в окне не стоит того, чтобы ждать сеть. Отказ поднимается
@@ -724,18 +724,18 @@ def stats_from_error(exc: BaseException) -> dict:
             "checked_at": utc_now_iso()}
 
 
-def _plural_sections(count: int) -> str:
+def _plural_patterns(count: int) -> str:
     n = abs(int(count))
     tens = n % 100
     ones = n % 10
     if 11 <= tens <= 14:
-        word = "разделов"
+        word = "паттернов"
     elif ones == 1:
-        word = "раздел"
+        word = "паттерн"
     elif 2 <= ones <= 4:
-        word = "раздела"
+        word = "паттерна"
     else:
-        word = "разделов"
+        word = "паттернов"
     return f"{n} {word}"
 
 
@@ -751,8 +751,8 @@ def _date_ru(value: Any) -> str:
 def stats_line(stats: Optional[dict]) -> str:
     """Строка пункта «Паттерны» в окне «Обновления».
 
-    `ok` — «Паттерны: N разделов на сервере, библиотека обновлена ДД.ММ.ГГГГ, доступ по
-    лицензии» (N = разделы + межрелизные обновления); нет лицензии — «доступ по
+    `ok` — «Паттерны: N паттернов на сервере, библиотека обновлена ДД.ММ.ГГГГ, доступ по
+    лицензии» (N = sections + updates, одно число); нет лицензии — «доступ по
     лицензии: лицензия не активна»; сеть/ошибка — «нет связи с сервером».
     """
     stats = stats if isinstance(stats, dict) else {}
@@ -760,7 +760,7 @@ def stats_line(stats: Optional[dict]) -> str:
     if status == "ok":
         total = int(stats.get("total") if stats.get("total") is not None
                     else int(stats.get("sections") or 0) + int(stats.get("updates") or 0))
-        parts = [f"Паттерны: {_plural_sections(total)} на сервере"]
+        parts = [f"Паттерны: {_plural_patterns(total)} на сервере"]
         date = _date_ru(stats.get("updated_at"))
         if date:
             parts.append(f"библиотека обновлена {date}")

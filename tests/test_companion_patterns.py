@@ -612,12 +612,13 @@ def test_stats_to_window_line():
     assert client.calls[0]["timeout"] == pm.STATS_TIMEOUT_SEC, "таймаут короткий"
     assert stats["status"] == "ok" and stats["total"] == 123
     assert pm.stats_line(stats) == (
-        "Паттерны: 123 раздела на сервере, библиотека обновлена 05.10.2026, "
+        "Паттерны: 123 паттерна на сервере, библиотека обновлена 05.10.2026, "
         "доступ по лицензии")
 
 
-@pytest.mark.parametrize("total,word", [(1, "раздел"), (2, "раздела"), (5, "разделов"),
-                                        (11, "разделов"), (21, "раздел"), (112, "разделов")])
+@pytest.mark.parametrize("total,word", [(1, "паттерн"), (2, "паттерна"), (5, "паттернов"),
+                                        (11, "паттернов"), (14, "паттернов"), (21, "паттерн"),
+                                        (22, "паттерна"), (112, "паттернов")])
 def test_stats_line_plural(total, word):
     line = pm.stats_line({"status": "ok", "sections": total, "updates": 0,
                           "updated_at": None})
@@ -679,7 +680,7 @@ def test_runner_patterns_stats_refreshes_in_background(tmp_path):
 
     first = runner.patterns_stats(wait=5.0)
     assert first["refreshing"] is False
-    assert first["line"] == ("Паттерны: 11 разделов на сервере, библиотека обновлена "
+    assert first["line"] == ("Паттерны: 11 паттернов на сервере, библиотека обновлена "
                              "01.10.2026, доступ по лицензии")
     assert json.loads((tmp_path / "companion-state.json").read_text(encoding="utf-8"))[
         "patterns"]["server"]["total"] == 11, "результат сохранён в состояние"
@@ -717,4 +718,4 @@ def test_runner_check_update_refreshes_stats_instead_of_pending(tmp_path, monkey
     result = runner.run_action("check_update")
     assert result["patterns"]["status"] == "ok"
     assert runner.status()["state"]["patterns"]["server"]["line"] == (
-        "Паттерны: 4 раздела на сервере, доступ по лицензии")
+        "Паттерны: 4 паттерна на сервере, доступ по лицензии")

@@ -152,7 +152,7 @@ class _StubRunner:
         self.calls.append(("patterns_stats", None))
         return {"status": "ok", "sections": 20, "updates": 1, "total": 21,
                 "updated_at": "2026-10-06T09:00:00Z", "checked_at": "2026-10-07T10:00:00Z",
-                "line": "Паттерны: 21 раздел на сервере, библиотека обновлена 06.10.2026, "
+                "line": "Паттерны: 21 паттерн на сервере, библиотека обновлена 06.10.2026, "
                         "доступ по лицензии",
                 "refreshing": False}
 
@@ -789,7 +789,7 @@ def test_patterns_stats_endpoint_returns_runner_snapshot(tmp_path, monkeypatch):
     status, body, _ = _request(base_url, "/api/companion/patterns-stats", token=token)
 
     assert status == 200
-    assert body["line"].startswith("Паттерны: 21 раздел на сервере")
+    assert body["line"].startswith("Паттерны: 21 паттерн на сервере")
     assert ("patterns_stats", None) in runner.calls
 
 

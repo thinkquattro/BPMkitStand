@@ -604,7 +604,7 @@ def test_state_summary_exposes_server_stats_line():
     state.patterns["server"] = {"status": "ok", "sections": 40, "updates": 2,
                                 "updated_at": "2026-10-05T08:00:00Z"}
     assert state.summary()["patterns"]["server"]["line"] == (
-        "Паттерны: 42 раздела на сервере, библиотека обновлена 05.10.2026, доступ по лицензии")
+        "Паттерны: 42 паттерна на сервере, библиотека обновлена 05.10.2026, доступ по лицензии")
 
 
 def test_ui_whatsnew_shown_whenever_backend_has_notes_and_single_checked_line():
