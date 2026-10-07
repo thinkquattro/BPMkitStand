@@ -2771,3 +2771,6 @@ span.value-has-reason {
 
 /* подпись и ссылка «как установить» — одной строкой текста, не флекс-элементами. */
 .upd-sub.upd-sub-inline { display: block; }
+/* GAP-783: подсказка «обновление — установщиком» прячется атрибутом hidden —
+   правило выше (та же специфичность, но позже) иначе перебило бы .upd-sub[hidden]. */
+.upd-sub.upd-sub-inline[hidden] { display: none; }

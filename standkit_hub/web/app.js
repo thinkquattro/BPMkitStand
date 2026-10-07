@@ -2597,6 +2597,14 @@
     return lic.edition === "companion" && LICENSE_CHANNEL_STATUSES.indexOf(lic.status) >= 0;
   }
 
+  /** Подвал окна «Обновления». GAP-783: свободный вид exe-сборки (frozen) НЕ
+   * обещает сверку с PyPI — сервер её для exe и не делает. */
+  function updatesFooterText(paid, selfVersion) {
+    if (paid) return "Скачивание — заранее, установка — только по вашей кнопке";
+    if (selfVersion && selfVersion.mode === "frozen") return "Диспетчер обновляется установщиком BPMkit";
+    return "Проверяется по PyPI, без лицензии";
+  }
+
   function applyUpdatesEditionView() {
     const paid = !!companionAvailable && licenseChannelOk();
     const paidRows = byId("upd-paid-rows");
@@ -2608,11 +2616,7 @@
     if (title) title.textContent = paid ? "Обновления BPMkit" : "Обновления";
 
     const footerNote = byId("updates-footer-note");
-    if (footerNote) {
-      footerNote.textContent = paid
-        ? "Скачивание — заранее, установка — только по вашей кнопке"
-        : "Проверяется по PyPI, без лицензии";
-    }
+    if (footerNote) footerNote.textContent = updatesFooterText(paid, lastSelfVersion);
     // правка владельца: кнопка переехала в шапку и теперь несёт SVG-иконку
     // ⟳ — подпись меняет вложенный <span>, не весь textContent кнопки (иначе иконка
     // стирается).
@@ -3583,9 +3587,25 @@
     return (status && status.hub) || {};
   }
 
+  // GAP-783: exe-сборка (frozen) — это поставка установщика BPMkit, pip к ней
+  // не применим ВОВСЕ (решение владельца: «в версии, установленной из
+  // установщика, в меню обновления не должно быть команды pip и кнопки
+  // копирования»). Признак берём у канала: `frozen`, а у старого канала без
+  // этого поля — `mode === "exe"` (его пишет check_hub только для frozen).
+  function hubIsFrozen(hub) {
+    return !!(hub && (hub.frozen || hub.mode === "exe"));
+  }
+
+  /** Подпись способа установки рядом с версией: «X · установщик» для exe,
+   * «X · pip» для pip-установки (GAP-783: раньше платный вид всегда писал «pip»). */
+  function hubVersionLabel(current, frozen) {
+    if (!current) return "версия неизвестна";
+    return `${current} · ${frozen ? "установщик" : "pip"}`;
+  }
+
   function renderHubRow(status) {
     const hub = hubBlock(status);
-    const frozen = !!hub.frozen;
+    const frozen = hubIsFrozen(hub);
     const current = hub.current || hubVersion || "";
     const latest = hub.known_latest || "";
     const staged = (hub.staged && hub.staged.version) || "";
@@ -3594,7 +3614,7 @@
     const hasNew = !!hub.update_available;
 
     const currentEl = byId("upd-hub-current");
-    if (currentEl) currentEl.textContent = (current ? `${current} · pip` : "версия неизвестна");
+    if (currentEl) currentEl.textContent = hubVersionLabel(current, frozen);
     if (hasNew) setChip("upd-hub-chip", "new", `доступна ${staged || latest}`, "");
     else if (hub.status === "error") setChip("upd-hub-chip", "err", "ошибка", String(hub.detail || "ошибка проверки"));
     else if (current) setChip("upd-hub-chip", "ok", "последняя", "");
@@ -3604,7 +3624,9 @@
     const stageBtn = byId("upd-hub-stage-btn");
     const pipBox = byId("upd-hub-pip");
     const pipCopyBtn = byId("upd-hub-pip-copy-btn");
+    const installerNote = byId("upd-hub-installer-note");
     if (!frozen) {
+      if (installerNote) installerNote.hidden = true;
       // pip-установка: канал не подменяет себя — только команда pip (перезапуск
       // живёт в настройках, не в этом окне — правка владельца).
       if (applyBtn) applyBtn.hidden = true;
@@ -3621,6 +3643,9 @@
         currentEl.title = "Программа (standkit-hub), pip-установка. Обновление — командой pip, не диспетчером";
       }
     } else {
+      // GAP-783: exe — ни команды pip, ни иконки копирования; только канал
+      // издателя (Скачать → Установить), а когда ставить нечего — подсказка,
+      // что эта сборка обновляется установщиком BPMkit.
       if (pipBox) pipBox.hidden = true;
       if (pipCopyBtn) pipCopyBtn.hidden = true;
       if (stageBtn) {
@@ -3631,6 +3656,10 @@
         if (staged && !companionBusy && applyBtn.dataset.idleLabel === undefined) {
           applyBtn.textContent = `Установить ${staged}`;
         }
+      }
+      if (installerNote) installerNote.hidden = !!(hasNew || staged);
+      if (currentEl) {
+        currentEl.title = "Диспетчер стендов из установщика BPMkit. Обновление — кнопками канала (Скачать → Установить) или новым установщиком BPMkit";
       }
     }
 
@@ -3726,15 +3755,19 @@
     lastSelfVersion = data || null;
     const currentEl = byId("upd-self-current");
     const mode = data && data.mode;
+    const frozen = mode === "frozen";
     const current = (data && data.current) || "";
-    if (currentEl) {
-      currentEl.textContent = current
-        ? `${current} · ${mode === "frozen" ? "установщик" : "pip"}`
-        : "версия неизвестна";
-    }
+    if (currentEl) currentEl.textContent = hubVersionLabel(current, frozen);
     const latest = (data && data.latest) || "";
     const hasNew = !!(data && data.update_available);
-    if (hasNew) {
+    const installerNote = byId("upd-self-installer-note");
+    if (installerNote) installerNote.hidden = !frozen;
+    if (frozen) {
+      // GAP-783: exe по PyPI не сверяется вовсе (сервер его и не спрашивает) —
+      // чип «последняя» был бы обещанием проверки, которой не было. Честно:
+      // без чипа, с подсказкой «обновление — установщиком BPMkit».
+      setChip("upd-self-chip", null, "", "");
+    } else if (hasNew) {
       setChip("upd-self-chip", "new", `доступна ${latest}`, "");
     } else if (data && data.error) {
       setChip("upd-self-chip", "err", "ошибка", String(data.error));
@@ -3747,15 +3780,15 @@
 
     const pipBox = byId("upd-self-pip");
     const pipCmd = byId("upd-self-pip-cmd");
-    if (pipBox) pipBox.hidden = mode === "frozen";
-    if (pipCmd) pipCmd.textContent = (data && data.pip_command) || "python -m pip install -U standkit";
+    if (pipBox) pipBox.hidden = frozen;
+    if (pipCmd && !frozen) pipCmd.textContent = (data && data.pip_command) || "python -m pip install -U standkit";
 
     // правка владельца: та же иконка-копия, что в платной редакции —
     // ВСЕГДА видна в pip-режиме (не только при доступной версии), скрыта в
     // режиме установщика (frozen, там pip ни при чём). Кнопки «Перезапустить»
     // в окне больше нет — перезапуск живёт в настройках.
     const pipCopyBtn = byId("upd-self-pip-copy-btn");
-    if (pipCopyBtn) pipCopyBtn.hidden = mode === "frozen";
+    if (pipCopyBtn) pipCopyBtn.hidden = frozen;
   }
 
   async function refreshSelfVersion(options) {
@@ -3961,6 +3994,9 @@
       const pipCopyBtn = byId(btnId);
       if (!pipCopyBtn) return;
       pipCopyBtn.addEventListener("click", async () => {
+        // GAP-783: в exe-сборке копировать pip нечего — даже если кнопку
+        // кто-то откроет (старая разметка/кэш), команду не отдаём.
+        if (pipCopyBtn.hidden) return;
         const cmdId = btnId === "upd-hub-pip-copy-btn" ? "upd-hub-pip-cmd" : "upd-self-pip-cmd";
         const cmdEl = byId(cmdId);
         const text = cmdEl ? cmdEl.textContent : "";
@@ -4188,6 +4224,67 @@
     }
   }
 
+  /**
+   * GAP-782: строка «Активация» экрана лицензии — честно по ``activation_state``
+   * из сводки ``setup license-info --json`` (``licensing.license_summary`` MCP,
+   * хаб отдаёт её как есть через ``GET /api/license``).
+   *
+   * active — «на этом компьютере · дата»; pending — ещё не подтверждена сервером,
+   * но в пределах срока (``activation_deadline``, 3 дня с первого запуска), с
+   * причиной последней неудачи (``last_online_error``); overdue / cap_exceeded /
+   * revoked — красным, с понятным действием. Старый MCP без ``activation_state`` —
+   * фолбэк по ``activated``: без прежнего «у издателя» (у клиента это читалось
+   * как «издатель не активировал», а значило лишь «онлайн-подтверждения нет»).
+   * Возвращает ``{key, text, cls}``: подпись поля, значение и класс цвета.
+   */
+  function licenseActivationView(snapshot) {
+    const snap = snapshot || {};
+    const err = String(snap.last_online_error || "").trim();
+    const withErr = (text) => (err ? `${text}. Последняя ошибка: ${err}` : text);
+    const deadline = snap.activation_deadline ? formatDate(snap.activation_deadline) : "";
+    const here = () => [
+      snap.fingerprint_label ? `этом компьютере (${snap.fingerprint_label})` : "этом компьютере",
+      snap.activated_at ? formatDate(snap.activated_at) : "",
+    ].filter(Boolean).join(" · ");
+
+    switch (snap.activation_state) {
+      case "active":
+        return { key: "Активирована на", text: here(), cls: "" };
+      case "pending":
+        return {
+          key: "Активация",
+          text: withErr(`ожидает подтверждения сервером${deadline ? ` (до ${deadline})` : ""}`),
+          cls: "lic-warn",
+        };
+      case "overdue":
+        return {
+          key: "Активация",
+          text: withErr(
+            `срок подтверждения истёк${deadline ? ` ${deadline}` : ""} — платные инструменты ` +
+            "отключены. Подключитесь к интернету, чтобы подтвердить активацию"),
+          cls: "lic-crit",
+        };
+      case "cap_exceeded":
+        return {
+          key: "Активация",
+          text: "превышено число установок — освободите установку на другом компьютере " +
+            "или обратитесь к издателю",
+          cls: "lic-crit",
+        };
+      case "revoked":
+        return {
+          key: "Активация",
+          text: "установка отозвана издателем — обратитесь к издателю",
+          cls: "lic-crit",
+        };
+      default:
+        break;
+    }
+    // Старый MCP (нет activation_state) или незнакомое значение — по activated.
+    if (snap.activated) return { key: "Активирована на", text: here(), cls: "" };
+    return { key: "Активация", text: withErr("онлайн-активация не подтверждена"), cls: "lic-warn" };
+  }
+
   function renderLicensePane(snapshot) {
     const status = snapshot.status;
     const unknown = LICENSE_UNKNOWN_STATUSES.indexOf(status) >= 0;
@@ -4218,14 +4315,12 @@
     stateEl.className = `lic-v ${cls}`;
 
     byId("lic-until").textContent = snapshot.expires_at ? formatDate(snapshot.expires_at) : "бессрочно";
-    byId("lic-activated").textContent = snapshot.activated
-      ? [
-          snapshot.fingerprint_label
-            ? `этом компьютере (${snapshot.fingerprint_label})`
-            : "этом компьютере",
-          snapshot.activated_at ? formatDate(snapshot.activated_at) : "",
-        ].filter(Boolean).join(" · ")
-      : "не активирована у издателя";
+    const activation = licenseActivationView(snapshot);
+    const activatedEl = byId("lic-activated");
+    activatedEl.textContent = activation.text;
+    activatedEl.className = `lic-v ${activation.cls}`.trim();
+    const activatedKey = byId("lic-activated-k");
+    if (activatedKey) activatedKey.textContent = activation.key;
     byId("lic-source").textContent =
       LICENSE_SOURCE_LABELS[snapshot.source] || snapshot.source || "—";
   }
