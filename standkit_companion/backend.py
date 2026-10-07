@@ -432,14 +432,19 @@ class BackendClient:
                                headers=_lower_headers(resp.headers), body=body)
 
     def get_json(self, path: str, *, params: Optional[dict] = None,
-                 authorized: bool = True, etag: Optional[str] = None) -> tuple:
+                 authorized: bool = True, etag: Optional[str] = None,
+                 timeout: Optional[float] = None) -> tuple:
         """`(payload, headers)` для JSON-эндпоинтов.
 
         Тело, которое не разобралось в JSON (или разобралось в скаляр), — это `bad_response`,
         а не «пустой ответ»: молча принять такое за «нет данных» значит спрятать поломку
         контракта или страницу-заглушку прокси.
+
+        `timeout` — свой потолок ожидания для справочных запросов (по умолчанию —
+        общий таймаут клиента).
         """
-        resp = self.request(path, params=params, authorized=authorized, etag=etag)
+        resp = self.request(path, params=params, authorized=authorized, etag=etag,
+                            timeout=timeout)
         try:
             payload = json.loads(resp.body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:

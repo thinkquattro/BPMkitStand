@@ -148,6 +148,14 @@ class _StubRunner:
     def poke(self, cycle=None):
         self.pokes.append(cycle)
 
+    def patterns_stats(self, *, refresh=True, force=False, wait=0.0):
+        self.calls.append(("patterns_stats", None))
+        return {"status": "ok", "sections": 20, "updates": 1, "total": 21,
+                "updated_at": "2026-10-06T09:00:00Z", "checked_at": "2026-10-07T10:00:00Z",
+                "line": "Паттерны: 21 паттерн на сервере, библиотека обновлена 06.10.2026, "
+                        "доступ по лицензии",
+                "refreshing": False}
+
     def stop(self, timeout=2.0):
         self.stopped += 1
 
@@ -773,6 +781,53 @@ def test_companion_status_omits_patterns_summary_when_nothing_applied(tmp_path, 
     assert "patterns" not in body
 
 
+def test_patterns_stats_endpoint_returns_runner_snapshot(tmp_path, monkeypatch):
+    """Справка о библиотеке на сервере — мгновенный GET; сеть (если нужна) — в фоне раннера."""
+    runner = _install_stub_runner(monkeypatch, _StubRunner())
+    base_url, token, *_ = _start_hub(tmp_path)
+
+    status, body, _ = _request(base_url, "/api/companion/patterns-stats", token=token)
+
+    assert status == 200
+    assert body["line"].startswith("Паттерны: 21 паттерн на сервере")
+    assert ("patterns_stats", None) in runner.calls
+
+
+def test_patterns_stats_endpoint_requires_token(tmp_path, monkeypatch):
+    _install_stub_runner(monkeypatch, _StubRunner())
+    base_url, _token, *_ = _start_hub(tmp_path)
+    status, _body, _ = _request(base_url, "/api/companion/patterns-stats")
+    assert status in (401, 403)
+
+
+def test_patterns_stats_endpoint_when_channel_disabled(tmp_path, monkeypatch):
+    runner = _install_stub_runner(monkeypatch, _StubRunner())
+    base_url, token, *_ = _start_hub(tmp_path, companion=CompanionSettings(enabled=False))
+    status, body, _ = _request(base_url, "/api/companion/patterns-stats", token=token)
+    assert status == 200 and body["status"] == "disabled"
+    assert body["line"] == "Паттерны: канал обновлений выключен в настройках"
+    assert ("patterns_stats", None) not in runner.calls
+
+
+def test_patterns_stats_endpoint_runner_failure_is_no_connection(tmp_path, monkeypatch):
+    class _Broken(_StubRunner):
+        def patterns_stats(self, **kwargs):
+            raise RuntimeError("поток не поднялся")
+
+    _install_stub_runner(monkeypatch, _Broken())
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(base_url, "/api/companion/patterns-stats", token=token)
+    assert status == 200
+    assert body["line"] == "Паттерны: нет связи с сервером"
+
+
+def test_patterns_stats_endpoint_free_edition_is_503(tmp_path, monkeypatch):
+    _hide_companion(monkeypatch)
+    base_url, token, *_ = _start_hub(tmp_path)
+    status, body, _ = _request(base_url, "/api/companion/patterns-stats", token=token)
+    assert status == 503 and body["edition"] == "free"
+
+
 # ======================================================================================
 # Жизненный цикл планировщика
 # ======================================================================================
@@ -856,7 +911,9 @@ def test_companion_tab_exists_in_index_html():
 #: маршруты канала (`stage_update`, `refresh_revocations`) остались рабочими, но
 #: своей кнопки не имеют: подготовка теперь часть «Проверить обновления», а
 #: список отзыва обновляется сам и решения человека не требует.
-UI_ACTIONS = ("sync_patterns", "check_update", "apply_update", "rollback")
+# `sync_patterns` своей кнопки больше не имеет: тела паттернов выдаются онлайн, пункт
+# «Паттерны» только информирует; маршрут остался для CLI и ручной пересборки индекса.
+UI_ACTIONS = ("check_update", "apply_update", "rollback")
 
 
 def test_companion_buttons_match_api_routes():
