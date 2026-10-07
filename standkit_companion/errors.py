@@ -97,6 +97,11 @@ KIND_TITLES = {
     # запрошенной версии установщик не опубликован (`404 installer not
     # configured`). Штатный молчаливый пропуск тика — симметрично `release not
     # configured` (см. докстринг модуля выше), не ошибка.
+    # индекс паттернов ещё не опубликован издателем (`404
+    # pattern_index_not_published` у `GET /v1/content/patterns/index`). Штатное состояние
+    # до первой публикации, не ошибка; сверка показывает «не опубликован».
+    "pattern_index_not_published": ("Индекс паттернов на сервере не опубликован", True,
+                                    False),
     "installer_not_available": ("Установщик для этой версии не опубликован издателем",
                                 True, False),
     # хаб без прав администратора не может запустить установщик, которому
@@ -162,6 +167,7 @@ _DETAIL_KINDS = {
     "release not configured": "release_not_configured",
     "signature not available": "signature_not_available",
     "revocations not configured": "revocations_not_configured",
+    "pattern_index_not_published": "pattern_index_not_published",
 }
 
 
