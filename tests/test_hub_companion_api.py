@@ -806,6 +806,7 @@ def test_patterns_stats_endpoint_when_channel_disabled(tmp_path, monkeypatch):
     status, body, _ = _request(base_url, "/api/companion/patterns-stats", token=token)
     assert status == 200 and body["status"] == "disabled"
     assert body["line"] == "Паттерны: канал обновлений выключен в настройках"
+    assert body["index"]["status"] == "disabled", "сверка индекса при выключенном канале"
     assert ("patterns_stats", None) not in runner.calls
 
 
@@ -819,6 +820,8 @@ def test_patterns_stats_endpoint_runner_failure_is_no_connection(tmp_path, monke
     status, body, _ = _request(base_url, "/api/companion/patterns-stats", token=token)
     assert status == 200
     assert body["line"] == "Паттерны: нет связи с сервером"
+    assert body["index"]["status"] == "stale", (
+        "сбой раннера — индекс нельзя назвать актуальным")
 
 
 def test_patterns_stats_endpoint_free_edition_is_503(tmp_path, monkeypatch):

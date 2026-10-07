@@ -86,7 +86,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from . import fsutil
-from .errors import ChannelError
+from .errors import ChannelError, NotModified
 
 if TYPE_CHECKING:  # только для аннотаций — в рантайме связь duck-typing'овая
     from .backend import BackendClient
@@ -116,6 +116,16 @@ __all__ = [
     "fetch_stats",
     "stats_from_error",
     "stats_line",
+    "INDEX_PATH",
+    "INDEX_TIMEOUT_SEC",
+    "SERVER_INDEX_NAME",
+    "index_sha256",
+    "local_index_sha",
+    "fetch_index",
+    "write_server_index",
+    "reconcile_index",
+    "index_status_from_error",
+    "INDEX_STATUS_TITLES",
     "snapshot",
     "restore",
 ]
@@ -129,6 +139,23 @@ SYNC_PATH = "/v1/content/patterns/sync"
 STATS_PATH = "/v1/content/patterns/stats"
 # Окно «Обновления» не должно ждать сеть: счётчик — справочная строка, а не операция.
 STATS_TIMEOUT_SEC = 5.0
+# С 0.12.21 ответ `stats` несёт ещё `index_sha256` (отпечаток опубликованного индекса
+# паттернов, `null` — индекс ещё не опубликован) и `patterns` (число паттернов в индексе).
+
+# Полный индекс паттернов, опубликованный издателем: конверт лицензии, ответ
+# `{"sha256","generated_at","patterns","index":{…}}` + `ETag: "<sha>"`; `If-None-Match`
+# с тем же отпечатком → 304; индекса нет → 404 `pattern_index_not_published`.
+INDEX_PATH = "/v1/content/patterns/index"
+# Индекс — десятки-сотни КБ; качается в фоне, но ждать его вечно незачем.
+INDEX_TIMEOUT_SEC = 15.0
+# Скачанный индекс сервера в override-корне. Клиентский MCP предпочитает его поставочному
+# `dev/patterns_index.json`; формат файла: `{"sha256","generated_at","fetched_at","index"}`.
+SERVER_INDEX_NAME = "patterns_index.server.json"
+# Поставочный индекс, с которым сверяемся, пока серверного файла нет.
+SHIPPED_INDEX_JSON = "patterns_index.json"
+# Отпечаток сервера считается по индексу формата 2; поставочный формата 1 заведомо не
+# совпадает с сервером (старая поставка) — его отпечаток не считается вовсе.
+SHIPPED_INDEX_FORMAT = 2
 
 # Размер страницы. Дефолт сервера — 200, потолок — 500; страницы теперь без тел и лёгкие,
 # но дефолт сервера менять незачем.
@@ -698,12 +725,25 @@ def fetch_stats(client: "BackendClient", *, timeout: float = STATS_TIMEOUT_SEC) 
     sections = _int_field(payload, "sections")
     updates = _int_field(payload, "updates")
     updated_at = payload.get("updated_at")
+    # Новые поля (с бэкенда, опубликовавшего индекс): число паттернов в индексе и его
+    # отпечаток. Старый бэкенд их не присылает — счётчик тогда по прежней формуле, а
+    # сверка индекса считает его «не опубликованным».
+    count = payload.get("patterns")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        count = None
+    server_sha = payload.get("index_sha256")
+    server_sha = (server_sha.strip().lower()
+                  if isinstance(server_sha, str) and server_sha.strip() else None)
     from .state import utc_now_iso  # локально: state.py сам импортирует patterns
     return {
         "status": "ok",
         "sections": sections,
         "updates": updates,
-        "total": sections + updates,
+        "patterns": count,
+        # Счётчик окна — число паттернов индекса плюс межрелизные (`updates`); без
+        # `patterns` — прежняя формула `sections + updates`.
+        "total": (count + updates) if count is not None else sections + updates,
+        "index_sha256": server_sha,
         "updated_at": updated_at if isinstance(updated_at, str) else None,
         "checked_at": utc_now_iso(),
         "detail": "",
@@ -752,7 +792,8 @@ def stats_line(stats: Optional[dict]) -> str:
     """Строка пункта «Паттерны» в окне «Обновления».
 
     `ok` — «Паттерны: N паттернов на сервере, библиотека обновлена ДД.ММ.ГГГГ, доступ по
-    лицензии» (N = sections + updates, одно число); нет лицензии — «доступ по
+    лицензии» (N = `patterns` индекса + `updates`; у старого бэкенда без `patterns` —
+    sections + updates; одно число); нет лицензии — «доступ по
     лицензии: лицензия не активна»; сеть/ошибка — «нет связи с сервером».
     """
     stats = stats if isinstance(stats, dict) else {}
@@ -773,6 +814,300 @@ def stats_line(stats: Optional[dict]) -> str:
     if status == "disabled":
         return "Паттерны: канал обновлений выключен в настройках"
     return "Паттерны: проверяем сервер…"
+
+
+# --------------------------------------------------------------------------------------
+# Сверка индекса паттернов с сервером (автообновление)
+# --------------------------------------------------------------------------------------
+# Статусы сверки — машинные значения `state.patterns["index_sync"]["status"]`, окно
+# «Обновления» рисует по ним чип пункта «Паттерны». «Актуален» (`ok`) — ТОЛЬКО когда
+# отпечаток индекса у клиента совпал с отпечатком на сервере.
+INDEX_STATUS_TITLES = {
+    "ok": "актуален",
+    "stale": "устарел",
+    "offline": "нет связи с сервером",
+    "no_license": "лицензия не активна",
+    "not_published": "индекс на сервере не опубликован",
+    "disabled": "канал обновлений выключен",
+    "never": "ещё не проверялся",
+}
+
+
+def index_sha256(index: Any) -> str:
+    """Отпечаток индекса паттернов — ФОРМУЛА КОНТРАКТА, общая с бэкендом и клиентом MCP.
+
+    `sha256(json.dumps(index, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    .encode("utf-8"))`. Любое отклонение (пробел, порядок ключей, `\\uXXXX` вместо
+    кириллицы) дало бы «не совпадает» навсегда и бесконечную перекачку индекса.
+    """
+    blob = json.dumps(index, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _load_json_file(path: Path) -> Any:
+    """JSON-файл или `None` (нет файла, не читается, не JSON) — без исключений: битый
+    локальный индекс означает лишь «не совпадает», и лечится скачиванием с сервера."""
+    try:
+        return json.loads(path.read_bytes().decode("utf-8-sig"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _server_index_sha(override_root: Any) -> Optional[str]:
+    """Отпечаток `dev/patterns_index.server.json`, ПЕРЕСЧИТАННЫЙ по его `index`.
+
+    Записанному в файле `sha256` не верим: файл могли поправить руками или он мог
+    обрезаться. Если записанный и пересчитанный расходятся — файл считается битым
+    (`None`), и сверка скачает индекс заново.
+    """
+    text = str(override_root or "").strip()
+    if not text:
+        return None
+    data = _load_json_file(Path(text) / DEV_SUBDIR / SERVER_INDEX_NAME)
+    if not isinstance(data, dict) or not isinstance(data.get("index"), dict):
+        return None
+    actual = index_sha256(data["index"])
+    stored = data.get("sha256")
+    if isinstance(stored, str) and stored.strip() and stored.strip().lower() != actual:
+        return None
+    return actual
+
+
+def _shipped_index_sha(shipped_root: Any) -> tuple:
+    """Отпечаток поставочного `dev/patterns_index.json` → `(sha|None, source)`.
+
+    Только формат 2: формат 1 — старая поставка, с сервером он не совпадёт по
+    определению, поэтому и не считается (`source = "shipped_format1"`).
+    """
+    text = str(shipped_root or "").strip()
+    if not text:
+        return None, "none"
+    data = _load_json_file(Path(text) / DEV_SUBDIR / SHIPPED_INDEX_JSON)
+    if not isinstance(data, dict):
+        return None, "none"
+    if data.get("format") != SHIPPED_INDEX_FORMAT:
+        return None, "shipped_format1"
+    return index_sha256(data), "shipped"
+
+
+def local_index_sha(override_root: Any, shipped_root: Any) -> tuple:
+    """Локальный отпечаток индекса клиента → `(sha|None, source)`.
+
+    Порядок — тот же, в котором индекс выбирает клиентский MCP: сначала скачанный индекс
+    сервера (`source="server"`), если его нет или он битый — поставочный формата 2
+    (`"shipped"`); поставочный формата 1 и отсутствие индекса — `None` («не совпадает»).
+    """
+    sha = _server_index_sha(override_root)
+    if sha:
+        return sha, "server"
+    return _shipped_index_sha(shipped_root)
+
+
+def _etag_sha(value: Any) -> Optional[str]:
+    """`ETag: "<sha>"` → sha (без `W/` и кавычек); всё, что не похоже на hex-64, — None."""
+    text = str(value or "").strip()
+    if text.startswith("W/"):
+        text = text[2:]
+    text = text.strip().strip('"').strip().lower()
+    return text if re.fullmatch(r"[0-9a-f]{64}", text) else None
+
+
+def fetch_index(client: "BackendClient", *, if_none_match: Optional[str] = None,
+                timeout: float = INDEX_TIMEOUT_SEC) -> Optional[dict]:
+    """Скачать опубликованный индекс паттернов и ПРОВЕРИТЬ его отпечаток.
+
+    `if_none_match` — локальный отпечаток (без кавычек — их добавит функция): совпадение на
+    сервере даёт `304`, и функция возвращает `None` («у вас уже этот индекс»). Иначе —
+    `{"sha256","generated_at","patterns","index"}`, где `sha256` ПЕРЕСЧИТАН по `index`.
+
+    Пересчитанный отпечаток обязан совпасть с `sha256` ответа (и с `ETag`, если он похож на
+    отпечаток); расхождение — `integrity_mismatch`: файл НЕ пишется, это порча в канале, а
+    не новый индекс. Как и `bundle_sha256`, это ЦЕЛОСТНОСТЬ, а не подлинность.
+    404 — `pattern_index_not_published` (издатель ещё не выложил индекс).
+    """
+    if hasattr(client, "has_envelope") and not client.has_envelope:
+        raise ChannelError("Лицензионный ключ не найден на этой машине", kind="no_license")
+    etag = None
+    if if_none_match:
+        tag = str(if_none_match).strip()
+        etag = tag if tag.startswith('"') else f'"{tag}"'
+    try:
+        payload, headers = client.get_json(INDEX_PATH, etag=etag, timeout=timeout)
+    except NotModified:
+        return None
+    except ChannelError as exc:
+        if exc.http_status == 404 or exc.kind == "pattern_index_not_published":
+            raise ChannelError("Индекс паттернов на сервере не опубликован",
+                               kind="pattern_index_not_published", http_status=404,
+                               detail=exc.detail) from None
+        raise
+    if not isinstance(payload, dict) or not isinstance(payload.get("index"), dict):
+        raise ChannelError("Ответ индекса паттернов не похож на ожидаемый",
+                           kind="bad_response",
+                           detail="нет объекта index в ответе")
+    actual = index_sha256(payload["index"])
+    claimed = payload.get("sha256")
+    claimed = claimed.strip().lower() if isinstance(claimed, str) else ""
+    if claimed != actual:
+        raise ChannelError(
+            "Отпечаток индекса паттернов не сошёлся с содержимым — индекс не записан",
+            kind="integrity_mismatch",
+            detail=f"в ответе {claimed[:16] or '—'}…, посчитано {actual[:16]}…")
+    etag_sha = _etag_sha((headers or {}).get("etag") if isinstance(headers, dict) else None)
+    if etag_sha is not None and etag_sha != actual:
+        raise ChannelError(
+            "ETag индекса паттернов не совпал с содержимым — индекс не записан",
+            kind="integrity_mismatch",
+            detail=f"ETag {etag_sha[:16]}…, посчитано {actual[:16]}…")
+    count = payload.get("patterns")
+    generated_at = payload.get("generated_at")
+    return {
+        "sha256": actual,
+        "generated_at": generated_at if isinstance(generated_at, str) else None,
+        "patterns": count if isinstance(count, int) and not isinstance(count, bool) else None,
+        "index": payload["index"],
+    }
+
+
+def write_server_index(override_root: Any, fetched: dict, *, fetched_at: str) -> Path:
+    """Записать индекс сервера в `<override>/dev/patterns_index.server.json` атомарно.
+
+    Отпечаток пересчитывается ЕЩЁ РАЗ прямо перед записью: файл, который клиентский MCP
+    предпочтёт поставочному индексу, не имеет права разойтись со своим `sha256`. Запись —
+    tmp + replace (`fsutil.atomic_write_text`), UTF-8, `ensure_ascii=False`: читатель
+    никогда не увидит половину файла.
+    """
+    index = fetched.get("index") if isinstance(fetched, dict) else None
+    if not isinstance(index, dict):
+        raise ChannelError("Нечего записывать: индекс не получен", kind="bad_response")
+    actual = index_sha256(index)
+    if actual != str(fetched.get("sha256") or "").strip().lower():
+        raise ChannelError("Отпечаток индекса не сошёлся перед записью — индекс не записан",
+                           kind="integrity_mismatch",
+                           detail=f"посчитано {actual[:16]}…")
+    path = Path(override_root) / DEV_SUBDIR / SERVER_INDEX_NAME
+    doc = {"sha256": actual, "generated_at": fetched.get("generated_at"),
+           "fetched_at": fetched_at, "index": index}
+    _write_text(path, json.dumps(doc, ensure_ascii=False) + "\n")
+    return path
+
+
+def _index_status_of_kind(kind: str) -> str:
+    if kind in _LICENSE_KINDS:
+        return "no_license"
+    if kind == "offline":
+        return "offline"
+    if kind == "pattern_index_not_published":
+        return "not_published"
+    if kind == "disabled":
+        return "disabled"
+    return "stale"
+
+
+def index_status_from_error(exc: BaseException, previous: Optional[dict] = None) -> dict:
+    """Отказ сверки → блок статуса: лицензия / нет связи / не опубликован / устарел.
+
+    Всё, что не про лицензию, сеть и неопубликованный индекс (порча отпечатка, файловая
+    ошибка, непонятный ответ), — «устарел» с причиной в `detail`: локальный индекс мог
+    остаться прежним, и честно сказать «актуален» уже нельзя.
+    """
+    from .state import utc_now_iso  # локально: state.py сам импортирует patterns
+    prev = previous if isinstance(previous, dict) else {}
+    kind = str(getattr(exc, "kind", "") or "")
+    return {
+        "status": _index_status_of_kind(kind),
+        "kind": kind or "unknown",
+        "detail": str(exc)[:200],
+        "local_sha": prev.get("local_sha"),
+        "local_source": prev.get("local_source"),
+        "server_sha": prev.get("server_sha"),
+        "last_check_at": utc_now_iso(),
+        "last_fetch_at": prev.get("last_fetch_at"),
+        "generated_at": prev.get("generated_at"),
+    }
+
+
+def reconcile_index(client: "BackendClient", ctx: "LicenseContext", stats: Optional[dict],
+                    *, previous: Optional[dict] = None) -> dict:
+    """Сверка индекса паттернов клиента с сервером и докачка при расхождении.
+
+    Вход — уже полученный ответ `fetch_stats` (или запись отказа `stats_from_error`):
+    сверка не делает второго запроса счётчика. Логика:
+
+    * отказ счётчика → тот же статус (`offline`/`no_license`/`disabled`);
+    * `index_sha256 == null` → `not_published` (НЕ «актуален»: сверять не с чем);
+    * отпечаток сервера == локальному → `ok` без скачивания;
+    * иначе `fetch_index(if_none_match=<локальный>)` → проверка → атомарная запись
+      `dev/patterns_index.server.json` → `ok`; `304` — тоже `ok` (у нас тот же индекс).
+
+    Исключения наружу НЕ уходят: это фоновая справка окна и попутный шаг тика, результат —
+    блок для `state.patterns["index_sync"]` с полями `status`, `detail`, `local_sha`,
+    `local_source`, `server_sha`, `last_check_at`, `last_fetch_at`, `generated_at`.
+    """
+    from .state import utc_now_iso  # локально: state.py сам импортирует patterns
+    prev = previous if isinstance(previous, dict) else {}
+    stats = stats if isinstance(stats, dict) else {}
+    override_root = str(getattr(ctx, "override_patterns_root", "") or "").strip()
+    shipped_root = str(getattr(ctx, "shipped_patterns_root", "") or "").strip()
+    now = utc_now_iso()
+    try:
+        local_sha, local_source = local_index_sha(override_root, shipped_root)
+    except Exception:  # noqa: BLE001 - локальный отпечаток best-effort
+        local_sha, local_source = None, "none"
+    block = {
+        "status": "never",
+        "kind": "",
+        "detail": "",
+        "local_sha": local_sha,
+        "local_source": local_source,
+        "server_sha": prev.get("server_sha"),
+        "last_check_at": now,
+        "last_fetch_at": prev.get("last_fetch_at"),
+        "generated_at": prev.get("generated_at"),
+    }
+    stats_status = stats.get("status")
+    if stats_status != "ok":
+        block["status"] = (stats_status if stats_status in ("offline", "no_license",
+                                                            "disabled") else "offline")
+        block["kind"] = str(stats.get("kind") or stats_status or "")
+        block["detail"] = str(stats.get("detail") or "")
+        return block
+
+    server_sha = stats.get("index_sha256")
+    block["server_sha"] = server_sha
+    if not server_sha:
+        block["status"] = "not_published"
+        block["detail"] = "издатель ещё не опубликовал индекс паттернов на сервере"
+        return block
+    if local_sha == server_sha:
+        block["status"] = "ok"
+        return block
+
+    try:
+        if not override_root:
+            raise ChannelError("Клиентский MCP не сообщил override-корень базы паттернов",
+                               kind="local_io",
+                               detail="пустой override_patterns_root в лицензионном контексте")
+        fetched = fetch_index(client, if_none_match=local_sha)
+        if fetched is None:
+            # 304: на сервере ровно наш индекс (счётчик успел устареть).
+            block["status"] = "ok"
+            block["server_sha"] = local_sha
+            return block
+        # Корень обязан быть валидным для читателя: без seed'а override-корень, в котором
+        # лежит только индекс сервера, заменил бы поставку пустотой.
+        seed_override_root(shipped_root, override_root)
+        write_server_index(override_root, fetched, fetched_at=now)
+    except Exception as exc:  # noqa: BLE001 - сверка не роняет ни тик, ни окно
+        failed = index_status_from_error(exc, block)
+        failed["last_check_at"] = now
+        if failed["status"] == "stale" and not failed["detail"]:
+            failed["detail"] = "индекс у клиента не совпадает с сервером"
+        return failed
+    block.update({"status": "ok", "local_sha": fetched["sha256"], "local_source": "server",
+                  "server_sha": fetched["sha256"], "last_fetch_at": now,
+                  "generated_at": fetched.get("generated_at")})
+    return block
 
 
 def sync(client: "BackendClient", state: "CompanionState", ctx: "LicenseContext",

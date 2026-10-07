@@ -716,6 +716,9 @@ def test_runner_check_update_refreshes_stats_instead_of_pending(tmp_path, monkey
     monkeypatch.setattr(releases, "check", lambda *a, **k: {"available": False})
     monkeypatch.setattr(runner, "_sync_cookbook", lambda session: None)
     result = runner.run_action("check_update")
-    assert result["patterns"]["status"] == "ok"
+    # С 0.12.21 счётчик и сверка индекса идут в фоне — кнопка не ждёт сеть.
+    assert "refreshing" in result["patterns"]
+    runner._stats_thread.join(15.0)
+    assert runner.patterns_stats(refresh=False)["status"] == "ok"
     assert runner.status()["state"]["patterns"]["server"]["line"] == (
         "Паттерны: 4 паттерна на сервере, доступ по лицензии")

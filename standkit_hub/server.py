@@ -2944,19 +2944,23 @@ def make_handler(
             self._send_json(200, status)
 
         def _api_companion_patterns_stats(self) -> None:
-            """Счётчик библиотеки паттернов на сервере для окна «Обновления».
+            """Счётчик библиотеки паттернов и статус сверки индекса для окна «Обновления».
 
-            Тела паттернов выдаются онлайн по лицензии, загружать на диск нечего — окно
-            показывает только справку: сколько паттернов на сервере и когда библиотека
-            обновлялась. Ответ НЕ ждёт сеть: отдаётся последнее известное значение, а
-            устаревшее обновляется в фоновом потоке канала (``refreshing: true`` —
-            UI перечитает чуть позже). Отказ превращается в строку «нет связи с
+            Тела паттернов выдаются онлайн по лицензии; на диск клиента компаньон кладёт
+            только индекс — и сам докачивает его, когда на сервере опубликован другой
+            (``index``: ``status`` = ``ok``/``stale``/``offline``/``no_license``/
+            ``not_published``/``disabled``/``never``, «актуален» — только ``ok``). Ответ
+            НЕ ждёт сеть: отдаётся последнее известное значение, а устаревшее обновляется
+            (вместе со сверкой) в фоновом потоке канала (``refreshing: true`` — UI
+            перечитает чуть позже). Отказ превращается в строку «нет связи с
             сервером»/«лицензия не активна», а не в ошибку ответа.
             """
             if not self._companion_guard():
                 return
             if not self._companion_enabled():
-                stats = {"status": "disabled", "refreshing": False}
+                stats = {"status": "disabled", "refreshing": False,
+                         "index": {"status": "disabled",
+                                   "title": "канал обновлений выключен"}}
                 if _companion_patterns is not None:
                     stats["line"] = _companion_patterns.stats_line(stats)
                 self._send_json(200, stats)
@@ -2971,6 +2975,10 @@ def make_handler(
             except Exception as exc:  # noqa: BLE001 - справочная строка не роняет окно
                 stats = _companion_patterns.stats_from_error(exc)
                 stats["line"] = _companion_patterns.stats_line(stats)
+                index = _companion_patterns.index_status_from_error(exc)
+                index["title"] = _companion_patterns.INDEX_STATUS_TITLES.get(
+                    index["status"], index["status"])
+                stats["index"] = index
                 stats["refreshing"] = False
             self._send_json(200, stats)
 

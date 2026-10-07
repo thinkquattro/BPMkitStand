@@ -77,6 +77,10 @@ def _default_state() -> dict:
             # счётчик библиотеки на сервере для окна «Обновления»
             # (`patterns.fetch_stats`/`stats_from_error`): `None` — ещё не запрашивался.
             "server": None,
+            # сверка индекса паттернов клиента с сервером (`patterns.reconcile_index`):
+            # status/detail/local_sha/server_sha/last_check_at/last_fetch_at. `None` —
+            # сверки ещё не было.
+            "index_sync": None,
         },
         "releases": {
             "last_check_at": None,
@@ -193,12 +197,25 @@ def _latest_pattern_version(applied: list) -> Optional[str]:
     return best
 
 
-def _server_stats(raw: Any) -> dict:
-    """Счётчик библиотеки на сервере + строка окна. Пустой/битый блок — «ещё проверяем»."""
+def index_sync_summary(raw: Any) -> dict:
+    """Статус сверки индекса паттернов для UI. Пустой блок — `never` (ещё не сверялись)."""
+    from . import patterns as _patterns
+
+    block = dict(raw) if isinstance(raw, dict) else {}
+    status = str(block.get("status") or "never")
+    block["status"] = status
+    block["title"] = _patterns.INDEX_STATUS_TITLES.get(status, status)
+    return block
+
+
+def _server_stats(raw: Any, index_raw: Any = None) -> dict:
+    """Счётчик библиотеки на сервере + строка окна + статус сверки индекса (`index`).
+    Пустой/битый блок — «ещё проверяем»."""
     from . import patterns as _patterns
 
     block = dict(raw) if isinstance(raw, dict) else {}
     block["line"] = _patterns.stats_line(block)
+    block["index"] = index_sync_summary(index_raw)
     return block
 
 
@@ -358,7 +375,7 @@ class CompanionState:
                 "had_new_last_run": bool(pat.get("had_new_last_run")),
                 # библиотека на сервере (тела выдаются онлайн по лицензии) и готовая
                 # строка для окна «Обновления» — см. `patterns.stats_line`.
-                "server": _server_stats(pat.get("server")),
+                "server": _server_stats(pat.get("server"), pat.get("index_sync")),
             },
             "releases": {
                 "last_check_at": rel.get("last_check_at"),

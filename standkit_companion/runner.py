@@ -42,6 +42,12 @@
 тихого действия»). Автоматика доходит ровно до `check` и — по явной настройке
 `auto_stage_release` — до `stage`: скачать и проверить подпись можно молча, подменить
 исполняемый файл MCP — только по команде человека. См. `_run_releases`.
+
+**7. Индекс паттернов обновляется сам.** Плановый тик паттернов и кнопка «Проверить
+обновления» сверяют отпечаток индекса клиента с `index_sha256` сервера и при расхождении
+докачивают индекс в `dev/patterns_index.server.json` (`patterns.reconcile_index`). Тик
+делает это в своём потоке, кнопка — в фоне (`patterns_stats(force=True)`), чтобы UI не ждал
+сеть. Статус сверки — `state.patterns["index_sync"]`; «актуален» только при совпадении.
 """
 from __future__ import annotations
 
@@ -58,7 +64,7 @@ from . import (__version__, candidates, context, cookbook, hub_channel, patterns
               releases, revocations, skills_channel)
 from .backend import BackendClient
 from .errors import ChannelError, CompanionError, ContextUnavailable, NotModified
-from .state import STATE_FILE_NAME, CompanionState
+from .state import STATE_FILE_NAME, CompanionState, index_sync_summary
 
 __all__ = [
     "CYCLES",
@@ -357,6 +363,9 @@ class CompanionRunner:
         self._stats_guard = threading.Lock()
         self._stats_thread: Optional[threading.Thread] = None
         self._stats_at: Optional[float] = None
+        # Сверка индекса паттернов с сервером (и докачка) — не больше одной одновременно:
+        # фоновый поток окна и плановый тик пишут один и тот же файл индекса.
+        self._index_lock = threading.Lock()
 
     # -- настройки ---------------------------------------------------------------------
     def _load_settings_from_config(self):
@@ -566,53 +575,84 @@ class CompanionRunner:
         return outcome
 
     # -- счётчик библиотеки паттернов на сервере ---------------------------------------
-    def _stats_with_session(self, session) -> dict:
-        """Счётчик библиотеки на сервере попутно с тиком/действием, уже под замком прогонов.
+    def _reconcile_index(self, session, stats: dict) -> dict:
+        """Сверка индекса паттернов с сервером (и докачка при расхождении).
 
-        Сбой счётчика не роняет ни тик, ни действие: это справочная строка окна, отказ
-        превращается в «нет связи»/«лицензия не активна».
+        Не больше одной сверки одновременно (`_index_lock`); исключения не выходят —
+        `patterns.reconcile_index` сама превращает любой отказ в статус.
+        """
+        with self._index_lock:
+            try:
+                return patterns.reconcile_index(
+                    session.client, session.ctx, stats,
+                    previous=self._state.patterns.get("index_sync"))
+            except Exception as exc:  # noqa: BLE001 - страховка: сверка best-effort
+                return patterns.index_status_from_error(
+                    exc, self._state.patterns.get("index_sync"))
+
+    def _stats_with_session(self, session) -> dict:
+        """Счётчик библиотеки на сервере и сверка индекса попутно с тиком/действием,
+        уже под замком прогонов.
+
+        Сбой счётчика или сверки не роняет ни тик, ни действие: отказ превращается в
+        статус («нет связи»/«лицензия не активна»/«устарел»/«не опубликован»).
+        Возвращается счётчик с вложенным статусом сверки (`index`).
         """
         try:
             stats = patterns.fetch_stats(session.client)
         except Exception as exc:  # noqa: BLE001 - попутный запрос, best-effort
             stats = patterns.stats_from_error(exc)
+        index = self._reconcile_index(session, stats)
         self._state.patterns["server"] = stats
+        self._state.patterns["index_sync"] = index
         self._stats_at = self._monotonic()
         self._save_state()
-        return stats
+        return dict(stats, index=index_sync_summary(index))
 
-    def _fetch_stats_unlocked(self) -> dict:
-        """Резолв контекста и запрос счётчика БЕЗ замка прогонов (фоновый поток)."""
+    def _fetch_stats_unlocked(self) -> tuple:
+        """Резолв контекста, запрос счётчика и сверка индекса БЕЗ замка прогонов
+        (фоновый поток). → `(stats, index_sync)`."""
         try:
             settings = self.settings()
             if not bool(getattr(settings, "enabled", False)):
-                return {"status": "disabled", "detail": "канал обновлений выключен",
-                        "checked_at": None}
+                stats = {"status": "disabled", "detail": "канал обновлений выключен",
+                         "checked_at": None}
+                return stats, {"status": "disabled", "detail": stats["detail"]}
             session = self._session(settings)
-            return patterns.fetch_stats(session.client)
         except Exception as exc:  # noqa: BLE001 - фоновый поток не имеет права умереть
-            return patterns.stats_from_error(exc)
+            return (patterns.stats_from_error(exc),
+                    patterns.index_status_from_error(
+                        exc, self._state.patterns.get("index_sync")))
+        try:
+            stats = patterns.fetch_stats(session.client)
+        except Exception as exc:  # noqa: BLE001
+            stats = patterns.stats_from_error(exc)
+        return stats, self._reconcile_index(session, stats)
 
     def _refresh_stats_background(self) -> None:
-        stats = self._fetch_stats_unlocked()
+        stats, index = self._fetch_stats_unlocked()
         self._stats_at = self._monotonic()
         if self._run_lock.acquire(timeout=STATS_LOCK_WAIT_SEC):
             try:
                 self._state.patterns["server"] = stats
+                self._state.patterns["index_sync"] = index
                 self._save_state()
             finally:
                 self._run_lock.release()
         else:
-            # Замок занят длинным тиком: ключ уже существует, замена значения атомарна;
+            # Замок занят длинным тиком: ключи уже существуют, замена значения атомарна;
             # на диск результат попадёт с ближайшим сохранением состояния.
             self._state.patterns["server"] = stats
+            self._state.patterns["index_sync"] = index
 
     def patterns_stats(self, *, refresh: bool = True, force: bool = False,
                        wait: float = 0.0) -> dict:
-        """Счётчик библиотеки паттернов на сервере для окна «Обновления» — без ожидания сети.
+        """Счётчик библиотеки паттернов на сервере и статус сверки индекса для окна
+        «Обновления» — без ожидания сети.
 
-        Отдаёт последнее известное значение (с готовой строкой `line`) и, если оно
-        устарело, запускает обновление в фоновом потоке (не больше одного одновременно).
+        Отдаёт последнее известное значение (с готовой строкой `line` и статусом сверки
+        индекса `index`) и, если оно устарело, запускает в фоновом потоке запрос счётчика
+        и сверку индекса с докачкой (не больше одного потока одновременно).
         `refreshing` — фоновый запрос ещё идёт; UI перечитает значение чуть позже.
         `wait` — сколько секунд подождать фоновый запрос (CLI и тесты; UI передаёт 0).
         """
@@ -632,6 +672,7 @@ class CompanionRunner:
             inflight = thread.is_alive()
         block = dict(self._state.patterns.get("server") or {})
         block["line"] = patterns.stats_line(block)
+        block["index"] = index_sync_summary(self._state.patterns.get("index_sync"))
         block["refreshing"] = bool(inflight)
         return block
 
@@ -1006,10 +1047,11 @@ class CompanionRunner:
                 result["staged"] = staged
                 result["installer"] = installer
                 result["cookbook"] = self._sync_cookbook(session)
-                # «Проверить» в окне «Обновления» заодно обновляет счётчик библиотеки
-                # паттернов на сервере (тела выдаются онлайн, загружать нечего). Сбой
-                # счётчика проверку не роняет.
-                result["patterns"] = self._stats_with_session(session)
+                # «Проверить» в окне «Обновления» заодно сверяет индекс паттернов с
+                # сервером (и докачивает его при расхождении) и обновляет счётчик. Это
+                # делается в ФОНЕ (`patterns_stats(force=True)`): докачка индекса не
+                # должна держать кнопку; окно перечитывает статус по `refreshing`.
+                result["patterns"] = self.patterns_stats(force=True)
                 return result
             if action == "stage_update":
                 return releases.stage(session.client, self._state, session.ctx,

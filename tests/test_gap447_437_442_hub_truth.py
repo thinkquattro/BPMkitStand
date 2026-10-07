@@ -353,7 +353,11 @@ def test_ui_patterns_row_is_info_only_with_server_line():
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
     assert "/api/companion/patterns-stats" in js
     assert "s.line ||" in js
-    assert 'setChip("upd-patterns-chip", "ok", "онлайн"' in js
+    # С 0.12.21 «актуален» — только при совпадении индекса клиента с сервером
+    # (`index.status === "ok"`), а не просто «сервер ответил».
+    assert 'ix.status === "ok"' in js
+    assert 'setChip("upd-patterns-chip", "ok", "актуален"' in js
+    assert 'setChip("upd-patterns-chip", "ok", "онлайн"' not in js
     assert "Индекс разделов не обновлён" in js
     assert "refreshPatternsStats();" in js, "окно обязано запросить счётчик при открытии"
 

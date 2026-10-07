@@ -3214,7 +3214,14 @@
   // (`patterns.server.line`, см. standkit_companion.patterns.stats_line):
   // «N паттернов на сервере, библиотека обновлена ДД.ММ.ГГГГ, доступ по лицензии»,
   // «доступ по лицензии: лицензия не активна» или «нет связи с сервером».
+  // Индекс паттернов канал докачивает сам (сверка отпечатка с сервером на тике и
+  // по «Проверить обновления»); чип «актуален» — только при совпадении индексов
+  // (`server.index.status === "ok"`, см. standkit_companion.patterns.reconcile_index).
   let patternsStatsLive = null;
+  // Строка деталей пункта «Паттерны» собирается из двух причин: сверка индекса с
+  // сервером и остановленный цикл канала.
+  let patternsIndexDetail = "";
+  let patternsCycleDetail = "";
 
   /** Более свежий из двух снимков счётчика (по `checked_at`, ISO-метки UTC одного вида). */
   function newerPatternsStats(a, b) {
@@ -3223,37 +3230,67 @@
     return String(b.checked_at || "") > String(a.checked_at || "") ? b : a;
   }
 
+  /** Причина «не актуален» у сверки индекса паттернов — для строки деталей. */
+  function patternsIndexReason(index) {
+    const ix = index || {};
+    if (ix.status === "stale") {
+      return `Индекс паттернов устарел: ${String(ix.detail || "не совпадает с сервером")}`;
+    }
+    if (ix.status === "not_published") {
+      return "Индекс паттернов на сервере ещё не опубликован издателем";
+    }
+    return "";
+  }
+
+  /** Чип пункта «Паттерны»: «актуален» — ТОЛЬКО когда индекс у клиента совпал с
+   * индексом на сервере (`index.status === "ok"`); пока фоновая сверка идёт —
+   * «обновляется…»; иначе причина (устарел / нет связи / лицензия / не опубликован). */
   function renderPatternsServer(server) {
     const metaEl = byId("upd-patterns-meta");
     if (!metaEl) return;
     const s = server || {};
+    const ix = s.index || {};
     metaEl.textContent = s.line || "Паттерны: проверяем сервер…";
-    if (s.status === "ok") {
-      setChip("upd-patterns-chip", "ok", "онлайн", "");
-    } else if (s.status === "no_license") {
-      setChip("upd-patterns-chip", "err", "нет лицензии", s.detail || "");
-    } else if (s.status === "offline") {
-      setChip("upd-patterns-chip", null, "нет связи", s.detail || "");
+    if (ix.status === "ok") {
+      setChip("upd-patterns-chip", "ok", "актуален", "");
+    } else if (s.refreshing) {
+      setChip("upd-patterns-chip", null, "обновляется…", "");
+    } else if (ix.status === "stale") {
+      setChip("upd-patterns-chip", "err", "устарел", ix.detail || "");
+    } else if (ix.status === "no_license" || s.status === "no_license") {
+      setChip("upd-patterns-chip", "err", "лицензия не активна", ix.detail || s.detail || "");
+    } else if (ix.status === "offline" || s.status === "offline") {
+      setChip("upd-patterns-chip", null, "нет связи", ix.detail || s.detail || "");
+    } else if (ix.status === "not_published") {
+      setChip("upd-patterns-chip", null, "не опубликован", ix.detail || "");
     } else {
       setChip("upd-patterns-chip", null, "", "");
     }
+    patternsIndexDetail = patternsIndexReason(ix);
+    renderPatternsDetail();
+  }
+
+  function renderPatternsDetail() {
+    const parts = [patternsIndexDetail, patternsCycleDetail].filter(Boolean);
+    setDetail("upd-patterns-detail", parts.join(" · "));
   }
 
   function renderPatternsRow(status) {
     const block = patternsBlock(status);
     const cycle = ((status && status.cycles) || {}).patterns || {};
-    renderPatternsServer(newerPatternsStats(patternsStatsLive, block.server || null));
     // Индекс разделов (метаданные без тел) канал обновляет сам; если его цикл
     // остановлен — причина видна строкой деталей, справка о сервере остаётся.
     const failed = !!cycle.halted || block.status === "error";
     const reason = !failed ? "" : (cycle.halted
       ? (cycle.halt_reason || "повторы остановлены до вмешательства")
       : (String(block.detail || "") || "ошибка обновления индекса"));
-    setDetail("upd-patterns-detail", reason ? `Индекс разделов не обновлён: ${reason}` : "");
+    patternsCycleDetail = reason ? `Индекс разделов не обновлён: ${reason}` : "";
+    renderPatternsServer(newerPatternsStats(patternsStatsLive, block.server || null));
   }
 
-  /** Счётчик библиотеки на сервере: ответ мгновенный, сеть — в фоне канала
-   * (`refreshing: true` — перечитываем через полторы секунды, не больше 4 раз). */
+  /** Счётчик библиотеки на сервере и сверка индекса: ответ мгновенный, сеть (и
+   * докачка индекса, до 15 с) — в фоне канала (`refreshing: true` — перечитываем
+   * через полторы секунды, не больше 14 раз). */
   async function refreshPatternsStats(attempt) {
     const n = attempt || 0;
     let data = null;
@@ -3264,8 +3301,12 @@
     }
     patternsStatsLive = newerPatternsStats(patternsStatsLive, data);
     if (data && !data.checked_at) patternsStatsLive = data;
+    // «обновляется…» — по последнему ответу, даже если значение ещё прежнее.
+    if (patternsStatsLive && data) {
+      patternsStatsLive = Object.assign({}, patternsStatsLive, { refreshing: !!data.refreshing });
+    }
     renderPatternsServer(patternsStatsLive);
-    if (data && data.refreshing && n < 4) {
+    if (data && data.refreshing && n < 14) {
       setTimeout(() => refreshPatternsStats(n + 1), 1500);
     }
   }
@@ -3877,6 +3918,8 @@
       toast(COMPANION_ACTION_DONE[action] || "Готово");
       if (action === "check_update") {
         // «проверено …» — в строке updates-checked-at (обновит renderCompanionStatus).
+        // Сверка индекса паттернов запущена каналом в фоне — перечитываем её статус.
+        refreshPatternsStats();
       }
       if (data && data.status) {
         companionBusy = false;
