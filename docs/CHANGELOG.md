@@ -1733,6 +1733,7 @@
 - Первый публичный релиз ядра `standkit` + агента `standkit_agent` + веб-дашборда
   `standkit_hub` на PyPI; фронт-README, `docs/REMOTE_STANDS.md`, скриншоты.
 
+[0.12.22]: https://pypi.org/project/standkit/0.12.22/
 [0.12.21]: https://pypi.org/project/standkit/0.12.21/
 [0.12.20]: https://pypi.org/project/standkit/0.12.20/
 [0.12.19]: https://pypi.org/project/standkit/0.12.19/
