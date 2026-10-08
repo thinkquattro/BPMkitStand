@@ -766,7 +766,7 @@
                 <div><div class="lic-k">Тариф</div><div class="lic-v" id="lic-tier">—</div></div>
                 <div><div class="lic-k">Состояние</div><div class="lic-v" id="lic-state">—</div></div>
                 <div><div class="lic-k">Действует до</div><div class="lic-v" id="lic-until">—</div></div>
-                <div><div class="lic-k">Активирована на</div><div class="lic-v" id="lic-activated">—</div></div>
+                <div><div class="lic-k" id="lic-activated-k">Активирована на</div><div class="lic-v" id="lic-activated">—</div></div>
                 <div><div class="lic-k">Хранится</div><div class="lic-v" id="lic-source">—</div></div>
               </div>
               <div class="panel-toolbar pane-actions">
@@ -1329,6 +1329,9 @@
                   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
                 </button>
               </div>
+              <!-- GAP-783: exe-сборка (установщик BPMkit) — pip не показывается вовсе;
+                   когда каналу ставить нечего — эта подсказка. -->
+              <div class="upd-sub upd-sub-inline" id="upd-hub-installer-note" hidden>Обновление — установщиком BPMkit</div>
               <div class="upd-restart" id="upd-hub-wait-note" hidden>
                 <strong>Диспетчер обновляется…</strong><span> сейчас он завершится и перезапустится новой версией — окно обновится само.</span>
               </div>
@@ -1385,6 +1388,8 @@
                 <span class="upd-ver" id="upd-self-current">—</span>
               </div>
               <div class="upd-detail" id="upd-self-detail" hidden></div>
+              <!-- GAP-783: exe-сборка по PyPI не сверяется — вместо pip эта подсказка. -->
+              <div class="upd-sub upd-sub-inline" id="upd-self-installer-note" hidden>Обновление — установщиком BPMkit</div>
               <div class="upd-pip" id="upd-self-pip" hidden>
                 <code id="upd-self-pip-cmd">python -m pip install -U standkit</code>
                 <button type="button" class="secondary upd-icon-btn" id="upd-self-pip-copy-btn" hidden title="Скопировать команду обновления: python -m pip install -U standkit" aria-label="Скопировать команду pip">

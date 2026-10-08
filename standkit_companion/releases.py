@@ -1005,6 +1005,157 @@ def staged_requires_installer(state) -> bool:
 
 
 # ======================================================================================
+# GAP-781: согласованность поставки после подмены «только exe»
+# ======================================================================================
+#
+# Путь обновления «только бинарь» (`apply_staged`/`rollback`) подменял ОДИН файл —
+# `BPMkit.exe`, а у поставки установщика рядом лежат ещё два, которые сервер читает:
+#
+# * `BPMkit.exe.sha256` — эталон суммы сборки (`tools/set_build_flags.py
+#   --write-sidecar`, формат sha256sum: «<hex>  <имя>\n»). По нему
+#   `licensing._binary_self_check_uncached` сверяет целостность артефакта; после подмены
+#   эталон оставался от СТАРОГО бинаря — у клиента ложное «контрольная сумма артефакта
+#   НЕ совпадает… переустановите»;
+# * `manifest.json` в корне установки (родитель `server\`, та же раскладка, что у
+#   `_package_root()`/`_resolve_version()` сервера) — поле `version` оставалось прежним,
+#   отсюда ложный WARN self_check «версия процесса устарела относительно диска».
+#
+# Обе правки — ЛУЧШЕЕ СТАРАНИЕ: подмена бинаря к этому моменту уже состоялась и
+# подписью доказана, откатывать её из-за соседнего файла нельзя. Исход каждой правки
+# пишется в состояние канала (`releases.current.install_sync`) и в ответ операции.
+# Путь «полный установщик» (`apply_installer`) переписывает поставку целиком сам — здесь
+# он не участвует.
+
+#: Суффикс эталона суммы рядом с бинарём (как у сборки: `<exe>.sha256`).
+SHA256_SIDECAR_SUFFIX = ".sha256"
+
+
+def _install_root_for(binary: Path) -> Path:
+    """Корень установки по пути бинаря — зеркало `_package_root()` сервера во frozen:
+    бинарь в каталоге `server` (без учёта регистра) → его родитель, иначе сам каталог."""
+    parent = binary.parent
+    if parent.name.lower() == "server":
+        return parent.parent
+    return parent
+
+
+def _top_level_key_value_span(text: str, key: str) -> Optional[tuple]:
+    """(start, end) строкового ЗНАЧЕНИЯ ключа `key` на ВЕРХНЕМ уровне JSON-объекта
+    (включая кавычки) или `None`. Сканер учитывает строки и экранирование, поэтому не
+    путает `"version"` с `"manifest_version"` и с одноимёнными ключами вложенных
+    объектов. Значение — только строка: иное (число, null) считаем «не наш формат»."""
+    depth = 0
+    i = 0
+    n = len(text)
+    expect_key = False
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    break
+                j += 1
+            if j >= n:
+                return None
+            token = text[i + 1:j]
+            if depth == 1 and expect_key and token == key:
+                k = j + 1
+                while k < n and text[k] in " \t\r\n":
+                    k += 1
+                if k < n and text[k] == ":":
+                    k += 1
+                    while k < n and text[k] in " \t\r\n":
+                        k += 1
+                    if k < n and text[k] == '"':
+                        m = k + 1
+                        while m < n:
+                            if text[m] == "\\":
+                                m += 2
+                                continue
+                            if text[m] == '"':
+                                return (k, m + 1)
+                            m += 1
+                    return None
+            expect_key = False
+            i = j + 1
+            continue
+        if ch in "{[":
+            depth += 1
+            expect_key = ch == "{" and depth == 1
+        elif ch in "}]":
+            depth -= 1
+        elif ch == "," and depth == 1:
+            expect_key = True
+        i += 1
+    return None
+
+
+def _rewrite_sha256_sidecar(binary: Path) -> str:
+    """Переписать `<binary>.sha256` фактической суммой бинаря. Только если эталон уже
+    есть: его кладёт поставка установщика; нет файла — нет и ложной тревоги, которую
+    надо снимать (самопроверка сервера тогда честно «skipped»), а создавать эталон
+    там, где поставка его не предусмотрела, — не дело канала обновлений."""
+    sidecar = binary.with_name(binary.name + SHA256_SIDECAR_SUFFIX)
+    if not sidecar.is_file():
+        return "absent"
+    digest = fsutil.sha256_file(binary)
+    fsutil.atomic_write_text(sidecar, f"{digest}  {binary.name}\n")
+    return "updated"
+
+
+def _rewrite_manifest_version(binary: Path, version: str) -> str:
+    """Точечно заменить верхнеуровневое `"version"` в `manifest.json` корня установки.
+
+    Остальной текст — байт в байт (форматирование, порядок ключей, кириллица, BOM,
+    переводы строк): правится ТОЛЬКО значение. Результат обязан распарситься, и всё,
+    кроме `version`, обязано совпасть с исходным — иначе файл не трогаем."""
+    version = str(version or "").strip()
+    if not version:
+        return "skipped: версия неизвестна"
+    manifest = _install_root_for(binary) / "manifest.json"
+    if not manifest.is_file():
+        return "absent"
+    raw = manifest.read_bytes()
+    bom = b"\xef\xbb\xbf" if raw.startswith(b"\xef\xbb\xbf") else b""
+    text = raw[len(bom):].decode("utf-8")
+    before = json.loads(text)
+    if not isinstance(before, dict):
+        return "skipped: manifest.json не объект"
+    if str(before.get("version") or "") == version:
+        return "unchanged"
+    span = _top_level_key_value_span(text, "version")
+    if span is None:
+        return "skipped: нет строкового поля version"
+    start, end = span
+    new_text = text[:start] + json.dumps(version, ensure_ascii=False) + text[end:]
+    after = json.loads(new_text)
+    expected = dict(before)
+    expected["version"] = version
+    if after != expected:
+        return "skipped: точечная правка изменила бы не только version"
+    fsutil.atomic_write_bytes(manifest, bom + new_text.encode("utf-8"))
+    return "updated"
+
+
+def _sync_install_companions(binary: Path, version: Optional[str]) -> dict:
+    """Обе правки соседей бинаря; каждая — независимо и без исключений наружу."""
+    result: dict = {}
+    for name, action in (
+        ("sidecar", lambda: _rewrite_sha256_sidecar(binary)),
+        ("manifest", lambda: _rewrite_manifest_version(binary, version or "")),
+    ):
+        try:
+            result[name] = action()
+        except (OSError, ValueError) as exc:  # ValueError ⊃ JSONDecodeError/UnicodeError
+            result[name] = f"error: {exc}"
+    return result
+
+
+# ======================================================================================
 # Применение
 # ======================================================================================
 #: Первые два байта исполняемого файла Windows (PE/MZ-заголовок, DOS-заглушка). Проверяем
@@ -1253,6 +1404,8 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
         ) from None
 
     applied_at = utc_now_iso()
+    # GAP-781: эталон суммы и версия в manifest.json — вслед за бинарём.
+    install_sync = _sync_install_companions(dest, new_version)
     state.push_history({
         "version": new_version,
         "previous_version": previous_version,
@@ -1270,6 +1423,7 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
         "signed_at": verified.get("signed_at"),
         "path": str(dest),
         "applied_at": applied_at,
+        "install_sync": install_sync,
     }
     rel["staged"] = None
     rel["restart_required"] = True
@@ -1287,6 +1441,7 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
         "restart_required": True,
         "message": RESTART_MESSAGE,
         "reason": "applied",
+        "install_sync": install_sync,
     }
 
 
@@ -1835,12 +1990,15 @@ def rollback(state, ctx, *, version: Optional[str] = None) -> dict:
 
     restored = str(entry.get("previous_version") or "").strip()
     rolled_from = str(entry.get("version") or "").strip()
+    # GAP-781: та же согласованность поставки, что после apply_staged.
+    install_sync = _sync_install_companions(dest, restored)
     rel["current"] = {
         "version": restored,
         "sha256": entry.get("backup_sha256"),
         "path": str(dest),
         "applied_at": utc_now_iso(),
         "rolled_back_from": rolled_from or None,
+        "install_sync": install_sync,
     }
     del history[:index + 1]
     rel["restart_required"] = True
@@ -1858,6 +2016,7 @@ def rollback(state, ctx, *, version: Optional[str] = None) -> dict:
         "restart_required": True,
         "message": message,
         "reason": "rolled_back",
+        "install_sync": install_sync,
     }
 
 

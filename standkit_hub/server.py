@@ -63,7 +63,7 @@ from email.utils import formatdate, parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from standkit import __version__ as _standkit_version
 from standkit import lifecycle as _lifecycle
@@ -144,6 +144,26 @@ _STAND_ACTION_RE = re.compile(
 # /logs/list и /logs/file удалены вместе с фронтом, который их использовал.
 _STAND_LOGS_SUB_RE = re.compile(r"^/api/stand/(?P<name>[^/]+)/logs/(?P<sub>open-folder)$")
 _SECRET_RE = re.compile(r"^/api/secret/(?P<ref>[^/]+)$")
+
+
+def _secret_ref_from_path(match: "re.Match[str]") -> str:
+    """
+    Ссылка на секрет из пути ``/api/secret/<ref>`` — В РАСКОДИРОВАННОМ виде.
+
+    ЗАЧЕМ (GAP-780). Страница строит путь через ``encodeURIComponent(ref)``, и
+    двоеточие — обязательный разделитель ref'ов вида ``bpmsoft-mcp:remote:token``
+    — уходит в сеть как ``%3A``. ``urlparse(...).path`` проценты НЕ раскрывает,
+    поэтому без ``unquote`` валидатор видел ``%`` и отвечал 400 «invalid secret
+    ref» на любой ref с двоеточием: статусы «секрет задан/не задан» показывали
+    ошибку, кнопка «Задать…» не сохраняла. Тесты слали голое двоеточие (браузер
+    так не делает) — потому дефект и жил.
+
+    Раскрываем ДО валидации: whitelist ``validate_secret_ref`` проверяет уже
+    настоящую строку, а ``%2F`` и прочее раскрытое в недопустимые символы
+    отсекается им же. Двойное кодирование (``%253A``) раскрывается один раз
+    и честно падает на валидации — второй круг ``unquote`` не делаем.
+    """
+    return unquote(match.group("ref"))
 
 # Регистрация УЖЕ существующего стенда в общем реестре (кнопка "Зарегистрировать
 # стенд" на дашборде) — отдельный точный путь, НЕ пересекается с _STAND_ACTION_RE
@@ -1988,7 +2008,10 @@ def make_handler(
                     "source": None,
                     "checked_at": None,
                     "error": None,
-                    "pip_command": _self_version.PIP_INSTALL_COMMAND,
+                    # GAP-783: exe из установщика pip-командой НЕ обновляется —
+                    # не отдаём её вовсе, чтобы ни одна версия страницы не могла
+                    # её показать или скопировать.
+                    "pip_command": None,
                     "companion": companion_available(),
                 }
                 self._send_json(200, payload)
@@ -3192,7 +3215,7 @@ def make_handler(
             if m:
                 if not self._authorize_read():
                     return
-                self._api_secret_get(m.group("ref"))
+                self._api_secret_get(_secret_ref_from_path(m))
                 return
 
             m = _STAND_LOGS_SUB_RE.match(path)
@@ -3369,7 +3392,7 @@ def make_handler(
             if m:
                 if not self._authorize_mutation():
                     return
-                self._api_secret_post(m.group("ref"))
+                self._api_secret_post(_secret_ref_from_path(m))
                 return
 
             m = _STAND_LOGS_SUB_RE.match(path)
@@ -3435,7 +3458,7 @@ def make_handler(
             if m:
                 if not self._authorize_mutation():
                     return
-                self._api_secret_delete(m.group("ref"))
+                self._api_secret_delete(_secret_ref_from_path(m))
                 return
 
             self._send_unknown_api_route()
