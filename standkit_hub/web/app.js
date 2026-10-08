@@ -2597,7 +2597,7 @@
     return lic.edition === "companion" && LICENSE_CHANNEL_STATUSES.indexOf(lic.status) >= 0;
   }
 
-  /** Подвал окна «Обновления». GAP-783: свободный вид exe-сборки (frozen) НЕ
+  /** Подвал окна «Обновления». Свободный вид exe-сборки (frozen) НЕ
    * обещает сверку с PyPI — сервер её для exe и не делает. */
   function updatesFooterText(paid, selfVersion) {
     if (paid) return "Скачивание — заранее, установка — только по вашей кнопке";
@@ -3587,7 +3587,7 @@
     return (status && status.hub) || {};
   }
 
-  // GAP-783: exe-сборка (frozen) — это поставка установщика BPMkit, pip к ней
+  // exe-сборка (frozen) — это поставка установщика BPMkit, pip к ней
   // не применим ВОВСЕ (решение владельца: «в версии, установленной из
   // установщика, в меню обновления не должно быть команды pip и кнопки
   // копирования»). Признак берём у канала: `frozen`, а у старого канала без
@@ -3597,7 +3597,7 @@
   }
 
   /** Подпись способа установки рядом с версией: «X · установщик» для exe,
-   * «X · pip» для pip-установки (GAP-783: раньше платный вид всегда писал «pip»). */
+   * «X · pip» для pip-установки. */
   function hubVersionLabel(current, frozen) {
     if (!current) return "версия неизвестна";
     return `${current} · ${frozen ? "установщик" : "pip"}`;
@@ -3643,7 +3643,7 @@
         currentEl.title = "Программа (standkit-hub), pip-установка. Обновление — командой pip, не диспетчером";
       }
     } else {
-      // GAP-783: exe — ни команды pip, ни иконки копирования; только канал
+      // exe — ни команды pip, ни иконки копирования; только канал
       // издателя (Скачать → Установить), а когда ставить нечего — подсказка,
       // что эта сборка обновляется установщиком BPMkit.
       if (pipBox) pipBox.hidden = true;
@@ -3763,7 +3763,7 @@
     const installerNote = byId("upd-self-installer-note");
     if (installerNote) installerNote.hidden = !frozen;
     if (frozen) {
-      // GAP-783: exe по PyPI не сверяется вовсе (сервер его и не спрашивает) —
+      // exe по PyPI не сверяется вовсе (сервер его и не спрашивает) —
       // чип «последняя» был бы обещанием проверки, которой не было. Честно:
       // без чипа, с подсказкой «обновление — установщиком BPMkit».
       setChip("upd-self-chip", null, "", "");
@@ -3994,7 +3994,7 @@
       const pipCopyBtn = byId(btnId);
       if (!pipCopyBtn) return;
       pipCopyBtn.addEventListener("click", async () => {
-        // GAP-783: в exe-сборке копировать pip нечего — даже если кнопку
+        // В exe-сборке копировать pip нечего — даже если кнопку
         // кто-то откроет (старая разметка/кэш), команду не отдаём.
         if (pipCopyBtn.hidden) return;
         const cmdId = btnId === "upd-hub-pip-copy-btn" ? "upd-hub-pip-cmd" : "upd-self-pip-cmd";
@@ -4225,7 +4225,7 @@
   }
 
   /**
-   * GAP-782: строка «Активация» экрана лицензии — честно по ``activation_state``
+   * Строка «Активация» экрана лицензии — честно по ``activation_state``
    * из сводки ``setup license-info --json`` (``licensing.license_summary`` MCP,
    * хаб отдаёт её как есть через ``GET /api/license``).
    *

@@ -150,7 +150,7 @@ def _secret_ref_from_path(match: "re.Match[str]") -> str:
     """
     Ссылка на секрет из пути ``/api/secret/<ref>`` — В РАСКОДИРОВАННОМ виде.
 
-    ЗАЧЕМ (GAP-780). Страница строит путь через ``encodeURIComponent(ref)``, и
+    ЗАЧЕМ. Страница строит путь через ``encodeURIComponent(ref)``, и
     двоеточие — обязательный разделитель ref'ов вида ``bpmsoft-mcp:remote:token``
     — уходит в сеть как ``%3A``. ``urlparse(...).path`` проценты НЕ раскрывает,
     поэтому без ``unquote`` валидатор видел ``%`` и отвечал 400 «invalid secret
@@ -2008,7 +2008,7 @@ def make_handler(
                     "source": None,
                     "checked_at": None,
                     "error": None,
-                    # GAP-783: exe из установщика pip-командой НЕ обновляется —
+                    # exe из установщика pip-командой НЕ обновляется —
                     # не отдаём её вовсе, чтобы ни одна версия страницы не могла
                     # её показать или скопировать.
                     "pip_command": None,

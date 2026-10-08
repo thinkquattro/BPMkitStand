@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+## [0.12.23] — 2026-10-08
+
+### Изменено
+
+- **Из файлов поставки убраны служебные номера задач разработки.** Комментарии в
+  `standkit_hub/server.py`, `standkit_hub/mutex.py`, `standkit_hub/web/app.js`,
+  `index.html`, `style.css`, `standkit_companion/releases.py` и `mcp_mutex.py`
+  переформулированы по смыслу; поведение не меняется.
+
 ## [0.12.22] — 2026-10-07
 
 ### Исправлено
@@ -1733,6 +1742,7 @@
 - Первый публичный релиз ядра `standkit` + агента `standkit_agent` + веб-дашборда
   `standkit_hub` на PyPI; фронт-README, `docs/REMOTE_STANDS.md`, скриншоты.
 
+[0.12.23]: https://pypi.org/project/standkit/0.12.23/
 [0.12.22]: https://pypi.org/project/standkit/0.12.22/
 [0.12.21]: https://pypi.org/project/standkit/0.12.21/
 [0.12.20]: https://pypi.org/project/standkit/0.12.20/
