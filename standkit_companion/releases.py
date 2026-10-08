@@ -36,7 +36,7 @@
 узнавал, что MCP-сервер работает, только косвенно — по `PermissionError` из
 `fsutil.replace_with_retry`, уже ПОСЛЕ того, как сделан бэкап. `apply_staged` теперь
 сначала спрашивает `mcp_mutex.server_mutex_exists()` (сервер BPMkit сам объявляет о себе
-именованным Windows-мьютексом, GAP-155б в поставке BPMkit) и, если детект молчит,
+именованным Windows-мьютексом в поставке BPMkit) и, если детект молчит,
 дополнительно пробует неразрушающе открыть файл на запись (`fsutil.probe_writable`) — обе
 проверки строго до бэкапа. См. docstring `apply_staged` для точного порядка и текстов
 отказа.
@@ -1005,7 +1005,7 @@ def staged_requires_installer(state) -> bool:
 
 
 # ======================================================================================
-# GAP-781: согласованность поставки после подмены «только exe»
+# Согласованность поставки после подмены «только exe»
 # ======================================================================================
 #
 # Путь обновления «только бинарь» (`apply_staged`/`rollback`) подменял ОДИН файл —
@@ -1267,7 +1267,7 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
     дополняют друг друга и финальный `replace_with_retry`:
 
     1. **Детект по мьютексу** (`mcp_mutex.server_mutex_exists`, только Windows) — сервер
-       BPMkit с GAP-155б сам объявляет о себе именованным системным объектом. Если он
+       BPMkit сам объявляет о себе именованным системным объектом. Если он
        виден — канал честно говорит «сервер работает», НЕ выясняя того же самого через
        неудачную файловую операцию; kind `mcp_running`, отдельный от `local_io`, чтобы UI
        не путал «сервер точно занят» с «файловая ошибка неизвестной природы». Мьютекса не
@@ -1404,7 +1404,7 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
         ) from None
 
     applied_at = utc_now_iso()
-    # GAP-781: эталон суммы и версия в manifest.json — вслед за бинарём.
+    # Эталон суммы и версия в manifest.json — вслед за бинарём.
     install_sync = _sync_install_companions(dest, new_version)
     state.push_history({
         "version": new_version,
@@ -1990,7 +1990,7 @@ def rollback(state, ctx, *, version: Optional[str] = None) -> dict:
 
     restored = str(entry.get("previous_version") or "").strip()
     rolled_from = str(entry.get("version") or "").strip()
-    # GAP-781: та же согласованность поставки, что после apply_staged.
+    # Та же согласованность поставки, что после apply_staged.
     install_sync = _sync_install_companions(dest, restored)
     rel["current"] = {
         "version": restored,
