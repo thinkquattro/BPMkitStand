@@ -304,7 +304,8 @@ body {
 [data-view="compact"] .stands-table td:nth-child(2),
 /* Очистка Redis — операция необратимая, ей не место в окне, по которому
    кликают мимоходом. Остаются старт, стоп и рестарт. */
-[data-view="compact"] .stands-table .icon-btn-redis {
+[data-view="compact"] .stands-table .icon-btn-redis,
+[data-view="compact"] .stands-table .icon-btn-edit {
   display: none;
 }
 
@@ -541,6 +542,118 @@ body {
 
 .register-conditional[hidden] {
   display: none;
+}
+
+/* --- форма регистрации/изменения: заполнение из конфигов, «Тест», встроенный выбор папки --- */
+
+/* Свои [hidden]-правила: .field-hint и список результатов задают display сами. */
+#register-engine-row[hidden],
+#register-test-result[hidden] {
+  display: none;
+}
+
+#register-probe-status {
+  white-space: pre-line;
+}
+
+#register-engine-row {
+  margin: -2px 0 10px;
+  overflow-wrap: anywhere;
+}
+
+.modal-footer .register-test-btn {
+  margin-right: auto;
+}
+
+.register-test-result {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.register-test-result li {
+  margin: 2px 0;
+}
+
+.register-test-result .rt-mark {
+  display: inline-block;
+  width: 1.4em;
+  font-weight: 700;
+}
+
+.rt-ok .rt-mark,
+.rt-summary.rt-ok {
+  color: var(--bpmkit-ok);
+}
+
+.rt-warn .rt-mark {
+  color: var(--bpmkit-unknown);
+}
+
+.rt-fail .rt-mark,
+.rt-summary.rt-fail {
+  color: var(--bpmkit-down);
+}
+
+.rt-skip .rt-mark {
+  color: var(--bpmkit-muted);
+}
+
+.rt-summary {
+  font-weight: 600;
+}
+
+#fs-browser-path {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bpmkit-panel-bg);
+  color: var(--bpmkit-text);
+}
+
+.fs-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+}
+
+.fs-list .fs-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--bpmkit-text);
+  text-align: left;
+  font-size: 13px;
+}
+
+.fs-list .fs-item:hover {
+  background: var(--bpmkit-row-hover);
+  filter: none;
+}
+
+.fs-list .fs-empty {
+  padding: 8px 10px;
+  color: var(--bpmkit-muted);
+  font-size: 12px;
+}
+
+.pick-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .modal-header {
@@ -1167,7 +1280,7 @@ body.hub-offline .stands-table-wrap {
      поэтому смена текста статуса («работает» → «Запускается…») больше не
      «дёргает» соседние колонки. Ширины заданы через <colgroup>. */
   table-layout: fixed;
-  min-width: 820px;
+  min-width: 900px;
   border-collapse: collapse;
   background: var(--bpmkit-panel-bg);
 }
@@ -1175,11 +1288,12 @@ body.hub-offline .stands-table-wrap {
 /* Ширины колонок (сумма = 100%); действия держат минимум под 4 кнопки. */
 .col-stand { width: 20%; }
 .col-transport { width: 11%; }
-.col-process { width: 15%; }
-.col-http { width: 20%; }
+.col-process { width: 14%; }
+.col-http { width: 16%; }
 .col-db { width: 11%; }
-.col-redis { width: 8%; }
-.col-actions { width: 15%; }
+.col-redis { width: 9%; }
+/* Пять иконок (старт, стоп, рестарт, очистка Redis, «Изменить») — колонка шире прежней. */
+.col-actions { width: 19%; }
 
 .stands-table th,
 .stands-table td {
@@ -1429,6 +1543,15 @@ span.value-has-reason {
 .icon-btn-redis {
   background: var(--bpmkit-muted);
   margin-right: 0;
+}
+
+.icon-btn-edit {
+  background: var(--bpmkit-muted);
+  margin-right: 0;
+}
+
+.icon-btn-redis + .icon-btn-edit {
+  margin-left: 4px;
 }
 
 .icon-btn:hover {

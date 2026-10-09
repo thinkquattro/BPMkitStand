@@ -451,6 +451,35 @@
     el.classList.toggle("visible", !!message);
   }
 
+  // Режим модалки: "create" — «Зарегистрировать стенд», "edit" — «Изменить»
+  // существующего (та же форма, POST /api/stand/update, имя не меняется).
+  const registerState = { mode: "create", name: null };
+
+  const DEFAULT_DB_PORTS = { postgres: "5432", mssql: "" };
+
+  function setRegisterMode(mode, name) {
+    registerState.mode = mode;
+    registerState.name = name || null;
+    const edit = mode === "edit";
+    document.getElementById("register-modal-title").textContent = edit
+      ? `Изменить стенд ${name}`
+      : "Зарегистрировать стенд";
+    document.getElementById("register-modal-submit-btn").textContent = edit ? "Сохранить" : "Зарегистрировать";
+    document.getElementById("register-edit-note").hidden = !edit;
+    document.getElementById("register-intro").hidden = edit;
+    const nameInput = document.getElementById("register-form").elements.namedItem("name");
+    nameInput.readOnly = edit;
+  }
+
+  function resetRegisterAuxUi() {
+    document.getElementById("register-probe-status").textContent = "";
+    document.getElementById("register-pw-row").hidden = true;
+    setEngineField(null);
+    const result = document.getElementById("register-test-result");
+    result.hidden = true;
+    result.textContent = "";
+  }
+
   function openRegisterModal() {
     const overlay = document.getElementById("register-modal-overlay");
     const form = document.getElementById("register-form");
@@ -459,11 +488,73 @@
     // блоков строго ПОСЛЕ reset: иначе видимость осталась бы от прошлого
     // открытия и не совпала бы со значениями в полях.
     form.reset();
+    setRegisterMode("create");
     showRegisterFormError("");
     document.getElementById("iis-detect-status").textContent = "";
+    resetRegisterAuxUi();
     updateRegisterConditionalFields();
     overlay.hidden = false;
     form.elements.namedItem("name").focus();
+  }
+
+  // --- форма «Изменить» существующего стенда ---
+
+  function setFormValue(form, name, value) {
+    const input = form.elements.namedItem(name);
+    if (!input || value === null || value === undefined) return;
+    if (input.type === "checkbox") {
+      input.checked = !!value;
+    } else if ((name === "db_port" || name === "redis_port" || name === "stand_port") && Number(value) === 0) {
+      input.value = "";
+    } else {
+      input.value = String(value);
+    }
+  }
+
+  async function openEditModal(name) {
+    let data;
+    try {
+      data = await apiGet(`/api/stand/${encodeURIComponent(name)}/config`);
+    } catch (e) {
+      showActionStatus(`Не удалось прочитать запись стенда ${name}: ${describeApiError(e)}`, true);
+      return;
+    }
+    const overlay = document.getElementById("register-modal-overlay");
+    const form = document.getElementById("register-form");
+    form.reset();
+    setRegisterMode("edit", name);
+    showRegisterFormError("");
+    document.getElementById("iis-detect-status").textContent = "";
+    resetRegisterAuxUi();
+    setFormValue(form, "name", name);
+    const cfg = (data && data.config) || {};
+    Object.keys(cfg).forEach((key) => {
+      if (key === "engine") return;
+      setFormValue(form, key, cfg[key]);
+    });
+    setEngineField(cfg.engine && cfg.engine.type ? cfg.engine : null);
+    updateRegisterConditionalFields();
+    if (data && data.has_db_secret) {
+      document.getElementById("register-probe-status").textContent = "Секрет пароля БД в хранилище задан.";
+    }
+    overlay.hidden = false;
+  }
+
+  // --- движок исполнения (скрытое поле engine + строка-подсказка) ---
+
+  function setEngineField(engine) {
+    const form = document.getElementById("register-form");
+    const input = form.elements.namedItem("engine");
+    const row = document.getElementById("register-engine-row");
+    if (engine && engine.type) {
+      input.value = JSON.stringify(engine);
+      document.getElementById("register-engine-text").textContent =
+        engine.wsc_dll ? `${engine.type} (${engine.wsc_dll})` : String(engine.type);
+      row.hidden = false;
+    } else {
+      input.value = "";
+      row.hidden = true;
+    }
   }
 
   function closeRegisterModal() {
@@ -492,6 +583,12 @@
     "db_host",
     "db_port",
     "db_name",
+    // Пользователь БД и ссылка на секрет с её паролем (сам пароль в форме
+    // отсутствует), движок исполнения (JSON из скрытого поля, заполняется по
+    // найденному в папке стенда WorkspaceConsole).
+    "db_user",
+    "secret_ref_db",
+    "engine",
     "redis_host",
     "redis_port",
     "agent_url",
@@ -539,10 +636,38 @@
         return;
       }
 
+      if (field === "engine") {
+        // Скрытое поле хранит JSON объекта движка; пустое в «Изменить» снимает движок.
+        const rawEngine = input.value.trim();
+        if (!rawEngine) {
+          if (registerState.mode === "edit") payload.engine = null;
+          return;
+        }
+        try {
+          payload.engine = JSON.parse(rawEngine);
+        } catch (e) {
+          /* битый JSON в скрытом поле не отправляем */
+        }
+        return;
+      }
+
       const value = input.value.trim();
-      if (!value) return;
+      if (!value) {
+        // «Изменить»: пустое поле — осознанная очистка значения в реестре.
+        if (registerState.mode === "edit" && field !== "name") payload[field] = "";
+        return;
+      }
       payload[field] = value;
     });
+    // Порт Redis предзаполнен 6379, но без адреса пара невалидна: порт без host не шлём.
+    if (!payload.redis_host) {
+      if (registerState.mode === "edit") payload.redis_port = "";
+      else delete payload.redis_port;
+    }
+    // Пароль БД из конфига стенда в хранилище секретов (значение страница не видит).
+    const pwBox = form.elements.namedItem("db_password_from_config");
+    const pwBlock = pwBox && pwBox.closest ? pwBox.closest(".register-conditional") : null;
+    if (pwBox && pwBox.checked && !(pwBlock && pwBlock.hidden)) payload.db_password_from_config = true;
     return payload;
   }
 
@@ -593,11 +718,300 @@
     }
   }
 
+  // --- «Заполнить из конфигов» (POST /api/stands/probe-folder) ---
+  //
+  // По папке инстанса сервер читает ConnectionStrings.config, appsettings.json и ищет
+  // WorkspaceConsole. Пароли в ответе нет — только отметка password_in_config. Форма
+  // заполняется найденным, пользователь правит; пустого найденное не затирает.
+
+  function describeProbe(data) {
+    const lines = [];
+    const db = data.db;
+    if (db) {
+      const hostPort = `${db.db_host || "?"}${db.db_port ? ":" + db.db_port : ""}`;
+      const pw = db.windows_auth ? "встроенная аутентификация Windows" : `пароль в конфиге: ${db.password_in_config ? "да" : "нет"}`;
+      lines.push(`БД ${db.db_type || "?"} ${hostPort}${db.db_name ? " / " + db.db_name : ""}${db.db_user ? ", пользователь " + db.db_user : ""} (${pw})`);
+    }
+    const redis = data.redis;
+    if (redis) {
+      lines.push(`Redis ${redis.host}:${redis.port}${redis.db !== null && redis.db !== undefined ? " db " + redis.db : ""} (пароль в конфиге: ${redis.password_in_config ? "да" : "нет"})`);
+    }
+    if (data.site) lines.push(`сайт ${data.site.scheme}://…:${data.site.port}`);
+    if (data.engine) lines.push(`движок ${data.engine.type}`);
+    const found = lines.length ? "Найдено: " + lines.join("; ") + "." : "В конфигах ничего не найдено.";
+    const notes = (data.notes || []).map((n) => "• " + n);
+    return [found].concat(notes).join("\n");
+  }
+
+  function applyProbeToForm(form, data) {
+    const db = data.db;
+    if (db) {
+      if (db.db_type) form.elements.namedItem("db_type").value = db.db_type;
+      if (db.db_host) setFormValue(form, "db_host", db.db_host);
+      if (db.db_port) setFormValue(form, "db_port", db.db_port);
+      else syncDbPortDefault(form);
+      if (db.db_name) setFormValue(form, "db_name", db.db_name);
+      if (db.db_user) setFormValue(form, "db_user", db.db_user);
+    }
+    const redis = data.redis;
+    if (redis) {
+      setFormValue(form, "redis_host", redis.host);
+      setFormValue(form, "redis_port", redis.port);
+    }
+    const site = data.site;
+    if (site) {
+      setFormValue(form, "stand_port", site.port);
+      if (site.scheme) form.elements.namedItem("stand_scheme").value = site.scheme;
+      if (site.host) setFormValue(form, "stand_host", site.host);
+    }
+    if (data.engine) setEngineField(data.engine);
+    const pwRow = document.getElementById("register-pw-row");
+    pwRow.hidden = !(db && db.password_in_config);
+    if (pwRow.hidden) form.elements.namedItem("db_password_from_config").checked = false;
+    updateRegisterConditionalFields();
+  }
+
+  async function probeInstanceFolder(form) {
+    const statusEl = document.getElementById("register-probe-status");
+    const btn = document.getElementById("register-probe-btn");
+    const dir = form.elements.namedItem("stand_dir").value.trim();
+    if (!dir) {
+      statusEl.textContent = "Сначала укажите каталог стенда (папку инстанса).";
+      return;
+    }
+    btn.disabled = true;
+    statusEl.textContent = "Читаем конфиги…";
+    try {
+      const data = await apiSend("POST", "/api/stands/probe-folder", { path: dir });
+      applyProbeToForm(form, data);
+      statusEl.textContent = describeProbe(data);
+    } catch (e) {
+      statusEl.textContent = describeApiError(e);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // Порт БД по умолчанию: PostgreSQL 5432 предзаполнен, у MSSQL порта «по умолчанию»
+  // в форме нет (экземпляры слушают разные порты). Меняем только значение, которое
+  // само было дефолтом другого движка или пустое, — введённое руками не трогаем.
+  function syncDbPortDefault(form) {
+    const type = form.elements.namedItem("db_type").value;
+    const port = form.elements.namedItem("db_port");
+    const cur = port.value.trim();
+    if (cur === "" || cur === DEFAULT_DB_PORTS.postgres || cur === DEFAULT_DB_PORTS.mssql) {
+      port.value = DEFAULT_DB_PORTS[type] !== undefined ? DEFAULT_DB_PORTS[type] : "";
+    }
+    port.placeholder = type === "mssql" ? "1433 или порт экземпляра" : "";
+  }
+
+  // --- кнопка «Тест» (POST /api/stands/test-connection) ---
+
+  const TEST_MARKS = { ok: "✓", warn: "!", fail: "✕", skip: "–" };
+
+  function renderRegisterTest(data) {
+    const list = document.getElementById("register-test-result");
+    list.textContent = "";
+    const checks = (data && data.checks) || [];
+    const fails = checks.filter((c) => c.status === "fail").length;
+    const warns = checks.filter((c) => c.status === "warn").length;
+    const summary = document.createElement("li");
+    summary.className = "rt-summary " + (fails ? "rt-fail" : "rt-ok");
+    summary.textContent = fails
+      ? `Есть ошибки: ${fails}`
+      : warns
+      ? "Ошибок нет, есть замечания"
+      : "Все проверки пройдены";
+    list.appendChild(summary);
+    checks.forEach((c) => {
+      const li = document.createElement("li");
+      li.className = "rt-row rt-" + c.status;
+      const mark = document.createElement("span");
+      mark.className = "rt-mark";
+      mark.textContent = TEST_MARKS[c.status] || "?";
+      const label = document.createElement("b");
+      label.textContent = c.label;
+      li.appendChild(mark);
+      li.appendChild(label);
+      li.appendChild(document.createTextNode(" — " + c.message));
+      list.appendChild(li);
+    });
+    list.hidden = false;
+  }
+
+  async function runRegisterTest(form) {
+    const btn = document.getElementById("register-test-btn");
+    const list = document.getElementById("register-test-result");
+    const payload = collectRegisterPayload(form);
+    // Пароль БД для проверки входа: секрет по secret_ref_db, а если его нет — пароль из
+    // конфига стенда (читает сервер, наружу он не выводится).
+    const pwRow = document.getElementById("register-pw-row");
+    payload.use_config_password = !pwRow.hidden;
+    btn.disabled = true;
+    list.hidden = false;
+    list.textContent = "";
+    const wait = document.createElement("li");
+    wait.className = "rt-row rt-skip";
+    wait.textContent = "Проверяем…";
+    list.appendChild(wait);
+    try {
+      const data = await apiSend("POST", "/api/stands/test-connection", payload);
+      renderRegisterTest(data);
+    } catch (e) {
+      list.textContent = "";
+      const li = document.createElement("li");
+      li.className = "rt-row rt-fail";
+      li.textContent = describeApiError(e);
+      list.appendChild(li);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // --- выбор папки: нативный диалог ОС, а если его нет — встроенный обзор ---
+  //
+  // POST /api/pick поднимает диалог ОС и отдаёт путь. Нет диалога (error) — открываем
+  // встроенный обзор подкаталогов (POST /api/fs/browse). Отмена диалога — просто выход.
+
+  const fsState = { resolve: null, current: "", parent: null, roots: true };
+
+  function fsError(message) {
+    const el = document.getElementById("fs-browser-error");
+    el.textContent = message || "";
+    el.classList.toggle("visible", !!message);
+  }
+
+  async function fsLoad(path) {
+    fsError("");
+    let data;
+    try {
+      data = await apiSend("POST", "/api/fs/browse", { path });
+    } catch (e) {
+      fsError(describeApiError(e));
+      return;
+    }
+    fsState.current = data.path || "";
+    fsState.parent = data.parent;
+    fsState.roots = !!data.roots;
+    document.getElementById("fs-browser-path").value = fsState.current;
+    document.getElementById("fs-browser-up-btn").disabled = fsState.roots;
+    document.getElementById("fs-browser-select-btn").disabled = fsState.roots;
+    const list = document.getElementById("fs-browser-list");
+    list.textContent = "";
+    (data.dirs || []).forEach((d) => {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "fs-item";
+      b.textContent = d.name;
+      b.title = d.path;
+      b.addEventListener("click", () => fsLoad(d.path));
+      li.appendChild(b);
+      list.appendChild(li);
+    });
+    if (!(data.dirs || []).length) {
+      const li = document.createElement("li");
+      li.className = "fs-empty";
+      li.textContent = fsState.roots ? "Дисков не найдено" : "Подкаталогов нет";
+      list.appendChild(li);
+    }
+    const hint = [];
+    if (data.is_instance) hint.push("Здесь найден ConnectionStrings.config — это папка инстанса.");
+    if (data.truncated) hint.push("Показаны не все подкаталоги — введите путь вручную.");
+    document.getElementById("fs-browser-hint").textContent = hint.join(" ");
+  }
+
+  function closeFsBrowser(result) {
+    document.getElementById("fs-browser-overlay").hidden = true;
+    const resolve = fsState.resolve;
+    fsState.resolve = null;
+    if (resolve) resolve(result || null);
+  }
+
+  function openFsBrowser(initial) {
+    return new Promise((resolve) => {
+      if (fsState.resolve) fsState.resolve(null);
+      fsState.resolve = resolve;
+      document.getElementById("fs-browser-overlay").hidden = false;
+      fsLoad(initial || "").then(() => {
+        // Стартовый путь мог не существовать — тогда показываем диски.
+        if (initial && !fsState.current) fsLoad("");
+      });
+    });
+  }
+
+  async function pickFolder(initial) {
+    try {
+      const data = await apiSend("POST", "/api/pick", {
+        kind: "dir",
+        title: "Выберите папку",
+        initial: initial || "",
+      });
+      if (data && data.path) return data.path;
+      if (data && data.error) return openFsBrowser(initial);
+      return null; // отмена диалога
+    } catch (e) {
+      return openFsBrowser(initial);
+    }
+  }
+
+  function setupFsBrowser() {
+    const overlay = document.getElementById("fs-browser-overlay");
+    document.getElementById("fs-browser-close-btn").addEventListener("click", () => closeFsBrowser(null));
+    document.getElementById("fs-browser-cancel-btn").addEventListener("click", () => closeFsBrowser(null));
+    document.getElementById("fs-browser-select-btn").addEventListener("click", () => {
+      if (!fsState.roots && fsState.current) closeFsBrowser(fsState.current);
+    });
+    document.getElementById("fs-browser-up-btn").addEventListener("click", () => {
+      if (!fsState.roots) fsLoad(fsState.parent || "");
+    });
+    const goTo = () => fsLoad(document.getElementById("fs-browser-path").value.trim());
+    document.getElementById("fs-browser-go-btn").addEventListener("click", goTo);
+    document.getElementById("fs-browser-path").addEventListener("keydown", (evt) => {
+      if (evt.key === "Enter") {
+        evt.preventDefault();
+        goTo();
+      }
+    });
+    bindOverlayDismiss(overlay, () => closeFsBrowser(null));
+  }
+
   function setupRegisterModal() {
     const overlay = document.getElementById("register-modal-overlay");
     const form = document.getElementById("register-form");
 
     document.getElementById("iis-detect-btn").addEventListener("click", () => detectIisSite(form));
+
+    // Заполнить из конфигов / тест / выбор папок / порты по умолчанию.
+    document.getElementById("register-probe-btn").addEventListener("click", () => probeInstanceFolder(form));
+    document.getElementById("register-test-btn").addEventListener("click", () => runRegisterTest(form));
+    document.getElementById("register-engine-clear").addEventListener("click", () => setEngineField(null));
+    form.querySelectorAll("[data-register-pick]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const input = form.elements.namedItem(btn.dataset.registerPick);
+        btn.disabled = true;
+        try {
+          const path = await pickFolder(input.value.trim());
+          if (!path) return;
+          input.value = path;
+          // Выбрали папку стенда в форме регистрации — сразу читаем её конфиги.
+          if (btn.dataset.registerPick === "stand_dir" && registerState.mode === "create") {
+            await probeInstanceFolder(form);
+          }
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+    // Путь набрали руками: читаем конфиги сами, но только в пустой форме БД —
+    // чтобы не затереть уже введённое.
+    form.elements.namedItem("stand_dir").addEventListener("change", () => {
+      if (registerState.mode === "create" && !form.elements.namedItem("db_host").value.trim()) {
+        probeInstanceFolder(form);
+      }
+    });
+    form.elements.namedItem("db_type").addEventListener("change", () => syncDbPortDefault(form));
+    setupFsBrowser();
 
     document.getElementById("register-stand-btn").addEventListener("click", openRegisterModal);
     // Та же форма, что и по «+ Стенд»: приглашение на пустом реестре —
@@ -615,6 +1029,12 @@
     document.getElementById("register-modal-cancel-btn").addEventListener("click", closeRegisterModal);
     bindOverlayDismiss(overlay, closeRegisterModal);
     document.addEventListener("keydown", (evt) => {
+      // Поверх формы может лежать встроенный выбор папки — Esc закрывает верхнее окно.
+      const fsOverlay = document.getElementById("fs-browser-overlay");
+      if (evt.key === "Escape" && fsOverlay && !fsOverlay.hidden) {
+        closeFsBrowser(null);
+        return;
+      }
       if (evt.key === "Escape" && !overlay.hidden) closeRegisterModal();
     });
 
@@ -627,11 +1047,15 @@
       showRegisterFormError("");
       const submitBtn = document.getElementById("register-modal-submit-btn");
       const payload = collectRegisterPayload(form);
+      const editing = registerState.mode === "edit";
       submitBtn.disabled = true;
       try {
-        const data = await apiSend("POST", "/api/stand/register", payload);
+        const data = await apiSend("POST", editing ? "/api/stand/update" : "/api/stand/register", payload);
         closeRegisterModal();
-        showActionStatus(`Стенд ${data.name || payload.name} зарегистрирован`, false);
+        showActionStatus(
+          `Стенд ${data.name || payload.name} ${editing ? "обновлён" : "зарегистрирован"}`,
+          false
+        );
         await refreshStands();
       } catch (e) {
         // 400/409 остаются внутри модалки (не тост-прыжок) — пользователь
@@ -995,6 +1419,8 @@
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8A5.2 5.2 0 1 1 10.9 3.6"/><path d="M13.4 2.6v3.4h-3.4"/></svg>';
   // Корзина ("очистить") — кнопка "Очистить Redis". Форма отличима от прочих
   // трёх (play/stop/restart), чтобы её не путали по силуэту.
+  const ICON_EDIT =
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 2.6l2.8 2.8"/><path d="M2.5 13.5l.6-3 7.5-7.5 2.4 2.4-7.5 7.5-3 .6z"/></svg>';
   const ICON_REDIS_CLEAR =
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.2h10"/><path d="M6.4 4.2V2.9c0-.4.3-.7.7-.7h1.8c.4 0 .7.3.7.7v1.3"/><path d="M4.6 4.2l.6 8.2c.05.7.6 1.2 1.3 1.2h3c.7 0 1.25-.5 1.3-1.2l.6-8.2"/><path d="M6.7 6.6v4.3M9.3 6.6v4.3"/></svg>';
 
@@ -1109,6 +1535,7 @@
       <button class="icon-btn icon-btn-stop" data-action="stop" data-name="${name}" title="${escapeAttr(noAgent ? NO_AGENT_TITLE : "Остановить")}"${stopDisabled ? " disabled" : ""}>${ICON_STOP}</button>
       <button class="icon-btn icon-btn-restart" data-action="restart" data-name="${name}" title="${escapeAttr(noAgent ? NO_AGENT_TITLE : "Перезапустить")}"${restartDisabled ? " disabled" : ""}>${ICON_RESTART}</button>
       <button class="icon-btn icon-btn-redis" data-action="redis-clear" data-name="${name}" title="${escapeHtml(redisTitle)}"${redisDisabled ? " disabled" : ""}>${ICON_REDIS_CLEAR}</button>
+      <button class="icon-btn icon-btn-edit" data-action="edit" data-name="${name}" title="Изменить настройки стенда">${ICON_EDIT}</button>
     `;
   }
 
@@ -1254,6 +1681,10 @@
       btn.addEventListener("click", (evt) => {
         evt.stopPropagation();
         if (btn.disabled) return;
+        if (btn.dataset.action === "edit") {
+          openEditModal(btn.dataset.name);
+          return;
+        }
         onStandAction(btn.dataset.name, btn.dataset.action);
       });
     });
