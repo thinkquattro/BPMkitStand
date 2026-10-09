@@ -786,6 +786,10 @@ body {
   border-top: 1px solid var(--bpmkit-border);
 }
 
+.modal-footer[hidden] {
+  display: none;
+}
+
 main {
   padding: 20px;
   max-width: 1100px;
@@ -1698,6 +1702,12 @@ span.value-has-reason {
   color: var(--bpmkit-muted);
 }
 
+/* `display: block` выше сильнее UA-правила для атрибута hidden: без этой строки скрытая
+   подсказка (например, предупреждение про адрес не loopback) видна всегда. */
+.field-hint[hidden] {
+  display: none;
+}
+
 .field-hint-warn {
   color: var(--bpmkit-down);
 }
@@ -2549,6 +2559,10 @@ span.value-has-reason {
   height: 30px;
   padding: 0;
   flex: none;
+}
+
+.upd-icon-btn[hidden] {
+  display: none;
 }
 
 .upd-icon-btn svg {
