@@ -54,7 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from . import __version__
+from . import __version__, net_tls
 from .errors import ChannelError, NotModified, kind_from_payload
 
 __all__ = [
@@ -305,8 +305,17 @@ class BackendClient:
         экземпляр подкласса, — поэтому подмена именно такая, а не «удалить обработчик».
         Полностью выключать редиректы нельзя: `latest` у издателя вполне может однажды
         стать 302 на конкретную версию в пределах того же адреса.
+
+        TLS-доверие — `net_tls.tls_context()`: системное хранилище плюс вшитые корни ISRG
+        (на чистой Windows корня Let's Encrypt в хранилище может не быть, и штатный
+        контекст `urllib` падает с `CERTIFICATE_VERIFY_FAILED`). Это тот же контекст, что
+        отдаёт `net_tls.urlopen`; через `HTTPSHandler` он вставлен в `OpenerDirector`,
+        чтобы не потерять политику редиректов. Для `http://` (loopback, тесты) контекст
+        игнорируется.
         """
-        return urllib.request.build_opener(_SameOriginRedirectHandler(self.base_url))
+        return urllib.request.build_opener(
+            _SameOriginRedirectHandler(self.base_url),
+            urllib.request.HTTPSHandler(context=net_tls.tls_context()))
 
     @property
     def has_envelope(self) -> bool:
