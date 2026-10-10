@@ -82,6 +82,7 @@ from standkit_hub import logs_browser
 from standkit_hub import pick_dialog
 from standkit_hub import redis_min
 from standkit_hub import security as _security
+from standkit_hub import stand_probe
 from standkit_hub import self_version as _self_version
 from standkit_hub.agent_control import AgentControlError, AgentController
 from standkit_hub.remote_mode import RemoteModeController, RemoteModeError
@@ -170,6 +171,22 @@ def _secret_ref_from_path(match: "re.Match[str]") -> str:
 # (тот требует .../<action> после имени стенда).
 _STAND_REGISTER_PATH = "/api/stand/register"
 
+# Форма «Изменить» существующего стенда: те же поля и та же валидация, что у
+# регистрации, но запись должна уже быть в реестре (иначе 404), а пустое поле
+# формы ОЧИЩАЕТ значение, а не оставляет прежнее. Чтение текущей записи для
+# предзаполнения формы — ``GET /api/stand/<name>/config`` (без секретов).
+_STAND_UPDATE_PATH = "/api/stand/update"
+_STAND_CONFIG_RE = re.compile(r"^/api/stand/(?P<name>[^/]+)/config$")
+
+# Помощники формы регистрации/изменения (все — POST, чтобы пройти тот же контур
+# CSRF, что и остальные мутации: они читают диск и ходят в сеть по просьбе страницы):
+#   * probe-folder — «Заполнить из конфигов» по папке инстанса (пароли не отдаются);
+#   * test-connection — кнопка «Тест»: резолв, порты, вход в БД, PING Redis;
+#   * fs/browse — обзор подкаталогов, когда нативный диалог ОС недоступен.
+_PROBE_FOLDER_PATH = "/api/stands/probe-folder"
+_TEST_CONNECTION_PATH = "/api/stands/test-connection"
+_FS_BROWSE_PATH = "/api/fs/browse"
+
 # Автоопределение IIS-сайта по каталогу/порту для кнопки «Определить
 # автоматически» в форме регистрации. Работает по ЕЩЁ НЕ зарегистрированному
 # стенду (данные приходят телом запроса), поэтому это отдельный путь, а не
@@ -252,6 +269,13 @@ _REGISTER_ALLOWED_FIELDS = {
     "db_host",
     "db_port",
     "db_name",
+    # Пользователь БД и ссылка на секрет с её паролем: без них запись, заведённая
+    # формой, не позволяла инструментам войти в базу и правилась руками.
+    "db_user",
+    "secret_ref_db",
+    # Движок исполнения (объект, а не строка) — формой заполняется по найденному
+    # в папке стенда WorkspaceConsole; см. _ENGINE_FIELDS.
+    "engine",
     # Адрес Redis: до 0.8.0 жил нетипизированными ключами в extra, в форме его
     # не было вовсе, и «не настроено» было неотличимо от «не поддержано».
     "redis_host",
@@ -273,6 +297,17 @@ _REGISTER_ALLOWED_FIELDS = {
     "k8s_deployment",
     "description",
     "customer",
+}
+
+# Поля объекта ``engine``, которые форма вправе записать (остальное в нём — дело
+# инструментов, а не формы). Значения — только строки.
+_ENGINE_FIELDS = ("type", "wsc_dll", "workspace_name", "web_app_path")
+
+# Строковые поля с типом Optional[str]: пустое поле формы «Изменить» очищает их до None.
+_OPTIONAL_STR_FIELDS = {
+    "agent_url", "agent_secret_ref", "agent_ca", "iis_site", "iis_app_pool",
+    "docker_container", "docker_compose_file", "docker_compose_service",
+    "k8s_deployment", "secret_ref_db",
 }
 
 # Поля, которые сервер ЯВНО отклоняет с понятной ошибкой (а не молча
@@ -1821,7 +1856,7 @@ def make_handler(
                 # содержательный текст, а не голое "HTTP 502".
                 self._send_json(502, {"ok": False, "error": result.message})
 
-        def _api_stand_register(self) -> None:
+        def _api_stand_register(self, *, update: bool = False) -> None:
             """
             ``POST /api/stand/register`` — кнопка "Зарегистрировать стенд" на
             дашборде. Регистрирует УЖЕ существующий стенд (каталог/БД/дистрибутив
@@ -1830,9 +1865,18 @@ def make_handler(
             ``_load_registry`` (тот же ``registry_path`` конфига хаба /
             ``default_registry_path()``).
 
+            ``update=True`` — ``POST /api/stand/update`` (форма «Изменить»): то же тело и
+            та же валидация, но запись обязана быть в реестре (404 иначе), поля, которых
+            форма не знает (администратор, дистрибутив, ``extra``), сохраняются как были, а
+            пустое поле формы очищает значение.
+
             Пароли/секреты в теле запроса не принимаются — только ``secret_ref_*``
-            (см. ``_REGISTER_FORBIDDEN_FIELDS``). Ответы:
+            (см. ``_REGISTER_FORBIDDEN_FIELDS``). Единственное исключение по смыслу, но не
+            по форме — флаг ``db_password_from_config``: сервер сам читает пароль БД из
+            конфигов стенда и кладёт его в хранилище секретов под ``secret_ref_db``;
+            значение через страницу не проходит. Ответы:
               - 400 ``{"error", "fields"}`` — невалидное тело/запись;
+              - 404 ``{"error"}`` — (только update) стенда нет в реестре;
               - 409 ``{"error"}`` — имя уже занято (не перезаписываем молча);
               - 200 ``{"ok": true, "name"}`` — успех.
             """
@@ -1866,6 +1910,19 @@ def make_handler(
                 )
                 return
 
+            existing: Optional[Stand] = None
+            config = _load_config(config_path)
+            if update:
+                try:
+                    registry = _load_registry(config, fresh=True)
+                except RegistryError as exc:
+                    self._send_json(500, {"error": str(exc)})
+                    return
+                if name not in registry:
+                    self._send_json(404, {"error": f"стенд '{name}' не найден в реестре"})
+                    return
+                existing = registry.get(name)
+
             errors: list[str] = []
             bad_fields: list[str] = []
 
@@ -1875,8 +1932,33 @@ def make_handler(
                     continue
                 value = body[key]
                 if isinstance(value, str) and not value.strip():
+                    if update:
+                        # «Изменить»: пустое поле — осознанная очистка, а не «не трогать».
+                        if key in ("db_port", "redis_port"):
+                            data[key] = 0
+                        elif key in _OPTIONAL_STR_FIELDS:
+                            data[key] = None
+                        elif key != "stand_port":
+                            data[key] = ""
                     continue  # пустые строки не пишем поверх дефолтов Stand
                 data[key] = value
+
+            if "engine" in data:
+                engine = data["engine"]
+                if engine is None:
+                    pass  # снять движок (только «Изменить»)
+                elif not isinstance(engine, dict):
+                    errors.append("engine должен быть объектом")
+                    bad_fields.append("engine")
+                    data.pop("engine", None)
+                else:
+                    clean = {k: engine[k] for k in _ENGINE_FIELDS if k in engine}
+                    if not all(isinstance(v, str) for v in clean.values()) or not str(clean.get("type") or "").strip():
+                        errors.append("engine: type обязателен, все значения — строки")
+                        bad_fields.append("engine")
+                        data.pop("engine", None)
+                    else:
+                        data["engine"] = clean
 
             for int_field in ("stand_port", "db_port", "redis_port"):
                 if int_field in data:
@@ -1923,31 +2005,71 @@ def make_handler(
                 errors.append(f"недопустимое значение host_kind: {data['host_kind']!r}")
                 bad_fields.append("host_kind")
 
+            secret_ref = data.get("secret_ref_db")
+            if secret_ref and not _security.validate_secret_ref(str(secret_ref)):
+                errors.append("secret_ref_db: недопустимая ссылка на секрет (буквы/цифры/._:-)")
+                bad_fields.append("secret_ref_db")
+
             if errors:
                 self._send_json(400, {"error": "; ".join(errors), "fields": bad_fields})
                 return
 
-            stand = Stand.from_dict(name, data)
+            if existing is not None:
+                merged = existing.to_dict()
+                merged.update(data)
+                if merged.get("engine") is None:
+                    merged.pop("engine", None)
+                stand = Stand.from_dict(name, merged)
+            else:
+                stand = Stand.from_dict(name, data)
             validation_errors = stand.validate()
             if validation_errors:
                 self._send_json(400, {"error": "; ".join(validation_errors), "fields": []})
                 return
 
-            config = _load_config(config_path)
-            try:
-                # fresh=True — реестр сейчас будут МЕНЯТЬ, кэшированный
-                # экземпляр отдавать на мутацию нельзя (см. _load_registry).
-                registry = _load_registry(config, fresh=True)
-            except RegistryError as exc:
-                self._send_json(500, {"error": str(exc)})
-                return
+            from_config = body.get("db_password_from_config") is True
 
-            if name in registry:
-                self._send_json(409, {"error": f"стенд '{name}' уже есть в реестре"})
-                return
+            if not update:
+                try:
+                    # fresh=True — реестр сейчас будут МЕНЯТЬ, кэшированный
+                    # экземпляр отдавать на мутацию нельзя (см. _load_registry).
+                    registry = _load_registry(config, fresh=True)
+                except RegistryError as exc:
+                    self._send_json(500, {"error": str(exc)})
+                    return
+
+                if name in registry:
+                    self._send_json(409, {"error": f"стенд '{name}' уже есть в реестре"})
+                    return
+
+            secret_saved = False
+            if from_config:
+                # Пароль БД идёт из конфига стенда прямо в хранилище секретов: через страницу и
+                # через ответ он не проходит. Ссылка по умолчанию — как в примерах реестра.
+                ref = stand.secret_ref_db or f"standkit:{name}:db"
+                if not _security.validate_secret_ref(ref):
+                    self._send_json(400, {"error": "secret_ref_db: недопустимая ссылка на секрет",
+                                          "fields": ["secret_ref_db"]})
+                    return
+                password = stand_probe.read_config_passwords(stand.stand_dir)["db"]
+                if not password:
+                    self._send_json(400, {"error": "в конфигах стенда пароль БД не найден — "
+                                                   "задайте секрет вручную", "fields": []})
+                    return
+                try:
+                    set_secret(ref, password)
+                except SecretError as exc:
+                    self._send_json(400, {"error": f"пароль не сохранён в хранилище секретов: {exc}",
+                                          "fields": []})
+                    return
+                stand.secret_ref_db = ref
+                secret_saved = True
 
             try:
-                registry.add_existing(stand)
+                if update:
+                    registry.update(stand)
+                else:
+                    registry.add_existing(stand)
                 registry.save()
             except RegistryError as exc:
                 self._send_json(400, {"error": str(exc)})
@@ -1957,7 +2079,76 @@ def make_handler(
             poller = self._poller()
             if poller is not None:
                 poller.poke()
-            self._send_json(200, {"ok": True, "name": name})
+            result: dict = {"ok": True, "name": name}
+            if update:
+                result["updated"] = True
+            if secret_saved:
+                result["secret_saved"] = True
+            self._send_json(200, result)
+
+        def _api_stand_update(self) -> None:
+            """``POST /api/stand/update`` — форма «Изменить» (см. ``_api_stand_register``)."""
+            self._api_stand_register(update=True)
+
+        def _api_stand_config(self, name: str) -> None:
+            """
+            ``GET /api/stand/<name>/config`` — текущая запись стенда для предзаполнения формы
+            «Изменить»: поля формы + ``engine`` + отметка ``has_db_secret`` (задан ли секрет
+            пароля БД). Сами секреты не отдаются.
+            """
+            try:
+                registry = _load_registry(_load_config(config_path))
+            except RegistryError as exc:
+                self._send_json(500, {"error": str(exc)})
+                return
+            if name not in registry:
+                self._send_json(404, {"error": f"стенд '{name}' не найден в реестре"})
+                return
+            stand = registry.get(name)
+            record = stand.to_dict()
+            payload = {k: record[k] for k in _REGISTER_ALLOWED_FIELDS if k in record}
+            engine = stand.extra.get("engine")
+            if isinstance(engine, dict):
+                payload["engine"] = {k: engine[k] for k in _ENGINE_FIELDS if k in engine}
+            ref = stand.secret_ref_db or ""
+            self._send_json(200, {
+                "name": name,
+                "config": payload,
+                "has_db_secret": bool(ref) and has_secret(ref),
+            })
+
+        def _api_probe_folder(self) -> None:
+            """``POST /api/stands/probe-folder {path}`` — «Заполнить из конфигов» (без паролей)."""
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            result = stand_probe.probe_folder(body.get("path"))
+            self._send_json(200 if result.get("ok") else 400, result)
+
+        def _api_test_connection(self) -> None:
+            """``POST /api/stands/test-connection`` — кнопка «Тест» (резолв, порты, вход в БД, PING Redis)."""
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            forbidden = sorted(k for k in body if k in _REGISTER_FORBIDDEN_FIELDS)
+            if forbidden:
+                self._send_json(400, {"error": f"поля {', '.join(forbidden)} не принимаются", "fields": forbidden})
+                return
+            self._send_json(200, stand_probe.test_connection(body))
+
+        def _api_fs_browse(self) -> None:
+            """``POST /api/fs/browse {path}`` — подкаталоги для встроенного выбора папки (только с локальной машины)."""
+            peer = str(self.client_address[0]) if getattr(self, "client_address", None) else ""
+            if peer not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                self._send_json(403, {"error": "обзор каталогов доступен только с локальной машины"})
+                return
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            try:
+                self._send_json(200, stand_probe.browse_dir(body.get("path")))
+            except stand_probe.BrowseError as exc:
+                self._send_json(400, {"error": str(exc)})
 
         # --- API: версия ---
 
@@ -3225,6 +3416,16 @@ def make_handler(
                 self._send_json(404, {"error": "not found"})
                 return
 
+            m = _STAND_CONFIG_RE.match(path)
+            if m:
+                if not self._authorize_read():
+                    return
+                if not _security.validate_stand_name(m.group("name")):
+                    self._send_json(400, {"error": "invalid stand name"})
+                    return
+                self._api_stand_config(m.group("name"))
+                return
+
             m = _STAND_ACTION_RE.match(path)
             if m and m.group("action") == "status":
                 if not self._authorize_read():
@@ -3311,6 +3512,30 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_stand_register()
+                return
+
+            if path == _STAND_UPDATE_PATH:
+                if not self._authorize_mutation():
+                    return
+                self._api_stand_update()
+                return
+
+            if path == _PROBE_FOLDER_PATH:
+                if not self._authorize_mutation():
+                    return
+                self._api_probe_folder()
+                return
+
+            if path == _TEST_CONNECTION_PATH:
+                if not self._authorize_mutation():
+                    return
+                self._api_test_connection()
+                return
+
+            if path == _FS_BROWSE_PATH:
+                if not self._authorize_mutation():
+                    return
+                self._api_fs_browse()
                 return
 
             if path == "/api/license/file":
