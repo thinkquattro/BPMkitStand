@@ -561,7 +561,10 @@ def test_context_repr_hides_envelope(tmp_path):
 
 def test_default_run_goes_through_run_console(monkeypatch, tmp_path):
     """Прямой subprocess в пакете запрещён (GAP-138): без CREATE_NO_WINDOW каждый тик
-    мигал бы чёрным окном. Проверяем и сам факт вызова, и обязательные параметры."""
+    мигал бы чёрным окном. Проверяем и сам факт вызова, и обязательные параметры.
+
+    GAP-781: точка запуска — `run_console_tree`, а не `run_console`: по тайм-ауту
+    умирает ВСЁ дерево CLI (у PyInstaller-сборки работающий процесс — ребёнок загрузчика)."""
     captured: dict = {}
 
     def _fake_run_console(cmd, **kwargs):
@@ -575,7 +578,7 @@ def test_default_run_goes_through_run_console(monkeypatch, tmp_path):
 
         return _Completed()
 
-    monkeypatch.setattr(context_module, "run_console", _fake_run_console)
+    monkeypatch.setattr(context_module, "run_console_tree", _fake_run_console)
     cli = _cli(tmp_path)
 
     ctx = resolve(_settings(cli), cache_ttl=0)
@@ -585,7 +588,7 @@ def test_default_run_goes_through_run_console(monkeypatch, tmp_path):
     assert captured["kwargs"]["text"] is True
     assert captured["kwargs"]["encoding"] == "utf-8"
     assert captured["kwargs"]["errors"] == "replace"
-    assert captured["kwargs"]["timeout"] == 30
+    assert captured["kwargs"]["timeout"] == context_module._CLI_TIMEOUT_S
     assert ctx.license_status == "valid"
 
 
@@ -595,9 +598,187 @@ def test_default_run_converts_exceptions_to_failure(monkeypatch, tmp_path):
     def _boom(cmd, **kwargs):
         raise OSError("файл не найден")
 
-    monkeypatch.setattr(context_module, "run_console", _boom)
+    monkeypatch.setattr(context_module, "run_console_tree", _boom)
 
     with pytest.raises(ContextUnavailable) as info:
         resolve(_settings(_cli(tmp_path)), cache_ttl=0)
 
     assert "файл не найден" in info.value.detail
+
+
+# --------------------------------------------------------------------------------------
+# GAP-781: канал, запущенный ИЗ CLI BPMkit, не вызывает CLI повторно; тайм-аут — с именем
+# --------------------------------------------------------------------------------------
+class TestGap781InprocessContextAndTimeout:
+    """VM-приёмка 13.10.2026 (exe 1.2.58 + лицензия): `BPMkit.exe setup apply-update`
+    ответил `context_unavailable` через 126 с. Компаньон, запущенный внутри CLI BPMkit,
+    спрашивал контекст у того же `BPMkit.exe` ещё одним процессом: холодный старт onefile-exe
+    на VM — 14–25 с без нагрузки и больше 30 с под нагрузкой; `subprocess.run(timeout=30)`
+    убивал только загрузчик PyInstaller и дальше ждал пайпы его ребёнка, а текст отказа не
+    называл тайм-аут. Лечение: CLI отдаёт контекст ВНУТРИ процесса (провайдер), запуск CLI
+    со стороны (хаб) — `run_console_tree` с тайм-аутом, который убивает всё дерево и
+    называется в сообщении."""
+
+    @pytest.fixture(autouse=True)
+    def _no_provider_leak(self):
+        previous = context_module.set_inprocess_provider(None)
+        yield
+        context_module.set_inprocess_provider(previous)
+
+    @staticmethod
+    def _forbid_spawn(monkeypatch):
+        def _spawn(*_args, **_kwargs):
+            raise AssertionError("при провайдере в процессе CLI запускаться не должен")
+
+        monkeypatch.setattr(context_module, "run_console_tree", _spawn)
+        monkeypatch.setattr(context_module, "run_console", _spawn)
+
+    def test_gap781_inprocess_provider_answers_without_spawning_cli(self, monkeypatch, tmp_path):
+        self._forbid_spawn(monkeypatch)
+        calls = []
+
+        def _provider():
+            calls.append(1)
+            return dict(OK_PAYLOAD)
+
+        context_module.set_inprocess_provider(_provider)
+        ctx = resolve(_settings(_cli(tmp_path)), cache_ttl=0)
+
+        assert calls == [1]
+        assert ctx.license_status == "valid"
+        assert ctx.envelope == ENVELOPE
+        assert ctx.backend_url == "https://publisher.example"
+        assert ctx.binary_path == OK_PAYLOAD["binary_path"]
+
+    def test_gap781_provider_works_without_cli_on_disk(self, monkeypatch, tmp_path):
+        """Процесс, который зовёт канал, и ЕСТЬ CLI BPMkit: искать бинарь рядом ему незачем."""
+        self._forbid_spawn(monkeypatch)
+        monkeypatch.setattr(context_module, "_candidate_roots", lambda extra_roots=None: [tmp_path])
+        context_module.set_inprocess_provider(lambda: dict(OK_PAYLOAD))
+
+        ctx = resolve(CompanionSettings(), cache_ttl=0)
+
+        assert ctx.license_status == "valid"
+
+    def test_gap781_settings_backend_url_still_overrides_provider(self, monkeypatch, tmp_path):
+        self._forbid_spawn(monkeypatch)
+        context_module.set_inprocess_provider(lambda: dict(OK_PAYLOAD))
+
+        ctx = resolve(_settings(_cli(tmp_path), backend_url="https://proxy.local/"), cache_ttl=0)
+
+        assert ctx.backend_url == "https://proxy.local"
+
+    def test_gap781_provider_no_license_is_the_same_typed_refusal(self, monkeypatch, tmp_path):
+        self._forbid_spawn(monkeypatch)
+        context_module.set_inprocess_provider(
+            lambda: {"ok": False, "error": "no_license", "detail": "ключа нет"})
+
+        with pytest.raises(ChannelError) as info:
+            resolve(_settings(_cli(tmp_path)), cache_ttl=0)
+
+        assert info.value.kind == "no_license"
+        assert not isinstance(info.value, ContextUnavailable)
+
+    def test_gap781_provider_exception_is_context_unavailable_without_text(self, monkeypatch,
+                                                                          tmp_path):
+        """Текст исключения провайдера в ошибку не идёт: он мог бы нести конверт."""
+        self._forbid_spawn(monkeypatch)
+
+        def _boom():
+            raise RuntimeError("сбой рядом с " + ENVELOPE)
+
+        context_module.set_inprocess_provider(_boom)
+        with pytest.raises(ContextUnavailable) as info:
+            resolve(_settings(_cli(tmp_path)), cache_ttl=0)
+
+        assert ENVELOPE not in str(info.value)
+        assert ENVELOPE not in (info.value.detail or "")
+        assert "RuntimeError" in (info.value.detail or "")
+
+    def test_gap781_provider_wrong_shape_is_context_unavailable(self, monkeypatch, tmp_path):
+        self._forbid_spawn(monkeypatch)
+        context_module.set_inprocess_provider(lambda: ["не", "словарь"])
+
+        with pytest.raises(ContextUnavailable):
+            resolve(_settings(_cli(tmp_path)), cache_ttl=0)
+
+    def test_gap781_cleared_provider_falls_back_to_cli(self, tmp_path):
+        context_module.set_inprocess_provider(lambda: dict(OK_PAYLOAD))
+        context_module.set_inprocess_provider(None)
+        runner = _ok_runner()
+
+        resolve(_settings(_cli(tmp_path)), run=runner, cache_ttl=0)
+
+        assert len(runner.calls) == 1
+
+    def test_gap781_explicit_run_injection_wins_over_provider(self, tmp_path):
+        """`run` — точка инъекции тестов и вызывающих: явный запуск сильнее провайдера."""
+        context_module.set_inprocess_provider(lambda: {"ok": False, "error": "no_license"})
+        runner = _ok_runner()
+
+        ctx = resolve(_settings(_cli(tmp_path)), run=runner, cache_ttl=0)
+
+        assert len(runner.calls) == 1
+        assert ctx.license_status == "valid"
+
+    def test_gap781_timeout_is_named_and_bounded(self, monkeypatch, tmp_path):
+        import subprocess
+
+        def _hang(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+        monkeypatch.setattr(context_module, "run_console_tree", _hang)
+
+        with pytest.raises(ContextUnavailable) as info:
+            resolve(_settings(_cli(tmp_path)), cache_ttl=0)
+
+        text = str(info.value) + " " + (info.value.detail or "")
+        assert "не ответил за {} с".format(int(context_module._CLI_TIMEOUT_S)) in text
+        assert info.value.kind == "context_unavailable"
+
+    def test_gap781_timeout_leaves_room_for_cold_exe_start(self):
+        """30 с не хватило на VM: холодный старт onefile-exe 14–25 с без нагрузки."""
+        assert 60 <= context_module._CLI_TIMEOUT_S <= 180
+
+    def test_gap781_frozen_caller_starts_cli_as_independent_app(self, monkeypatch, tmp_path):
+        """Замороженный вызывающий (хаб-exe) не должен передавать CLI свои переменные
+        загрузчика PyInstaller: иначе бинарь BPMkit стартует как «часть» чужого
+        приложения. PYINSTALLER_RESET_ENVIRONMENT=1 — штатный рубильник PyInstaller ≥ 6.9."""
+        captured = {}
+
+        def _fake(cmd, **kwargs):
+            captured.update(kwargs)
+
+            class _Completed:
+                returncode = 0
+                stdout = json.dumps(OK_PAYLOAD)
+                stderr = ""
+
+            return _Completed()
+
+        monkeypatch.setattr(context_module, "run_console_tree", _fake)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+        resolve(_settings(_cli(tmp_path)), cache_ttl=0)
+
+        assert captured["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+
+    def test_gap781_source_caller_keeps_environment_untouched(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def _fake(cmd, **kwargs):
+            captured.update(kwargs)
+
+            class _Completed:
+                returncode = 0
+                stdout = json.dumps(OK_PAYLOAD)
+                stderr = ""
+
+            return _Completed()
+
+        monkeypatch.setattr(context_module, "run_console_tree", _fake)
+        monkeypatch.delattr(sys, "frozen", raising=False)
+
+        resolve(_settings(_cli(tmp_path)), cache_ttl=0)
+
+        assert captured.get("env") is None
