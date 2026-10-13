@@ -23,6 +23,21 @@
 * **нет лицензии** (`ChannelError(kind="no_license")`) — MCP на месте и честно ответил, что
   ключа на этой машине нет. Чинится покупкой/установкой ключа, к путям отношения не имеет.
 
+Запуск ИЗ САМОГО CLI. Подкоманды `setup update-check`/`apply-update`/`rollback`
+CLI BPMkit поднимают этот же пакет внутри СВОЕГО процесса. Спрашивать контекст у
+`BPMkit.exe` ещё одним процессом там бессмысленно и опасно: на VM приёмки холодный старт
+onefile-exe — 14–25 с без нагрузки и больше прежнего 30-секундного предела под нагрузкой,
+и `apply-update` отвечал `context_unavailable` через 126 с. Поэтому CLI регистрирует
+ПРОВАЙДЕРА (`set_inprocess_provider`) — функцию, отдающую тот же JSON-словарь, что
+печатает `companion-context`, — и `resolve` берёт ответ у него, не запуская процесс.
+Логика лицензии при этом по-прежнему живёт в BPMkit: пакет получает готовый ответ, просто
+без промежуточного процесса.
+
+Запуск со стороны (хаб) — через `standkit.platform.run_console_tree`: по тайм-ауту умирает
+ВСЁ дерево CLI (у PyInstaller-сборки работающий процесс — ребёнок загрузчика, и
+`subprocess.run` после убийства одного загрузчика ждал пайпы ребёнка без предела), а сам
+тайм-аут называется в тексте отказа.
+
 Кэш. Контекст спрашивается на КАЖДЫЙ тик трёх циклов, а запуск процесса стоит десятки
 миллисекунд и на Windows ещё и рискует мигнуть консольным окном. Поэтому ответ живёт в
 памяти `cache_ttl` секунд. На диск он не попадает никогда: в нём лицензионный конверт.
@@ -33,6 +48,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -46,7 +63,7 @@ from standkit.cli_resolve import (
     resolve_command_string,
     search_roots,
 )
-from standkit.platform import run_console
+from standkit.platform import run_console, run_console_tree  # noqa: F401 - run_console: подмена в тестах
 
 from .errors import KIND_TITLES, ChannelError, ContextUnavailable
 
@@ -56,6 +73,7 @@ __all__ = [
     "find_cli",
     "resolve",
     "invalidate_cache",
+    "set_inprocess_provider",
 ]
 
 # Подкоманда MCP, отдающая контекст. Держится константой: это контракт с чужим пакетом,
@@ -67,9 +85,25 @@ CONTEXT_ARGV_TAIL = ("setup", "companion-context", "--json")
 # нужна экрану лицензии хаба (`standkit_hub.license_api`), и держать её в двух местах
 # «дословно одинаковой» руками — значит рано или поздно её рассинхронизировать.
 
-# Сколько ждём ответа CLI. 30 с — с запасом на холодный старт `.exe` под антивирусом и
-# заведомо меньше интервала любого цикла: зависший CLI не должен копить тики.
-_CLI_TIMEOUT_S = 30.0
+# Сколько ждём ответа CLI. Прежних 30 с не хватило на VM приёмки 13.10.2026 — холодный
+# старт onefile-exe под антивирусом 14–25 с без нагрузки и больше 30 с под нагрузкой.
+# 90 с — с запасом на это и всё ещё заведомо меньше интервала любого цикла: зависший CLI
+# не должен копить тики (по тайм-ауту дерево процессов убивается, см. `_default_run`).
+_CLI_TIMEOUT_S = 90.0
+
+# Код возврата `_default_run` для тайм-аута — отдельный от «упал/не запустился» (-1):
+# тайм-аут чинится иначе (повторить позже, проверить антивирус), и текст отказа его называет.
+RC_TIMEOUT = -2
+
+# Штатный рубильник PyInstaller ≥ 6.9: потомок замороженного процесса стартует как
+# самостоятельное приложение, а не как «часть» вызывающего (его переменные `_PYI_*`
+# не наследуются в смысле загрузчика). Ставится, только когда вызывающий сам frozen.
+_PYI_RESET_ENV = "PYINSTALLER_RESET_ENVIRONMENT"
+
+# Провайдер контекста в том же процессе: `() -> dict` той же формы, что JSON
+# `companion-context`. Регистрирует CLI BPMkit, когда сам запускает канал.
+_inprocess_provider: Optional[Callable[[], dict]] = None
+_INPROCESS_CLI_KEY = ("<in-process>",)
 
 _DETAIL_LIMIT = 300
 
@@ -169,17 +203,53 @@ def find_cli(settings, *, extra_roots: Optional[Sequence] = None) -> Optional[li
 # ------------------------------------------------------------------------------------
 # Резолв контекста
 # ------------------------------------------------------------------------------------
+def set_inprocess_provider(provider: Optional[Callable[[], dict]]):
+    """Зарегистрировать провайдера контекста в ЭТОМ процессе; `None` — снять. Возвращает
+    прежнего (для восстановления в тестах).
+
+    Зовёт CLI BPMkit, когда сам поднимает канал (`setup update-check`/`apply-update`/
+    `rollback`): процесс, который спрашивает контекст, и есть CLI, и запускать его второй
+    копией незачем. `provider()` возвращает словарь ровно той формы, что JSON
+    `setup companion-context --json`, включая штатные отказы `{"ok": false, ...}`.
+    Кэш сбрасывается: ответ провайдера и ответ внешнего CLI — разные источники.
+    """
+    global _inprocess_provider
+    with _cache_lock:
+        previous = _inprocess_provider
+        _inprocess_provider = provider
+        _cache.clear()
+    return previous
+
+
+def _child_env() -> Optional[dict]:
+    """Окружение для запуска CLI: `None` (наследовать как есть), а у frozen-вызывающего —
+    копия с `PYINSTALLER_RESET_ENVIRONMENT=1`, чтобы бинарь BPMkit стартовал как
+    самостоятельное приложение, а не по переменным загрузчика вызывающего exe."""
+    if not getattr(sys, "frozen", False):
+        return None
+    env = dict(os.environ)
+    env[_PYI_RESET_ENV] = "1"
+    return env
+
+
 def _default_run(argv: list) -> tuple:
-    """Запуск CLI через ЕДИНУЮ точку `standkit.platform.run_console`.
+    """Запуск CLI через ЕДИНУЮ точку `standkit.platform.run_console_tree`.
 
     Прямой `subprocess.run` здесь запрещён: канал тикает из процесса без своей
-    консоли, и каждый тик мигал бы чёрным окном. Любое исключение (нет файла, таймаут,
-    отказ в доступе) превращается в `rc=-1`: вызывающий разбирает ОДИН вид отказа, а не
-    зоопарк исключений `subprocess`.
+    консоли, и каждый тик мигал бы чёрным окном. `run_console_tree`, а не `run_console`:
+    по тайм-ауту убивается ВСЁ дерево — у PyInstaller-сборки работающий
+    процесс CLI это ребёнок загрузчика, и `subprocess.run` после убийства одного
+    загрузчика ждал его пайпы без предела. Тайм-аут — `rc=RC_TIMEOUT`, любое другое
+    исключение (нет файла, отказ в доступе) — `rc=-1`: вызывающий разбирает два вида
+    отказа, а не зоопарк исключений `subprocess`.
     """
     try:
-        proc = run_console(list(argv), capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=_CLI_TIMEOUT_S)
+        proc = run_console_tree(list(argv), capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=_CLI_TIMEOUT_S,
+                                env=_child_env())
+    except subprocess.TimeoutExpired:
+        return RC_TIMEOUT, "", ("процесс CLI и его потомки остановлены после "
+                                f"{int(_CLI_TIMEOUT_S)} с ожидания")
     except Exception as exc:  # noqa: BLE001 - см. докстринг: один вид отказа наружу
         return -1, "", str(exc)
     rc = proc.returncode if proc.returncode is not None else -1
@@ -246,8 +316,16 @@ def resolve(settings, *, run: Optional[Callable] = None,
     """Спросить лицензионный контекст у CLI MCP (с кэшем на `cache_ttl` секунд).
 
     `run` — точка инъекции для тестов: `run(argv) -> (rc, stdout, stderr)`. Реальный запуск
-    идёт через `standkit.platform.run_console` (см. `_default_run`).
+    идёт через `standkit.platform.run_console_tree` (см. `_default_run`).
+
+    Порядок источников: явный `run` → провайдер в этом процессе (`set_inprocess_provider`,
+    канал запущен ИЗ CLI BPMkit) → внешний CLI.
     """
+    override_url = str(getattr(settings, "backend_url", "") or "").strip().rstrip("/")
+    provider = _inprocess_provider
+    if run is None and provider is not None:
+        return _resolve_inprocess(provider, override_url, cache_ttl)
+
     cli = find_cli(settings)
     if not cli:
         raise ContextUnavailable(
@@ -257,7 +335,6 @@ def resolve(settings, *, run: Optional[Callable] = None,
             detail=describe_search_targets(_candidate_roots()),
         )
 
-    override_url = str(getattr(settings, "backend_url", "") or "").strip().rstrip("/")
     argv = list(cli) + list(CONTEXT_ARGV_TAIL)
     key = (tuple(argv), override_url)
 
@@ -267,6 +344,14 @@ def resolve(settings, *, run: Optional[Callable] = None,
 
     runner = run if run is not None else _default_run
     rc, stdout, stderr = runner(argv)
+    if rc == RC_TIMEOUT:
+        raise ContextUnavailable(
+            f"CLI BPMkit не ответил за {int(_CLI_TIMEOUT_S)} с на запрос лицензионного "
+            "контекста — повторите позже (холодный старт BPMkit.exe под антивирусом "
+            "бывает долгим)",
+            kind="context_unavailable",
+            detail=_clip(stderr) or "тайм-аут",
+        )
     if rc != 0 or not (stdout or "").strip():
         raise ContextUnavailable(
             "CLI BPMkit не ответил на запрос лицензионного контекста",
@@ -275,6 +360,40 @@ def resolve(settings, *, run: Optional[Callable] = None,
         )
 
     payload = _parse_stdout(stdout)
+    context = _context_from_payload(payload, cli=list(cli), override_url=override_url)
+    _cache_put(key, context, cache_ttl)
+    return context
+
+
+def _resolve_inprocess(provider: Callable[[], dict], override_url: str,
+                       cache_ttl: float) -> LicenseContext:
+    """Контекст от провайдера в этом процессе. Текст исключения провайдера в
+    ошибку не попадает — только тип: рядом с ним мог оказаться конверт."""
+    key = (_INPROCESS_CLI_KEY, override_url)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+    try:
+        payload = provider()
+    except Exception as exc:  # noqa: BLE001 - один вид отказа наружу, как у `_default_run`
+        raise ContextUnavailable(
+            "CLI BPMkit не выдал лицензионный контекст (запрос внутри процесса)",
+            kind="context_unavailable",
+            detail=f"исключение {type(exc).__name__}",
+        ) from None
+    if not isinstance(payload, dict):
+        raise ContextUnavailable(
+            "CLI BPMkit вернул контекст неожиданной формы — контекст лицензии не получен",
+            kind="context_unavailable",
+            detail=f"тип ответа: {type(payload).__name__}",
+        )
+    context = _context_from_payload(payload, cli=[], override_url=override_url)
+    _cache_put(key, context, cache_ttl)
+    return context
+
+
+def _context_from_payload(payload: dict, *, cli: list, override_url: str) -> LicenseContext:
+    """Разбор ответа (из stdout CLI или от провайдера) в `LicenseContext`."""
     if not payload.get("ok"):
         _raise_not_ok(payload)
 
@@ -299,7 +418,6 @@ def resolve(settings, *, run: Optional[Callable] = None,
         cli=list(cli),
         raw=payload,
     )
-    _cache_put(key, context, cache_ttl)
     return context
 
 
