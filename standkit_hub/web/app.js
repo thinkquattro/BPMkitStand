@@ -3904,6 +3904,7 @@
     "Главное",
     "Обновления от BPMSoft",
     "Удалённые стенды и BPMSoft 2.0",
+    "Ассистент для пользователей",
     "Данные и пакеты",
     "Страницы и схемы",
     "Документы",
@@ -3911,9 +3912,26 @@
     "Другое",
   ];
   const WHATSNEW_VISIBLE = 5;
+  // GAP-830: строка «**О релизе.** абзац» — вводный абзац над категориями (что за релиз,
+  // для кого, зачем ставить), не группа; старый диспетчер показал бы её группой.
+  const WHATSNEW_LEAD = "О релизе";
+
+  /** Вводный абзац «О релизе» из строк клиентского блока (пусто — его нет). */
+  function releaseNotesLead(lines) {
+    const out = [];
+    lines.forEach((raw) => {
+      const line = String(raw).replace(/^\s*[-*]\s+/, "").trim();
+      const m = line.match(/^\*\*(.+?)\*\*\s*(.*)$/);
+      if (m && m[1].replace(/[.:]\s*$/, "").trim() === WHATSNEW_LEAD && m[2].trim()) {
+        out.push(m[2].replace(/\*\*/g, "").trim());
+      }
+    });
+    return out.join(" ");
+  }
 
   /** Строки клиентского блока приходят как «**Категория.** текст» — группируем по
-   * категории, разметку `**` не показываем. Строки без префикса — в «Другое». */
+   * категории, разметку `**` не показываем. Строки без префикса — в «Другое»;
+   * «О релизе» (GAP-830) — не группа, см. releaseNotesLead. */
   function groupReleaseNotes(lines) {
     const byName = {};
     const seen = [];
@@ -3926,6 +3944,7 @@
         name = m[1].replace(/[.:]\s*$/, "").trim();
         line = m[2].trim();
       }
+      if (name === WHATSNEW_LEAD) return;
       line = line.replace(/\*\*/g, "");
       // Заглавной делаем только кириллицу: «doc-creator», «fs_probe» — имена, их не трогаем.
       if (/^[а-яё]/.test(line)) line = line.charAt(0).toUpperCase() + line.slice(1);
@@ -3956,6 +3975,13 @@
     const notesEl = byId("whatsnew-notes");
     if (notesEl) {
       notesEl.innerHTML = "";
+      const lead = releaseNotesLead(data.notes);
+      if (lead) {
+        const p = document.createElement("p");
+        p.className = "whatsnew-lead";
+        p.textContent = lead;
+        notesEl.appendChild(p);
+      }
       groupReleaseNotes(data.notes).forEach((g) => {
         const wrap = document.createElement("div");
         wrap.className = "whatsnew-group" + (g.name === "Главное" ? " whatsnew-group-main" : "");
