@@ -374,13 +374,25 @@ def test_ui_whatsnew_categories_fixed_order_and_fold():
     5 пунктов, остальное — по «и ещё N»."""
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
     order = ["Главное", "Обновления от BPMSoft", "Удалённые стенды и BPMSoft 2.0",
-             "Данные и пакеты", "Страницы и схемы", "Документы",
-             "Надёжность и исправления", "Другое"]
+             "Ассистент для пользователей", "Данные и пакеты", "Страницы и схемы",
+             "Документы", "Надёжность и исправления", "Другое"]
     block = js[js.index("const WHATSNEW_ORDER"):js.index("const WHATSNEW_VISIBLE")]
     positions = [block.index(f'"{name}"') for name in order]
     assert positions == sorted(positions)
     assert "const WHATSNEW_VISIBLE = 5;" in js
     assert "и ещё ${extra.length}" in js
+
+
+def test_ui_whatsnew_lead_paragraph_above_groups():
+    """GAP-830: строка «**О релизе.** …» клиентского блока показывается абзацем над
+    категориями (не группой), остальные строки группируются как раньше."""
+    js = (_web_dir() / "app.js").read_text(encoding="utf-8")
+    css = (_web_dir() / "style.css").read_text(encoding="utf-8")
+    assert 'const WHATSNEW_LEAD = "О релизе";' in js
+    assert "function releaseNotesLead(lines)" in js
+    assert "if (name === WHATSNEW_LEAD) return;" in js
+    assert 'p.className = "whatsnew-lead";' in js
+    assert ".whatsnew-lead {" in css
 
 
 def test_ui_whatsnew_is_button_and_modal_paid_only():

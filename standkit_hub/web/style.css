@@ -2632,6 +2632,12 @@ span.value-has-reason {
   margin: 0 0 10px;
 }
 
+/* GAP-830: вводный абзац «О релизе» над категориями. */
+.whatsnew-lead {
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+
 .whatsnew-group-title {
   font-weight: 600;
   margin-bottom: 2px;
