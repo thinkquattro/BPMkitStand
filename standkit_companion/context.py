@@ -23,7 +23,7 @@
 * **нет лицензии** (`ChannelError(kind="no_license")`) — MCP на месте и честно ответил, что
   ключа на этой машине нет. Чинится покупкой/установкой ключа, к путям отношения не имеет.
 
-Запуск ИЗ САМОГО CLI (GAP-781). Подкоманды `setup update-check`/`apply-update`/`rollback`
+Запуск ИЗ САМОГО CLI. Подкоманды `setup update-check`/`apply-update`/`rollback`
 CLI BPMkit поднимают этот же пакет внутри СВОЕГО процесса. Спрашивать контекст у
 `BPMkit.exe` ещё одним процессом там бессмысленно и опасно: на VM приёмки холодный старт
 onefile-exe — 14–25 с без нагрузки и больше прежнего 30-секундного предела под нагрузкой,
@@ -85,7 +85,7 @@ CONTEXT_ARGV_TAIL = ("setup", "companion-context", "--json")
 # нужна экрану лицензии хаба (`standkit_hub.license_api`), и держать её в двух местах
 # «дословно одинаковой» руками — значит рано или поздно её рассинхронизировать.
 
-# Сколько ждём ответа CLI. GAP-781: прежних 30 с не хватило на VM приёмки — холодный
+# Сколько ждём ответа CLI. Прежних 30 с не хватило на VM приёмки 13.10.2026 — холодный
 # старт onefile-exe под антивирусом 14–25 с без нагрузки и больше 30 с под нагрузкой.
 # 90 с — с запасом на это и всё ещё заведомо меньше интервала любого цикла: зависший CLI
 # не должен копить тики (по тайм-ауту дерево процессов убивается, см. `_default_run`).
@@ -100,7 +100,7 @@ RC_TIMEOUT = -2
 # не наследуются в смысле загрузчика). Ставится, только когда вызывающий сам frozen.
 _PYI_RESET_ENV = "PYINSTALLER_RESET_ENVIRONMENT"
 
-# Провайдер контекста в том же процессе (GAP-781): `() -> dict` той же формы, что JSON
+# Провайдер контекста в том же процессе: `() -> dict` той же формы, что JSON
 # `companion-context`. Регистрирует CLI BPMkit, когда сам запускает канал.
 _inprocess_provider: Optional[Callable[[], dict]] = None
 _INPROCESS_CLI_KEY = ("<in-process>",)
@@ -209,7 +209,7 @@ def set_inprocess_provider(provider: Optional[Callable[[], dict]]):
 
     Зовёт CLI BPMkit, когда сам поднимает канал (`setup update-check`/`apply-update`/
     `rollback`): процесс, который спрашивает контекст, и есть CLI, и запускать его второй
-    копией незачем (GAP-781). `provider()` возвращает словарь ровно той формы, что JSON
+    копией незачем. `provider()` возвращает словарь ровно той формы, что JSON
     `setup companion-context --json`, включая штатные отказы `{"ok": false, ...}`.
     Кэш сбрасывается: ответ провайдера и ответ внешнего CLI — разные источники.
     """
@@ -236,8 +236,8 @@ def _default_run(argv: list) -> tuple:
     """Запуск CLI через ЕДИНУЮ точку `standkit.platform.run_console_tree`.
 
     Прямой `subprocess.run` здесь запрещён: канал тикает из процесса без своей
-    консоли, и каждый тик мигал бы чёрным окном. `run_console_tree`, а не `run_console`
-    (GAP-781): по тайм-ауту убивается ВСЁ дерево — у PyInstaller-сборки работающий
+    консоли, и каждый тик мигал бы чёрным окном. `run_console_tree`, а не `run_console`:
+    по тайм-ауту убивается ВСЁ дерево — у PyInstaller-сборки работающий
     процесс CLI это ребёнок загрузчика, и `subprocess.run` после убийства одного
     загрузчика ждал его пайпы без предела. Тайм-аут — `rc=RC_TIMEOUT`, любое другое
     исключение (нет файла, отказ в доступе) — `rc=-1`: вызывающий разбирает два вида
@@ -319,7 +319,7 @@ def resolve(settings, *, run: Optional[Callable] = None,
     идёт через `standkit.platform.run_console_tree` (см. `_default_run`).
 
     Порядок источников: явный `run` → провайдер в этом процессе (`set_inprocess_provider`,
-    GAP-781: канал запущен ИЗ CLI BPMkit) → внешний CLI.
+    канал запущен ИЗ CLI BPMkit) → внешний CLI.
     """
     override_url = str(getattr(settings, "backend_url", "") or "").strip().rstrip("/")
     provider = _inprocess_provider
@@ -367,7 +367,7 @@ def resolve(settings, *, run: Optional[Callable] = None,
 
 def _resolve_inprocess(provider: Callable[[], dict], override_url: str,
                        cache_ttl: float) -> LicenseContext:
-    """Контекст от провайдера в этом процессе (GAP-781). Текст исключения провайдера в
+    """Контекст от провайдера в этом процессе. Текст исключения провайдера в
     ошибку не попадает — только тип: рядом с ним мог оказаться конверт."""
     key = (_INPROCESS_CLI_KEY, override_url)
     cached = _cache_get(key)
