@@ -1,0 +1,226 @@
+{
+ "_comment": "Generated: python tests/test_public_hygiene.py --write-baseline. File -> rule -> count; numbers only decrease.",
+ "files": {
+  "conftest.py": {
+   "dev_reg": 2
+  },
+  "docs/ARCHITECTURE.md": {
+   "dev_reg": 3
+  },
+  "docs/BACKLOG.md": {
+   "dev_reg": 1,
+   "publisher_stand": 1
+  },
+  "docs/CHANGELOG.md": {
+   "dev_reg": 79,
+   "dev_term": 8,
+   "owner_decision": 2,
+   "private_repo": 2,
+   "publisher_stand": 2
+  },
+  "docs/adr/0004-iis-site-scoped-lifecycle.md": {
+   "publisher_stand": 1
+  },
+  "docs/adr/0006-hub-elevated-restart.md": {
+   "dev_reg": 5,
+   "dev_term": 2
+  },
+  "docs/adr/0007-hub-exit-idle-and-plain-restart.md": {
+   "dev_reg": 12,
+   "dev_term": 2,
+   "owner_decision": 1
+  },
+  "standkit/platform.py": {
+   "owner_decision": 1
+  },
+  "standkit_companion/cookbook.py": {
+   "owner_decision": 1
+  },
+  "standkit_companion/releases.py": {
+   "owner_decision": 1
+  },
+  "standkit_hub/server.py": {
+   "owner_decision": 1
+  },
+  "standkit_hub/web/app.js": {
+   "owner_decision": 1
+  },
+  "standkit_hub/web/index.html": {
+   "owner_decision": 3
+  },
+  "standkit_hub/web/style.css": {
+   "owner_decision": 1
+  },
+  "tests/conftest.py": {
+   "dev_reg": 2,
+   "dev_term": 3
+  },
+  "tests/test_adopt.py": {
+   "publisher_stand": 2
+  },
+  "tests/test_agent_security.py": {
+   "publisher_stand": 1
+  },
+  "tests/test_changelog_links.py": {
+   "dev_term": 2
+  },
+  "tests/test_companion_candidates.py": {
+   "dev_reg": 8
+  },
+  "tests/test_companion_context.py": {
+   "dev_reg": 8,
+   "dev_term": 1,
+   "private_repo": 1
+  },
+  "tests/test_companion_cookbook.py": {
+   "dev_reg": 6
+  },
+  "tests/test_companion_fsutil.py": {
+   "dev_reg": 1
+  },
+  "tests/test_companion_installer_channel.py": {
+   "dev_reg": 2
+  },
+  "tests/test_companion_mcp_mutex.py": {
+   "dev_reg": 1
+  },
+  "tests/test_companion_releases.py": {
+   "dev_reg": 4
+  },
+  "tests/test_companion_runner.py": {
+   "dev_reg": 7
+  },
+  "tests/test_conftest_state_barrier.py": {
+   "dev_reg": 1,
+   "dev_term": 1
+  },
+  "tests/test_gap279_hub_install.py": {
+   "dev_reg": 4
+  },
+  "tests/test_gap411_412_415_idle_preload.py": {
+   "dev_reg": 22
+  },
+  "tests/test_gap413_414_companion_consent_logs.py": {
+   "dev_reg": 12
+  },
+  "tests/test_gap429_cookbook_installed_version.py": {
+   "dev_reg": 4,
+   "dev_term": 1
+  },
+  "tests/test_gap445_hub_session_detect.py": {
+   "dev_reg": 4,
+   "owner_decision": 1,
+   "private_repo": 1
+  },
+  "tests/test_gap447_437_442_hub_truth.py": {
+   "dev_reg": 17
+  },
+  "tests/test_gap463_requires_installer.py": {
+   "dev_reg": 10
+  },
+  "tests/test_gap522_hub_help_menu.py": {
+   "dev_reg": 2
+  },
+  "tests/test_gap527_cookbook_sha8_date.py": {
+   "dev_reg": 2,
+   "dev_term": 1
+  },
+  "tests/test_gap528_companion_status_fields.py": {
+   "dev_reg": 1
+  },
+  "tests/test_gap528_self_version.py": {
+   "dev_reg": 1
+  },
+  "tests/test_gap604_updates_badge.py": {
+   "dev_reg": 2
+  },
+  "tests/test_gap780_secret_ref_encoded.py": {
+   "dev_reg": 1
+  },
+  "tests/test_gap781_install_sync.py": {
+   "dev_reg": 1
+  },
+  "tests/test_gap782_license_activation_text.py": {
+   "dev_reg": 1
+  },
+  "tests/test_gap783_frozen_hub_no_pip.py": {
+   "dev_reg": 2,
+   "owner_decision": 1
+  },
+  "tests/test_health.py": {
+   "dev_reg": 2,
+   "publisher_stand": 1
+  },
+  "tests/test_hosting.py": {
+   "dev_reg": 1
+  },
+  "tests/test_hub_channel.py": {
+   "dev_reg": 4
+  },
+  "tests/test_hub_companion_api.py": {
+   "dev_reg": 11
+  },
+  "tests/test_hub_config.py": {
+   "dev_reg": 1
+  },
+  "tests/test_hub_consent_api.py": {
+   "dev_reg": 1
+  },
+  "tests/test_hub_elevated_op.py": {
+   "dev_reg": 9
+  },
+  "tests/test_hub_elevation.py": {
+   "dev_reg": 9
+  },
+  "tests/test_hub_elevation_ui.py": {
+   "dev_reg": 3,
+   "owner_decision": 4
+  },
+  "tests/test_hub_exit_idle_restart.py": {
+   "dev_reg": 8
+  },
+  "tests/test_hub_instance.py": {
+   "dev_reg": 2
+  },
+  "tests/test_hub_license_api.py": {
+   "dev_reg": 7,
+   "publisher_host": 1
+  },
+  "tests/test_hub_logging.py": {
+   "dev_reg": 2
+  },
+  "tests/test_hub_main_elevated.py": {
+   "dev_reg": 5
+  },
+  "tests/test_hub_mutex.py": {
+   "dev_reg": 6,
+   "private_repo": 2
+  },
+  "tests/test_hub_pwa_and_compact.py": {
+   "dev_reg": 1
+  },
+  "tests/test_hub_self_update.py": {
+   "dev_reg": 2
+  },
+  "tests/test_hub_server.py": {
+   "dev_reg": 1
+  },
+  "tests/test_hub_server_hub_skills_routes.py": {
+   "dev_reg": 2
+  },
+  "tests/test_hub_settings_field_help.py": {
+   "dev_reg": 2,
+   "owner_decision": 1
+  },
+  "tests/test_no_window.py": {
+   "dev_reg": 5,
+   "publisher_stand": 5
+  },
+  "tests/test_platform_sid.py": {
+   "dev_reg": 2
+  },
+  "tests/test_skills_channel.py": {
+   "dev_reg": 1
+  }
+ }
+}
