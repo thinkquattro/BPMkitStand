@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from standkit.registry import default_registry_path
@@ -225,3 +226,77 @@ def test_companion_section_roundtrips_through_save(tmp_path):
     cfg.save(path)
 
     assert HubConfig.load(path).companion == cfg.companion
+
+
+# --- цикл релизов включён по умолчанию, явное «выключено» уважается (GAP-881) ----
+
+
+class TestGap881ReleasesDefaultOn:
+    """Решение владельца 15.10.2026: проверка новых версий MCP включена по умолчанию.
+
+    Три обещания, которые дают документы (докстринг канала, SECURITY.md, кукбуки):
+    (1) у новой установки цикл релизов включён, а автоматика не идёт дальше
+    «скачано и проверено» — заранее скачивание выключено, установка только по команде;
+    (2) явное ``releases.enabled = false`` в конфиге клиента — его решение, и ни чтение
+    конфига, ни частичное сохранение формы настроек, ни пересохранение его не перетирают;
+    (3) тексты в репозитории не утверждают обратного.
+    """
+
+    _REPO = Path(__file__).resolve().parent.parent
+
+    def test_new_install_checks_releases_but_does_not_stage(self, tmp_path):
+        cfg = HubConfig.load(tmp_path / "нет-файла.json")
+
+        assert cfg.companion.releases.enabled is True
+        assert cfg.companion.auto_stage_release is False
+
+    def test_section_without_enabled_key_gets_default_on(self):
+        cfg = CompanionSettings.from_dict({"releases": {"interval_sec": 7200}})
+
+        assert cfg.releases.enabled is True
+        assert cfg.releases.interval_sec == 7200
+
+    def test_explicit_false_survives_save_and_reload(self, tmp_path):
+        path = tmp_path / "standkit-hub.json"
+        path.write_text(json.dumps({"companion": {"releases": {"enabled": False}}}),
+                        encoding="utf-8")
+
+        HubConfig.load(path).save(path)
+        cfg = HubConfig.load(path)
+
+        assert cfg.companion.releases.enabled is False
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert on_disk["companion"]["releases"]["enabled"] is False
+
+    def test_partial_settings_post_keeps_explicit_false(self):
+        """Форма прислала только интервал или только главный рубильник — флаг цикла цел."""
+        from standkit_hub.server import merge_companion_section
+
+        current = CompanionSettings.from_dict({"releases": {"enabled": False}}).to_dict()
+
+        for incoming in ({"releases": {"interval_sec": 7200}},
+                         {"enabled": True},
+                         {"auto_stage_release": True}):
+            merged = merge_companion_section(current, incoming)
+            assert CompanionSettings.from_dict(merged).releases.enabled is False, incoming
+
+    def test_docs_do_not_claim_releases_are_off_by_default(self):
+        """Формулировки прежнего дефолта: «(`releases.enabled = false`)» в скобках —
+        так документы называли умолчание, «дефолт `false`», «релизов выключен по
+        умолчанию». Фраза «явное `releases.enabled = false` уважается» — не про дефолт."""
+        stale = (re.compile(r"\(`?releases\.enabled\s*=\s*false`?\)"),
+                 re.compile(r"дефолт\s+`?false"),
+                 re.compile(r"(?i)(релиз\w*|цикл)[^.;]{0,40}выключен\w*\W+по умолчанию"))
+        offenders = []
+        for rel in ("standkit_companion/__init__.py", "SECURITY.md", "docs/ROADMAP.md",
+                    "docs/BACKLOG.md", "README.md"):
+            text = (self._REPO / rel).read_text(encoding="utf-8-sig")
+            for line in text.splitlines():
+                if any(rx.search(line) for rx in stale):
+                    offenders.append("{}: {}".format(rel, line.strip()))
+        assert not offenders, "\n".join(offenders)
+
+    def test_companion_docstring_names_the_default(self):
+        import standkit_companion
+
+        assert "releases.enabled=true" in (standkit_companion.__doc__ or "")
