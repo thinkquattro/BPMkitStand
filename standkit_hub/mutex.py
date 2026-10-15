@@ -3,8 +3,8 @@
 
 Контекст. Диспетчер до этого модуля не сигналил о своей
 работе никак: `standkit_companion/mcp_mutex.py` умеет только ЧИТАТЬ серверный мьютекс
-(SERVER_MUTEX_NAME -- первоисточник BPMkit/server/bpmkit/core.py, отдельный репозиторий
-`bpmsoft-mcp`), а собственного мьютекса у диспетчера не было вовсе. Два живых замера это
+(SERVER_MUTEX_NAME -- первоисточник BPMkit/server/bpmkit/core.py, корневой репозиторий
+BPMkit), а собственного мьютекса у диспетчера не было вовсе. Два живых замера это
 подтвердили:
   * (04.09.2026): деинсталляция BPMkit при ЗАПУЩЕННОМ диспетчере возвращала rc=0 и
     оставляла на диске единственный файл `BPMkit-hub.exe` -- живой процесс держал его
@@ -19,14 +19,14 @@
 Этот модуль -- зеркало `BPMkit/server/bpmkit/core.py::acquire_server_mutex()` (тот же
 приём CreateMutexW, тот же паттерн монки-патчинга `_win_create_mutex_handle` для тестов на
 Linux-раннере), но со своим именем и в другом репозитории: BPMkitStand -- отдельный git-
-репозиторий (submodule корневого `bpmsoft-mcp`), импортировать константу оттуда нельзя.
+репозиторий (submodule корневого репозитория BPMkit), импортировать константу оттуда нельзя.
 HUB_MUTEX_NAME -- ПЕРВОИСТОЧНИК для диспетчера (в отличие от `mcp_mutex.py`, где
 SERVER_MUTEX_NAME -- вторая копия чужого первоисточника): у мьютекса диспетчера другого
 дома нет. Копия строки для установщика (packaging/installer/bpmkit_installer.iss,
-константа HubMutexName, репозиторий bpmsoft-mcp) неизбежна по той же причине, что у
+константа HubMutexName, корневой репозиторий BPMkit) неизбежна по той же причине, что у
 ServerMutexName там же -- Pascal не читает чужой .py на этапе компиляции мастера;
 расхождение -- best-effort сверка `tools/check_installer.py::_hub_mutex_name` (пропускается,
-если указатель submodule в bpmsoft-mcp ещё не обновлён до коммита с этим файлом).
+если указатель submodule в корневом репозитории BPMkit ещё не обновлён до коммита с этим файлом).
 
 Без "Global\\"-префикса -- та же причина, что у серверного мьютекса: диспетчер, установщик
 и деинсталлятор BPMkit всегда работают в одной интерактивной сессии рабочего стола обычного
@@ -41,7 +41,7 @@ __all__ = ["HUB_MUTEX_NAME", "acquire_hub_mutex", "release_hub_mutex"]
 
 #: ПЕРВОИСТОЧНИК имени -- других копий в BPMkitStand быть не должно (искать перед правкой:
 #: grep -r HUB_MUTEX_NAME). Копия для установщика -- packaging/installer/
-#: bpmkit_installer.iss в репозитории bpmsoft-mcp, константа HubMutexName.
+#: bpmkit_installer.iss в корневом репозитории BPMkit, константа HubMutexName.
 HUB_MUTEX_NAME = "BPMkitHubDispatcher"
 
 # Хендл живёт в модульной переменной, чтобы GC не закрыл его раньше конца процесса (та же
@@ -185,7 +185,7 @@ def acquire_hub_mutex():
     """Создаёт именованный Windows-мьютекс HUB_MUTEX_NAME, живущий до конца процесса
  -- сигнал установщику/деинсталлятору BPMkit (Inno Setup,
     ServerMutexRunning/HubMutexRunning в packaging/installer/bpmkit_installer.iss
-    репозитория bpmsoft-mcp), что диспетчер стендов запущен. `standkit_hub.__main__.main()`
+    корневого репозитория BPMkit), что диспетчер стендов запущен. `standkit_hub.__main__.main()`
     зовёт эту функцию непосредственно перед началом обслуживания HTTP -- ПОСЛЕ того, как
     `bind_hub_server` подтвердил, что этот процесс действительно поднимает сервер (а не
     просто открывает браузер на УЖЕ работающем экземпляре через `HubAlreadyRunning` --

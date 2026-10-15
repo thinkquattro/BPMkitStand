@@ -692,7 +692,7 @@ def main(argv: list[str] | None = None) -> int:
     # браузер на уже работающем экземпляре -- тот путь завершился раньше, через
     # HubAlreadyRunning выше) -- сигналим установщику/деинсталлятору BPMkit до входа в
     # цикл обслуживания, тем же приёмом, что core.acquire_server_mutex() у сервера
-    # (BPMkit/server/bpmkit/core.py репозитория bpmsoft-mcp, вызывается перед mcp.run()).
+    # (BPMkit/server/bpmkit/core.py корневого репозитория BPMkit, вызывается перед mcp.run()).
     acquire_hub_mutex()
 
     actual_port = httpd.server_address[1]
