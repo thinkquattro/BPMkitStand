@@ -125,6 +125,8 @@ def env(tmp_path, monkeypatch):
     ctx = FakeCtx(workdir=str(tmp_path / "companion"), binary_path=str(binary))
     marker = tmp_path / "mcp_startup.json"
     monkeypatch.setattr(autoupdate, "startup_marker_path", lambda: marker)
+    # Маркер работающего процесса — машины прогона (живой BPMkit) — тестам не виден.
+    monkeypatch.setattr(releases, "read_runtime_marker", lambda: None)
     monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
     return state, ctx, binary, marker
 
@@ -545,6 +547,32 @@ def test_reconcile_keeps_waiting_when_installer_did_its_job(env):
     (binary.parent.parent / "manifest.json").write_text(json.dumps({"version": "1.3.20"}),
                                                        encoding="utf-8")
     _pending(state, binary)
+
+    assert autoupdate.reconcile_pending(state, now=NOW) is None
+    assert autoupdate.pending_record(state) is not None
+
+
+def test_reconcile_confirms_by_runtime_marker_when_server_has_no_startup_marker(env, monkeypatch):
+    """Сервер без `mcp_startup.json` (версия до маркера) — подтверждение по маркеру
+    работающего процесса, иначе автоматика встала бы на первой же версии навсегда."""
+    state, _ctx, binary, _marker_path = env
+    _pending(state, binary)
+    monkeypatch.setattr(releases, "read_runtime_marker", lambda: {
+        "version": "1.3.20", "started_at": "2026-10-20T11:30:00Z", "pid": 1,
+        "frozen": True, "binary": str(binary)})
+
+    assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "confirmed"
+    assert state.releases["auto"]["confirmed_via"] == "runtime"
+
+
+def test_reconcile_ignores_runtime_marker_started_before_install(env, monkeypatch):
+    state, _ctx, binary, _marker_path = env
+    (binary.parent.parent / "manifest.json").write_text(json.dumps({"version": "1.3.20"}),
+                                                       encoding="utf-8")
+    _pending(state, binary)
+    monkeypatch.setattr(releases, "read_runtime_marker", lambda: {
+        "version": "1.3.20", "started_at": "2026-10-20T10:30:00Z", "pid": 1,
+        "frozen": True, "binary": str(binary)})
 
     assert autoupdate.reconcile_pending(state, now=NOW) is None
     assert autoupdate.pending_record(state) is not None

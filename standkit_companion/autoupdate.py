@@ -324,11 +324,24 @@ def _event(rel: dict, kind: str, *, src, dst, at: str, **extra) -> dict:
     return event
 
 
+def _runtime_marker_confirms(record: dict, applied: str) -> bool:
+    """Маркер работающего процесса (`mcp_runtime.json`) — поставленная версия, запущенная
+    позже установки. Обе метки — `%Y-%m-%dT%H:%M:%SZ`, сравнение по времени."""
+    runtime = releases.read_runtime_marker()
+    if runtime is None or not _same_version(runtime.get("version"), applied):
+        return False
+    started = parse_iso(runtime.get("started_at"))
+    applied_at = parse_iso(record.get("applied_at"))
+    return started is not None and applied_at is not None and started > applied_at
+
+
 def reconcile_pending(state, *, now=None) -> Optional[dict]:
     """Подтвердить или снять ожидающую автоматическую установку. Сети не трогает.
 
     * маркер старта показывает рабочий старт поставленной версии — установка
-      подтверждена, автоматика снова может ставить следующие версии;
+      подтверждена, автоматика снова может ставить следующие версии; маркера старта нет
+      вовсе (сервер версии без него) — подтверждает маркер работающего процесса
+      `mcp_runtime.json` с этой версией, запущенный позже установки;
     * установщик закончил работу, а поставка на диске осталась прежней — запуск не
       удался (журнал установщика — в событии), счётчик неудач версии растёт, ожидание
       снимается: при следующей проверке автоматика попробует снова (до
@@ -345,6 +358,14 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
     marker = read_startup_marker()
     if marker is not None and marker["ok"] and _same_version(marker["version"], applied):
         record["confirmed_at"] = at
+        state.save()
+        return {"kind": "confirmed", "version": applied}
+    if marker is None and _runtime_marker_confirms(record, applied):
+        # Сервер без маркера старта (версия до него) — подтверждение по маркеру
+        # работающего процесса: поставленная версия запустилась ПОСЛЕ установки. Иначе
+        # ожидание не снялось бы никогда, и автоматика встала бы на первой же версии.
+        record["confirmed_at"] = at
+        record["confirmed_via"] = "runtime"
         state.save()
         return {"kind": "confirmed", "version": applied}
     if record.get("via") != "installer":
