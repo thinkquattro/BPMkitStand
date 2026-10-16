@@ -174,9 +174,10 @@ class CompanionCycle:
 
 # Дефолты и нижние границы циклов канала. Паттерны включены (markdown, не исполняемый
 # код — sha256 достаточно). Релизы включены по умолчанию: ключ подписи
-# артефактов и HTTPS бэкенда уже в строю — прежний ручной рубильник
-# «включить явно» снят, автоматика доходит ровно до check/stage (см. runner._run_releases,
-# SECURITY.md §4.1: apply — только явное действие человека).
+# артефактов и HTTPS бэкенда уже в строю. Докуда доходит автоматика, решает режим
+# обновлений `update_mode` (ниже): `notify` — проверка и подготовка, установка кнопкой;
+# `auto` — ещё и установка подписанного артефакта без человека (runner._run_releases,
+# standkit_companion.autoupdate, SECURITY.md §4.2); `off` — проверки нет.
 _COMPANION_PATTERNS_INTERVAL = 21600 # 6 часов
 _COMPANION_PATTERNS_MIN_INTERVAL = 300     # 5 минут
 _COMPANION_RELEASES_INTERVAL = 86400       # раз в сутки
@@ -188,6 +189,104 @@ _COMPANION_RELEASES_MIN_INTERVAL = 3600    # час
 # у поля revocations) — новых мест, где они читались бы как независимая настройка, нет.
 _COMPANION_REVOCATIONS_INTERVAL = 1800     # вместе с паттернами (легаси-дефолт)
 _COMPANION_REVOCATIONS_MIN_INTERVAL = 300
+
+# --- Режим обновлений MCP и кольцо раскатки --------------------------------------------
+#
+# Режим — ОДНО поле с тремя значениями, а не набор флажков: прежние `releases.enabled`
+# и `auto_stage_release` описывали две точки одной шкалы «ничего → проверить → скачать»,
+# и третья точка («поставить») флажком выражалась бы как ещё одна комбинация, половина
+# которых бессмысленна («ставить, но не проверять»).
+#
+# * `auto`   — проверка, подготовка и установка подписанного артефакта без человека
+#              (подпись и применимость — fail-closed, как у ручной установки);
+# * `notify` — проверка и подготовка в фоне, установка — кнопкой человека;
+# * `off`    — проверки новых версий MCP нет (цикл `releases` не тикает).
+UPDATE_MODE_AUTO = "auto"
+UPDATE_MODE_NOTIFY = "notify"
+UPDATE_MODE_OFF = "off"
+UPDATE_MODES = (UPDATE_MODE_AUTO, UPDATE_MODE_NOTIFY, UPDATE_MODE_OFF)
+
+# Кольцо раскатки: `early` получает релиз сразу после публикации, `stable` — после срока
+# `stable_after`, который издатель объявляет в `GET /v1/version/latest` (поле `rollout`).
+# Кольцо — не пользовательская настройка окна «Обновления» (там оно только показывается):
+# его задаёт установка (параметр мастера) или CLI BPMkit.
+UPDATE_RING_EARLY = "early"
+UPDATE_RING_STABLE = "stable"
+UPDATE_RINGS = (UPDATE_RING_EARLY, UPDATE_RING_STABLE)
+DEFAULT_UPDATE_RING = UPDATE_RING_STABLE
+
+
+def normalize_update_mode(value: object) -> str:
+    """Значение режима из ``UPDATE_MODES`` или пустая строка, если значение не распознано.
+
+    Пустая строка, а не дефолт, — намеренно: «поле битое» и «поля нет» разрешаются ОДНИМ
+    правилом (``derive_update_mode``), а не вторым умолчанием, которое разошлось бы с ним.
+    """
+    if isinstance(value, str) and value.strip().lower() in UPDATE_MODES:
+        return value.strip().lower()
+    return ""
+
+
+def normalize_update_ring(value: object) -> str:
+    """Кольцо раскатки из ``UPDATE_RINGS``; мусор — ``stable`` (позднее кольцо безопаснее)."""
+    if isinstance(value, str) and value.strip().lower() in UPDATE_RINGS:
+        return value.strip().lower()
+    return DEFAULT_UPDATE_RING
+
+
+def derive_update_mode(section: object) -> str:
+    """Режим для секции ``companion`` без (распознаваемого) поля ``update_mode``.
+
+    Правило миграции существующих установок: ``off``, если проверка релизов выключена в
+    файле ЯВНО (``releases.enabled`` есть и ложно), иначе ``auto``. Явное «не проверять»
+    — решение человека, и новый умолчательный режим его не перебивает; молчание
+    конфига — не решение, и оно получает умолчание поставки.
+    """
+    releases = section.get("releases") if isinstance(section, dict) else None
+    if isinstance(releases, dict) and "enabled" in releases and not bool(releases.get("enabled")):
+        return UPDATE_MODE_OFF
+    return UPDATE_MODE_AUTO
+
+
+def effective_update_mode(settings: object) -> str:
+    """Действующий режим для объекта настроек (в том числе собранного конструктором).
+
+    ``from_dict`` держит ``releases.enabled`` зеркалом режима, но настройки, собранные
+    напрямую (тесты, чужой вызывающий), могут противоречить друг другу. Тогда выключенный
+    цикл релизов сильнее режима: «не проверять» не может означать «ставить».
+    """
+    mode = normalize_update_mode(getattr(settings, "update_mode", ""))
+    if not mode:
+        releases = getattr(settings, "releases", None)
+        enabled = getattr(releases, "enabled", True)
+        mode = UPDATE_MODE_AUTO if enabled else UPDATE_MODE_OFF
+    releases = getattr(settings, "releases", None)
+    if releases is not None and not bool(getattr(releases, "enabled", True)):
+        return UPDATE_MODE_OFF
+    return mode
+
+
+def sync_legacy_releases_toggle(merged: dict, incoming: object) -> dict:
+    """Согласовать режим с прежним флажком ``releases.enabled``, присланным БЕЗ режима.
+
+    Старые формы и вызывающие знают только флажок «проверять версии MCP по расписанию».
+    ``from_dict`` выводит из режима флажок (режим главный), поэтому без этого шага
+    присланное ``releases.enabled = false`` молча возвращалось бы к ``true``. Перевод:
+    ``false`` → ``off``; ``true`` при текущем ``off`` → ``notify`` (флажок означал
+    «проверять», а не «устанавливать без меня»). Присланный режим всегда главнее флажка.
+    """
+    out = dict(merged or {})
+    if not isinstance(incoming, dict) or "update_mode" in incoming:
+        return out
+    releases = incoming.get("releases")
+    if not isinstance(releases, dict) or "enabled" not in releases:
+        return out
+    current = normalize_update_mode(out.get("update_mode")) or derive_update_mode(out)
+    if not bool(releases.get("enabled")):
+        out["update_mode"] = UPDATE_MODE_OFF
+    elif current == UPDATE_MODE_OFF:
+        out["update_mode"] = UPDATE_MODE_NOTIFY
+    return out
 
 
 @dataclass
@@ -231,18 +330,41 @@ class CompanionSettings:
     # в /api/settings (см. server.py::_UI_HIDDEN_COMPANION_FIELDS).
     revocations: CompanionCycle = field(default_factory=lambda: CompanionCycle(
         enabled=True, interval_sec=_COMPANION_REVOCATIONS_INTERVAL))
-    # Скачанный релиз кладётся в стейджинг автоматически (но НЕ применяется: подмена
-    # бинаря — всегда явное действие человека, см. SECURITY.md §4.1 «никакого тихого
-    # действия»).
+    # Прежний флажок «скачивать новую версию заранее». Остаётся только для совместимости
+    # чтения старого конфига: подготовку теперь решает режим (`stage_releases` ниже —
+    # `update_mode` равен `auto` или `notify`), значение этого поля канал не читает.
     auto_stage_release: bool = False
     # Требовать подпись у КАЖДОГО паттерна. Дефолт False: механизма подписи markdown-тела
     # у издателя ещё нет, включение сегодня просто выключит канал целиком.
     require_pattern_signature: bool = False
+    # Режим обновлений MCP (`UPDATE_MODES`). В файле без поля выводится правилом
+    # `derive_update_mode`; `releases.enabled` — его зеркало (`off` ⇔ цикл не тикает).
+    update_mode: str = UPDATE_MODE_AUTO
+    # Кольцо раскатки (`UPDATE_RINGS`): `stable` ждёт срока `stable_after` издателя.
+    update_ring: str = DEFAULT_UPDATE_RING
+    # Ключи секции, которых эта версия не знает (их мог записать CLI BPMkit или более
+    # новый диспетчер). Хранятся и пишутся обратно как есть: запись конфига — это
+    # read-modify-write, а не «оставить только своё».
+    extra: dict = field(default_factory=dict)
+
+    @property
+    def stage_releases(self) -> bool:
+        """Готовить (скачивать и проверять) найденный релиз в фоне — режимы auto и notify."""
+        return effective_update_mode(self) in (UPDATE_MODE_AUTO, UPDATE_MODE_NOTIFY)
 
     @classmethod
     def from_dict(cls, data: object) -> "CompanionSettings":
         if not isinstance(data, dict):
             return cls()
+        mode = normalize_update_mode(data.get("update_mode")) or derive_update_mode(data)
+        releases = CompanionCycle.from_dict(
+            data.get("releases"), default_enabled=True,
+            default_interval=_COMPANION_RELEASES_INTERVAL,
+            min_interval=_COMPANION_RELEASES_MIN_INTERVAL)
+        # Зеркало режима: `off` — цикл релизов не тикает, иначе — тикает. Режим главнее
+        # флажка (см. sync_legacy_releases_toggle — как прежний флажок переводится в режим).
+        releases.enabled = mode != UPDATE_MODE_OFF
+        known = {f.name for f in fields(cls)} - {"extra"}
         return cls(
             enabled=bool(data.get("enabled", True)),
             backend_url=str(data.get("backend_url", "") or ""),
@@ -251,20 +373,21 @@ class CompanionSettings:
                 data.get("patterns"), default_enabled=True,
                 default_interval=_COMPANION_PATTERNS_INTERVAL,
                 min_interval=_COMPANION_PATTERNS_MIN_INTERVAL),
-            releases=CompanionCycle.from_dict(
-                data.get("releases"), default_enabled=True,
-                default_interval=_COMPANION_RELEASES_INTERVAL,
-                min_interval=_COMPANION_RELEASES_MIN_INTERVAL),
+            releases=releases,
             revocations=CompanionCycle.from_dict(
                 data.get("revocations"), default_enabled=True,
                 default_interval=_COMPANION_REVOCATIONS_INTERVAL,
                 min_interval=_COMPANION_REVOCATIONS_MIN_INTERVAL),
             auto_stage_release=bool(data.get("auto_stage_release", False)),
             require_pattern_signature=bool(data.get("require_pattern_signature", False)),
+            update_mode=mode,
+            update_ring=normalize_update_ring(data.get("update_ring")),
+            extra={key: value for key, value in data.items() if key not in known},
         )
 
     def to_dict(self) -> dict:
-        return {
+        out = dict(self.extra or {})
+        out.update({
             "enabled": bool(self.enabled),
             "backend_url": self.backend_url,
             "mcp_cli": self.mcp_cli,
@@ -273,7 +396,12 @@ class CompanionSettings:
             "revocations": self.revocations.to_dict(),
             "auto_stage_release": bool(self.auto_stage_release),
             "require_pattern_signature": bool(self.require_pattern_signature),
-        }
+            # Действующий режим, а не сырое поле: настройки, собранные конструктором с
+            # выключенным циклом релизов, обязаны пережить запись и чтение как `off`.
+            "update_mode": effective_update_mode(self),
+            "update_ring": normalize_update_ring(self.update_ring),
+        })
+        return out
 
 
 @dataclass

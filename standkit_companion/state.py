@@ -110,6 +110,25 @@ def _default_state() -> dict:
             # отсутствия записи для `latest` и мусора в поле (обратная совместимость
             # со старым бэкендом — см. докстринг `releases._update_release_notes`).
             "requires_installer": False,
+            # раскатка версии `rollout_version` (поле `rollout` того же попутного
+            # запроса): `{"paused": bool, "published_at": str|None, "stable_after":
+            # str|None}`. `None` — в последней проверке узнать не удалось (запрос не
+            # прошёл); автоматическая установка в этом случае ждёт, а не угадывает.
+            "rollout": None,
+            "rollout_version": None,
+            # Автоматическое обновление (`autoupdate.py`). `auto` — последняя
+            # установка без человека, ждущая подтверждения рабочего старта новой
+            # версии; `bad_versions` — версии, которые автоматика больше не ставит
+            # (не дошли до рабочего старта и откачены); `last_auto_event` — последнее
+            # событие для показа человеку («обновлено с A до B», «откат»);
+            # `auto_failures` — счётчик неудачных автоматических запусков установщика
+            # по версиям.
+            "auto": None,
+            "bad_versions": [],
+            "last_auto_event": None,
+            "auto_failures": {},
+            # последний исход автоматики (`{decision, reason, version, trigger, at}`).
+            "last_auto_decision": None,
         },
         # узкий поток кукбука. Отдельная секция, а не поле внутри
         # `releases`, — по той же причине, по которой отдельный модуль
@@ -208,6 +227,19 @@ def index_sync_summary(raw: Any) -> dict:
     return block
 
 
+def _rollout_summary(rel: dict) -> Optional[dict]:
+    """Раскатка версии `rollout_version` для UI: `None` — не известна."""
+    rollout = rel.get("rollout")
+    if not isinstance(rollout, dict):
+        return None
+    return {
+        "version": rel.get("rollout_version"),
+        "paused": rollout.get("paused") is True,
+        "published_at": rollout.get("published_at"),
+        "stable_after": rollout.get("stable_after"),
+    }
+
+
 def _server_stats(raw: Any, index_raw: Any = None) -> dict:
     """Счётчик библиотеки на сервере + строка окна + статус сверки индекса (`index`).
     Пустой/битый блок — «ещё проверяем»."""
@@ -260,6 +292,39 @@ class CompanionState:
                 got.setdefault(key, value)
         data["schema_version"] = _SCHEMA_VERSION
         return data
+
+    def reload(self) -> None:
+        """Перечитать файл в ЭТОТ же объект (держатели ссылки на него видят свежие данные).
+
+        Нужен автоматическому обновлению: файл состояния пишут два процесса — диспетчер
+        и CLI BPMkit, запущенный задачей Планировщика, — и решение «ставить ли» обязано
+        видеть, что другой уже сделал (запуск установщика, плохие версии, откат).
+        Нечитаемый файл не стирает то, что уже в памяти.
+        """
+        try:
+            data = json.loads(Path(self.path).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return
+        if isinstance(data, dict):
+            self.data = self._migrate(data)
+
+    def refresh_keys(self, section: str, keys) -> None:
+        """Перечитать с диска только `keys` секции `section` (диск главнее памяти).
+
+        Для ключей, которые пишут несколько процессов и каждый — сразу на диск (см.
+        `runner._AUTO_STATE_KEYS`). Нет файла, нет секции, нет ключа — память не трогается.
+        """
+        try:
+            data = json.loads(Path(self.path).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return
+        block = data.get(section) if isinstance(data, dict) else None
+        if not isinstance(block, dict):
+            return
+        target = self.data.setdefault(section, {})
+        for key in keys:
+            if key in block:
+                target[key] = block[key]
 
     def save(self) -> None:
         fsutil.atomic_write_text(
@@ -409,6 +474,20 @@ class CompanionState:
                 #: подготовленная ЛИБО известная более новая версия —
                 # UI прячет кнопку «Установить», когда ставить нечего.
                 "update_available": releases_update_available,
+                # раскатка известной новой версии и итог автоматики — для окна
+                # «Обновления» (предупреждение на паузе) и `self_check` MCP.
+                "rollout": _rollout_summary(rel),
+                "bad_versions": [str(item) for item in (rel.get("bad_versions") or [])],
+                "last_auto_event": (dict(rel["last_auto_event"])
+                                    if isinstance(rel.get("last_auto_event"), dict)
+                                    else None),
+                "last_auto_decision": (dict(rel["last_auto_decision"])
+                                       if isinstance(rel.get("last_auto_decision"), dict)
+                                       else None),
+                "auto_pending_version": ((rel.get("auto") or {}).get("applied_version")
+                                         if isinstance(rel.get("auto"), dict)
+                                         and not (rel.get("auto") or {}).get("confirmed_at")
+                                         else None),
             },
             "cookbook": {
                 "last_check_at": cb.get("last_check_at"),

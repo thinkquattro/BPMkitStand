@@ -235,8 +235,8 @@ class TestReleasesDefaultOn:
     """С 0.12.26 документы приведены к факту кода: проверка новых версий включена по умолчанию.
 
     Три обещания, которые дают документы (докстринг канала, SECURITY.md, кукбуки):
-    (1) у новой установки цикл релизов включён, а автоматика не идёт дальше
-    «скачано и проверено» — заранее скачивание выключено, установка только по команде;
+    (1) у новой установки цикл релизов включён; докуда идёт автоматика, решает режим
+    обновлений (`update_mode`, по умолчанию `auto` — см. ``TestUpdateMode``);
     (2) явное ``releases.enabled = false`` в конфиге клиента — его решение, и ни чтение
     конфига, ни частичное сохранение формы настроек, ни пересохранение его не перетирают;
     (3) тексты в репозитории не утверждают обратного.
@@ -244,11 +244,11 @@ class TestReleasesDefaultOn:
 
     _REPO = Path(__file__).resolve().parent.parent
 
-    def test_new_install_checks_releases_but_does_not_stage(self, tmp_path):
+    def test_new_install_checks_releases(self, tmp_path):
         cfg = HubConfig.load(tmp_path / "нет-файла.json")
 
         assert cfg.companion.releases.enabled is True
-        assert cfg.companion.auto_stage_release is False
+        assert cfg.companion.update_mode == "auto"
 
     def test_section_without_enabled_key_gets_default_on(self):
         cfg = CompanionSettings.from_dict({"releases": {"interval_sec": 7200}})
@@ -300,3 +300,98 @@ class TestReleasesDefaultOn:
         import standkit_companion
 
         assert "releases.enabled=true" in (standkit_companion.__doc__ or "")
+
+
+# --- режим обновлений MCP (update_mode) и кольцо раскатки (update_ring) -----------------
+
+
+class TestUpdateMode:
+    """Режим `auto`/`notify`/`off` — одно поле вместо пары флажков; кольцо `early`/`stable`.
+
+    Обещания: (1) установка без поля режима получает `auto`, кроме явного «не проверять
+    релизы» — тогда `off`; (2) `releases.enabled` — зеркало режима (`off` ⇔ цикл не
+    тикает); (3) запись секции — read-modify-write: незнакомые ключи переживают
+    пересохранение; (4) прежний флажок, присланный без режима, переводится в режим.
+    """
+
+    def test_new_install_is_auto_stable(self, tmp_path):
+        cfg = HubConfig.load(tmp_path / "нет-файла.json")
+
+        assert cfg.companion.update_mode == "auto"
+        assert cfg.companion.update_ring == "stable"
+        assert cfg.companion.stage_releases is True
+
+    def test_existing_config_without_mode_is_auto(self):
+        cfg = CompanionSettings.from_dict({"releases": {"enabled": True},
+                                           "auto_stage_release": False})
+
+        assert cfg.update_mode == "auto"
+        assert cfg.releases.enabled is True
+
+    def test_explicit_releases_off_without_mode_is_off(self):
+        cfg = CompanionSettings.from_dict({"releases": {"enabled": False}})
+
+        assert cfg.update_mode == "off"
+        assert cfg.releases.enabled is False
+        assert cfg.stage_releases is False
+
+    def test_mode_is_primary_and_mirrors_releases_flag(self):
+        on = CompanionSettings.from_dict({"update_mode": "notify",
+                                          "releases": {"enabled": False}})
+        off = CompanionSettings.from_dict({"update_mode": "off",
+                                           "releases": {"enabled": True}})
+
+        assert (on.update_mode, on.releases.enabled) == ("notify", True)
+        assert (off.update_mode, off.releases.enabled) == ("off", False)
+
+    def test_garbage_mode_falls_back_to_derived_rule(self):
+        assert CompanionSettings.from_dict({"update_mode": "always"}).update_mode == "auto"
+        assert CompanionSettings.from_dict({
+            "update_mode": 1, "releases": {"enabled": False}}).update_mode == "off"
+        assert CompanionSettings.from_dict({"update_mode": " NOTIFY "}).update_mode == "notify"
+
+    def test_ring_normalized_to_stable(self):
+        assert CompanionSettings.from_dict({"update_ring": "early"}).update_ring == "early"
+        assert CompanionSettings.from_dict({"update_ring": "canary"}).update_ring == "stable"
+        assert CompanionSettings.from_dict({}).update_ring == "stable"
+
+    def test_mode_and_ring_roundtrip_and_unknown_keys_survive(self, tmp_path):
+        path = tmp_path / "standkit-hub.json"
+        path.write_text(json.dumps({"companion": {
+            "update_mode": "notify", "update_ring": "early",
+            "future_key": {"x": 1}}}), encoding="utf-8")
+
+        HubConfig.load(path).save(path)
+        on_disk = json.loads(path.read_text(encoding="utf-8"))["companion"]
+
+        assert on_disk["update_mode"] == "notify"
+        assert on_disk["update_ring"] == "early"
+        assert on_disk["future_key"] == {"x": 1}, "запись — read-modify-write"
+        assert on_disk["releases"]["enabled"] is True
+
+    def test_constructor_with_releases_off_is_saved_as_off(self, tmp_path):
+        """Настройки, собранные конструктором с выключенным циклом, — это `off` и после
+        записи/чтения (действующий режим, а не сырое поле)."""
+        from standkit_hub.config import CompanionCycle, effective_update_mode
+
+        settings = CompanionSettings(releases=CompanionCycle(enabled=False))
+
+        assert effective_update_mode(settings) == "off"
+        assert CompanionSettings.from_dict(settings.to_dict()).update_mode == "off"
+
+    def test_legacy_toggle_sent_without_mode_becomes_mode(self):
+        from standkit_hub.config import sync_legacy_releases_toggle
+
+        auto = CompanionSettings().to_dict()
+        off = CompanionSettings.from_dict({"update_mode": "off"}).to_dict()
+
+        assert sync_legacy_releases_toggle(
+            auto, {"releases": {"enabled": False}})["update_mode"] == "off"
+        assert sync_legacy_releases_toggle(
+            off, {"releases": {"enabled": True}})["update_mode"] == "notify", (
+            "флажок означал «проверять», а не «устанавливать без меня»")
+        assert sync_legacy_releases_toggle(
+            auto, {"releases": {"enabled": True}})["update_mode"] == "auto"
+        assert sync_legacy_releases_toggle(
+            auto, {"update_mode": "notify", "releases": {"enabled": False}}
+        ).get("update_mode") == "auto", "присланный режим главнее флажка — его ставит merge"

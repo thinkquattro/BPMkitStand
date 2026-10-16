@@ -1793,7 +1793,8 @@ span.value-has-reason {
 }
 
 .settings-form input[type="text"],
-.settings-form input[type="number"] {
+.settings-form input[type="number"],
+.settings-form select {
   display: block;
   width: 100%;
   margin-top: 4px;
@@ -2424,6 +2425,48 @@ span.value-has-reason {
 }
 
 .upd-detail[hidden] {
+  display: none;
+}
+
+/* Режим обновлений MCP — строка под каналами окна «Обновления»: переключатель,
+   кольцо раскатки (только чтение), строки паузы и последнего события автоматики.
+   Ширина окна держится переносом (flex-wrap), а не сжатием переключателя. */
+.upd-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 10px 0 2px;
+  font-size: 13px;
+}
+
+.upd-mode-label {
+  font-weight: 600;
+  color: var(--bpmkit-text);
+}
+
+.upd-mode select {
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--bpmkit-border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bpmkit-panel-bg);
+  color: var(--bpmkit-text);
+}
+
+.upd-mode .upd-meta {
+  margin-top: 0;
+  color: var(--bpmkit-muted);
+}
+
+.upd-mode .upd-detail,
+.upd-mode .upd-mode-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.upd-mode-note[hidden] {
   display: none;
 }
 

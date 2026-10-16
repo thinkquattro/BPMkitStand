@@ -963,7 +963,7 @@
           <!-- ── Обновления (настройки канала) ────────────────────────── -->
           <div class="settings-pane" data-pane="updates" id="settings-companion">
             <h2>Обновления</h2>
-            <p class="pane-lead">Паттерны обновляются автоматически, новая версия MCP ставится только по вашей команде.</p>
+            <p class="pane-lead">Паттерны обновляются автоматически. Как ставится новая версия MCP, решает режим обновлений.</p>
             <label class="checkbox-label">
               <input type="checkbox" name="companion_enabled" />
               Канал обновлений включён
@@ -971,16 +971,18 @@
             <label>Проверять паттерны каждые, ч
               <input type="number" name="companion_patterns_interval_hours" min="1" max="168" />
             </label>
-            <label class="checkbox-label">
-              <input type="checkbox" name="companion_releases_enabled" />
-              Проверять новые версии MCP по расписанию
+            <!-- режим обновлений MCP — одно поле вместо прежних флажков «проверять по
+                 расписанию» и «скачивать заранее» (они были двумя точками той же шкалы);
+                 то же значение меняет переключатель в окне «Обновления». -->
+            <label>Обновления MCP
+              <select name="companion_update_mode">
+                <option value="auto">Автоматически (рекомендуется)</option>
+                <option value="notify">Только уведомлять</option>
+                <option value="off">Выключить</option>
+              </select>
             </label>
             <label>Проверять версии MCP каждые, ч
               <input type="number" name="companion_releases_interval_hours" min="1" max="168" />
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" name="companion_auto_stage_release" />
-              Скачивать новую версию MCP заранее, установку подтверждаю сам
             </label>
             <!-- уведомления браузера. Без name — это выбор конкретного браузера
                  (хранится в нём), а не поле конфига диспетчера; разрешение браузера
@@ -1440,6 +1442,22 @@
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
               </button>
             </div>
+          </div>
+
+          <!-- режим обновлений MCP: переключатель (три значения, тот же
+               companion.update_mode, что в «Настройки → Обновления») и кольцо раскатки
+               только для чтения (его задают установка и CLI BPMkit). Строка паузы —
+               когда издатель приостановил раскатку известной новой версии. -->
+          <div class="upd-mode" id="upd-mode-row">
+            <label class="upd-mode-label" for="upd-mode-select">Установка обновлений</label>
+            <select id="upd-mode-select" title="Режим обновлений MCP">
+              <option value="auto">Автоматически (рекомендуется)</option>
+              <option value="notify">Только уведомлять</option>
+              <option value="off">Выключить</option>
+            </select>
+            <span class="upd-meta" id="upd-ring" title="Кольцо раскатки задаётся при установке BPMkit">кольцо: стабильное</span>
+            <p class="upd-detail" id="upd-paused-note" hidden></p>
+            <p class="upd-meta upd-mode-note" id="upd-auto-event" hidden></p>
           </div>
         </div>
 

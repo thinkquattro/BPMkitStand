@@ -38,10 +38,18 @@
 узнать причину сразу, чем показать пользователю два невнятных отказа и лишь потом настоящую
 причину.
 
-**6. `apply_staged` из планировщика не вызывается НИКОГДА** (`SECURITY.md` §4.1 «никакого
-тихого действия»). Автоматика доходит ровно до `check` и — по явной настройке
-`auto_stage_release` — до `stage`: скачать и проверить подпись можно молча, подменить
-исполняемый файл MCP — только по команде человека. См. `_run_releases`.
+**6. Установка без человека — только через `autoupdate` и только в режиме `auto`**
+(`companion.update_mode`, `SECURITY.md` §4.2). Планировщик сам `apply_staged`/
+`apply_installer` не зовёт: в режиме `auto` цикл релизов передаёт найденную версию
+`autoupdate.execute`, который решает по политике (кольцо раскатки, пауза издателя,
+плохая версия, установка «для всех пользователей») и ставит подписанный артефакт теми же
+fail-closed функциями, что и кнопка. В режиме `notify` автоматика доходит до `stage`, в
+`off` цикл релизов не тикает. См. `_run_releases`.
+
+**8. Автооткат проверяется на каждом пробуждении и раз в `HOUSEKEEPING_INTERVAL_SEC`.**
+Локальная проверка маркера старта новой версии (`autoupdate.maybe_rollback`) — без сети и
+без лицензионного контекста: если только что поставленная версия не стартует, CLI BPMkit,
+у которого спрашивается контекст, и есть сломанный файл.
 
 **7. Индекс паттернов обновляется сам.** Плановый тик паттернов и кнопка «Проверить
 обновления» сверяют отпечаток индекса клиента с `index_sha256` сервера и при расхождении
@@ -60,8 +68,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import (__version__, candidates, context, cookbook, hub_channel, patterns,
-              releases, revocations, skills_channel)
+from . import (__version__, autoupdate, candidates, context, cookbook, hub_channel,
+              patterns, releases, revocations, skills_channel)
 from .backend import BackendClient
 from .errors import ChannelError, CompanionError, ContextUnavailable, NotModified
 from .state import STATE_FILE_NAME, CompanionState, index_sync_summary
@@ -95,7 +103,11 @@ ACTIONS = ("sync_patterns", "check_update", "stage_update", "apply_update",
            # и скиллы/плагин (kind=skills). Оба — ТОЛЬКО явные действия человека, ни один
            # не тикает планировщиком (симметрично apply_update/rollback, см. run_action).
            "check_hub", "stage_hub", "apply_hub",
-           "check_skills", "stage_skills", "apply_skills")
+           "check_skills", "stage_skills", "apply_skills",
+           # автоматическое обновление (задача Планировщика через CLI BPMkit,
+           # ручной запуск CLI). Своей кнопки в окне нет: в режиме `auto` то же делает
+           # цикл релизов работающего диспетчера.
+           "auto_update")
 
 #: Доля интервала, на которую срок «гуляет» в обе стороны (см. п.2 докстринга модуля).
 JITTER_FRACTION = 0.10
@@ -125,6 +137,26 @@ STATS_FRESH_SEC = 300.0
 #: Сколько фоновый запрос счётчика ждёт замок прогонов, чтобы сохранить результат на диск.
 #: Не дождался (идёт длинный тик) — результат остаётся в памяти, тик сохранит его сам.
 STATS_LOCK_WAIT_SEC = 10.0
+
+#: Как часто планировщик проверяет автооткат и подтверждение автоматической установки,
+#: даже когда ни один цикл не наступил. Проверка локальная (два маленьких файла), а
+#: ждать ближайшего тика паттернов (часы) со сломанной новой версией MCP — слишком долго.
+HOUSEKEEPING_INTERVAL_SEC = 300.0
+
+#: Ключи `releases`, которыми владеет автоматическое обновление. Их пишут два процесса
+#: (диспетчер и CLI BPMkit из задачи Планировщика), и каждый пишет сразу на диск, поэтому
+#: на пробуждении диск для них главнее памяти — иначе диспетчер затёр бы своей старой
+#: копией запись о версии, которую только что поставил CLI.
+_AUTO_STATE_KEYS = ("auto", "bad_versions", "last_auto_event", "auto_failures",
+                    "last_auto_decision")
+
+
+def _update_mode(settings) -> str:
+    """Действующий режим обновлений (импорт хаба отложен — см. `_load_settings_from_config`)."""
+    from standkit_hub.config import effective_update_mode
+
+    return effective_update_mode(settings)
+
 
 #: Статусы, которые пишут в состояние сами модули циклов. Всё, чего здесь нет (например
 #: `never` у ни разу не запускавшегося цикла), раннер трактует как успех: до сюда
@@ -272,6 +304,8 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
         "check_skills": enabled,
         "stage_skills": enabled,
         "apply_skills": enabled and skills_staged,
+        # не кнопка: автоматика зовёт его сама; ключ — для полноты «что разрешено».
+        "auto_update": enabled and _update_mode(settings) != "off",
     }
 
 
@@ -358,6 +392,9 @@ class CompanionRunner:
         self._wake_token = 0
         self._candidates_wake_token = -1
         self._candidates_outcome: Optional[dict] = None
+        # Срок следующей проверки автоотката (см. HOUSEKEEPING_INTERVAL_SEC) — по тем же
+        # монотонным часам, что и сроки циклов. «Сейчас»: первое пробуждение проверяет.
+        self._housekeeping_at = now
         # Фоновый запрос счётчика паттернов на сервере (окно «Обновления»): не больше
         # одного одновременно, свежесть — по монотонным часам.
         self._stats_guard = threading.Lock()
@@ -428,6 +465,10 @@ class CompanionRunner:
             return False
         if cycle == "revocations":
             return True
+        if cycle == "releases" and _update_mode(settings) == "off":
+            # режим `off` — проверки новых версий нет вовсе, даже если флажок цикла
+            # в настройках, собранных в обход `from_dict`, остался включён.
+            return False
         return bool(getattr(getattr(settings, cycle, None), "enabled", False))
 
     def _jittered(self, interval: float) -> float:
@@ -500,9 +541,9 @@ class CompanionRunner:
         Отказ здесь НЕ роняет несущую операцию: не приехала инструкция — это не
         повод объявить неудачей синхронизацию паттернов или проверку релиза,
         которые уже отработали. Исход оседает в `state.cookbook` и виден в UI.
-        В отличие от `apply_staged`, тихое применение здесь законно: документ
-        ничего не подменяет в поставке и не требует перезапуска (SECURITY.md
-        §4.1 про «никакого тихого действия» касается исполняемого кода).
+        Тихое применение здесь законно в любом режиме обновлений: документ ничего
+        не подменяет в поставке и не требует перезапуска (правило SECURITY.md §4.2
+        «исполняемый код без человека — только в режиме `auto`» касается кода).
         """
         try:
             return cookbook.sync(session.client, self._state, session.ctx)
@@ -685,16 +726,20 @@ class CompanionRunner:
         return result
 
     def _run_releases(self, session, settings) -> dict:
-        """Проверка релиза и — по явной настройке — только подготовка.
+        """Проверка релиза и дальше — по режиму обновлений (`companion.update_mode`).
 
-        ЗАПРЕТ: `releases.apply_staged` отсюда НЕ вызывается и вызываться не должен НИКОГДА:
-        подмена исполняемого файла MCP — всегда явное решение человека (`SECURITY.md` §4.1
-        «никакого тихого действия»). Автоматический `stage` безопасен ровно потому, что
-        останавливается перед этой чертой: скачанный файл лежит в стейджинге, ничего в
-        поставке не тронуто, и до нажатия кнопки продолжает работать прежняя версия.
-        Отдельный регресс-тест проверяет, что планировщик `apply_staged` не трогает.
+        * `auto` — найденная версия уходит в `autoupdate.execute`: политика (кольцо,
+          пауза издателя, плохая версия, установка «для всех пользователей»), подготовка
+          подписанного артефакта и его установка. Это ЕДИНСТВЕННЫЙ путь, которым
+          планировщик доходит до `releases.apply_installer`/`releases.apply_staged`;
+          прямых вызовов отсюда нет и быть не должно (регресс-тест подменяет обе функции
+          и проверяет, что их зовёт только `autoupdate` и только в режиме `auto`).
+          Ошибки подготовки и установки исход цикла не роняют — они в `result["auto"]`.
+        * `notify` — проверка и подготовка в фоне; установка — кнопкой человека.
+          Подготовленный файл лежит в стейджинге, ничего в поставке не тронуто.
+        * `off` — сюда не доходит: цикл выключен (`_enabled`).
 
-        `requires_installer` гасит автостейдж ТЕМ ЖЕ способом, что и
+        `requires_installer` гасит подготовку бинаря ТЕМ ЖЕ способом, что и
         `available` — условием, а не исключением. `releases.stage` и сама отказала бы
         typed-ошибкой, но она НЕ retriable (`errors.KIND_TITLES`), и просочись это
         исключение сюда, `_execute` пометил бы весь цикл `releases` остановленным
@@ -702,19 +747,23 @@ class CompanionRunner:
         которая тут ни при чём и обязана продолжать тикать (мало ли, издатель снимет
         флаг с этой версии или выпустит другую, без него).
         """
+        mode = _update_mode(settings)
         check = releases.check(session.client, self._state, session.ctx)
         staged = None
         installer = None
-        if (check.get("available") and not check.get("requires_installer")
-                and bool(getattr(settings, "auto_stage_release", False))):
-            staged = releases.stage(session.client, self._state, session.ctx,
-                                    check.get("target") or "latest")
-        if (check.get("available") and check.get("requires_installer")
-                and bool(getattr(settings, "auto_stage_release", False))):
-            # версия ставится установщиком — заранее скачиваем и проверяем ЕГО
-            # (не запускаем: запуск — только кнопкой человека, SECURITY.md §4.1).
-            installer = self._stage_installer_quietly(session, check)
-        return {"check": check, "staged": staged, "installer": installer,
+        auto = None
+        if mode == "auto":
+            auto = autoupdate.execute(self._state, session, settings, trigger="hub",
+                                      check=check)
+        elif mode == "notify" and check.get("available"):
+            if not check.get("requires_installer"):
+                staged = releases.stage(session.client, self._state, session.ctx,
+                                        check.get("target") or "latest")
+            else:
+                # версия ставится установщиком — заранее скачиваем и проверяем ЕГО
+                # (не запускаем: в режиме `notify` запуск — только кнопкой человека).
+                installer = self._stage_installer_quietly(session, check)
+        return {"check": check, "staged": staged, "installer": installer, "auto": auto,
                 "cookbook": self._sync_cookbook(session),
                 "candidates": self._sync_candidates(settings)}
 
@@ -852,11 +901,18 @@ class CompanionRunner:
         Возвращает `{"order": [...], "results": {cycle: <исход>}, "context": {...}}`.
         Контекст резолвится ОДИН раз и только если есть кому его использовать: при всех
         выключенных циклах пробуждение не должно запускать CLI впустую.
+
+        Перед циклами — проверка автоотката (не чаще `HOUSEKEEPING_INTERVAL_SEC`): если
+        она откатила версию, исход лежит в `report["housekeeping"]`.
         """
         settings = self.settings()
         with self._run_lock:
             self._begin_wake()
             now = self._monotonic()
+            housekeeping = None
+            if now >= self._housekeeping_at:
+                self._housekeeping_at = now + HOUSEKEEPING_INTERVAL_SEC
+                housekeeping = self._auto_housekeeping(trigger="hub")
             due = [cycle for cycle in RUN_ORDER if self._runtime[cycle].deadline <= now]
             for cycle in due:
                 self._schedule(cycle, settings, now)
@@ -886,11 +942,75 @@ class CompanionRunner:
             for cycle in due:
                 results[cycle] = self._run_one(cycle, settings, session=session,
                                                session_error=session_error)
-            return {
+            report = {
                 "order": list(due),
                 "results": results,
                 "context": {"ok": self._context_ok, "detail": self._context_detail},
             }
+            if housekeeping is not None:
+                report["housekeeping"] = housekeeping
+            return report
+
+    # -- автоматическое обновление ---------------------------------------------------------
+    def _sync_auto_state(self) -> None:
+        """Ключи автообновления — с диска (см. `_AUTO_STATE_KEYS`)."""
+        try:
+            self._state.refresh_keys("releases", _AUTO_STATE_KEYS)
+        except Exception:  # noqa: BLE001 - чтение состояния best-effort
+            pass
+
+    def _auto_housekeeping(self, *, trigger: str = "") -> Optional[dict]:
+        """Автооткат и подтверждение автоматической установки. Без сети, без контекста.
+
+        Возвращает исход отката (`rolled_back`/`waiting`/`skipped`) или `None`. Сбой здесь
+        не роняет пробуждение — он уходит в `last_error` статуса.
+        """
+        self._sync_auto_state()
+        try:
+            rolled = autoupdate.maybe_rollback(self._state, trigger=trigger)
+            if rolled is not None:
+                return rolled
+            autoupdate.reconcile_pending(self._state)
+        except Exception as exc:  # noqa: BLE001 - фоновый поток не имеет права умереть
+            self._last_error = f"проверка автоотката: {type(exc).__name__}: {exc}"
+        return None
+
+    def _auto_update(self, settings, *, trigger: str) -> dict:
+        """`run_action("auto_update")`: автооткат → настройки → контекст → `autoupdate.execute`.
+
+        Исход — всегда словарь `{ok, decision, reason, version, current, artifact}`:
+        вызывающий — задача Планировщика без человека рядом, и типизированное исключение
+        ей показать некому. Отказ контекста (нет лицензии, нет CLI) — тоже исход.
+        """
+        try:
+            self._state.reload()
+        except Exception:  # noqa: BLE001 - чтение состояния best-effort
+            pass
+        rolled = self._auto_housekeeping(trigger=trigger)
+        if rolled is not None:
+            return rolled
+        pre = autoupdate.precheck(settings, trigger=trigger)
+        if pre is not None:
+            return pre
+        try:
+            session = self._session(settings)
+        except CompanionError as exc:
+            self._context_ok = False
+            self._context_detail = exc.title()
+            return autoupdate.error_payload(exc, trigger=trigger)
+        except Exception as exc:  # noqa: BLE001 - исход, а не исключение
+            self._context_ok = False
+            return autoupdate.error_payload(ChannelError(
+                "Лицензионный контекст не получен", kind="context_unavailable",
+                detail=f"{type(exc).__name__}: {exc}"), trigger=trigger)
+        try:
+            return autoupdate.execute(self._state, session, settings, trigger=trigger)
+        except CompanionError as exc:
+            return autoupdate.error_payload(exc, trigger=trigger)
+        except Exception as exc:  # noqa: BLE001 - исход, а не исключение
+            return autoupdate.error_payload(ChannelError(
+                "Непредвиденный сбой автоматического обновления", kind="unknown",
+                detail=f"{type(exc).__name__}: {exc}"), trigger=trigger)
 
     def _run_one(self, cycle: str, settings, *, session: Optional[_Session],
                  session_error: Optional[CompanionError] = None,
@@ -922,12 +1042,19 @@ class CompanionRunner:
                     detail=f"{type(exc).__name__}: {exc}"))
         return self._execute(cycle, session, settings)
 
-    def run_action(self, action: str, *, version: Optional[str] = None) -> dict:
-        """Явное действие человека (кнопка UI, команда CLI).
+    def run_action(self, action: str, *, version: Optional[str] = None,
+                   trigger: Optional[str] = None) -> dict:
+        """Явное действие человека (кнопка UI, команда CLI) или автоматическое обновление.
 
-        Отдельный вход, а не `run_cycle`, потому что два действия — `apply_update` и
-        `rollback` — планировщику недоступны В ПРИНЦИПЕ (`SECURITY.md` §4.1), а
-        `stage_update` умеет адресоваться к конкретной версии. Ошибки отсюда, в отличие от
+        Отдельный вход, а не `run_cycle`, потому что `apply_update`, `rollback` и прочие
+        `apply_*` планировщик сам не зовёт (`SECURITY.md` §4.2), а `stage_update` умеет
+        адресоваться к конкретной версии.
+
+        `auto_update` (`trigger` — `logon`/`schedule`/`manual`/`hub`, по умолчанию
+        `manual`) — вход задачи Планировщика через CLI BPMkit: тот же путь, что у цикла
+        релизов в режиме `auto` (`autoupdate.execute`), плюс автооткат. Он единственный не
+        бросает исключений — исход всегда словарь (см. `_auto_update`); `trigger` прочим
+        действиям не нужен и ими игнорируется. Ошибки отсюда, в отличие от
         тика, поднимаются наверх типизированным `CompanionError`: их читает человек,
         который прямо сейчас смотрит на результат своей команды.
 
@@ -945,6 +1072,8 @@ class CompanionRunner:
             raise ValueError(f"неизвестное действие канала: {action!r}")
         settings = self.settings()
         with self._run_lock:
+            if action == "auto_update":
+                return self._auto_update(settings, trigger=str(trigger or "manual"))
             if action == "apply_update":
                 if releases.staged_info(self._state) is None:
                     raise ChannelError(
@@ -1271,12 +1400,18 @@ class CompanionRunner:
                     if self._poked:
                         self._poked = False
                         break
-                    left = self._next_wait(self._monotonic())
+                    now = self._monotonic()
+                    left = self._next_wait(now)
                     if left <= 0:
+                        break
+                    # Проверка автоотката живёт своим сроком (см. HOUSEKEEPING_INTERVAL_SEC):
+                    # наступил — пробуждение без циклов, только локальная проверка.
+                    housekeeping_left = self._housekeeping_at - now
+                    if housekeeping_left <= 0:
                         break
                     # Шаг ожидания ограничен сверху, чтобы поток замечал остановку и
                     # правку интервала даже при суточном периоде цикла релизов.
-                    self._cond.wait(min(MAX_WAIT_STEP_SEC, left))
+                    self._cond.wait(min(MAX_WAIT_STEP_SEC, left, housekeeping_left))
 
 
 # ======================================================================================

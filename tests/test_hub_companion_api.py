@@ -607,8 +607,10 @@ def test_settings_response_never_contains_envelope(tmp_path):
     # GAP-241: адрес бэкенда, цикл отзыва и строгий режим подписи паттернов —
     # НЕ пользовательские настройки. Они остаются в файле конфига (override
     # издателя), но в UI их нет, а значит нет и в ответе API.
+    # Режим обновлений и кольцо — видимы; прежний `auto_stage_release` — скрыт
+    # (подготовку решает режим, флажок только читается из старых конфигов).
     assert set(body["companion"]) == {
-        "enabled", "mcp_cli", "patterns", "releases", "auto_stage_release",
+        "enabled", "mcp_cli", "patterns", "releases", "update_mode", "update_ring",
     }
     assert set(body["defaults"]["companion"]) == set(body["companion"])
 
@@ -627,13 +629,13 @@ def test_settings_post_saves_nested_companion_section(tmp_path, monkeypatch):
         "mcp_cli": "python -m bpmkit",
         "patterns": {"enabled": True, "interval_sec": 3600},
         "releases": {"enabled": True, "interval_sec": 86400},
-        "auto_stage_release": True,
+        "update_mode": "notify",
     }}
     status, body, _ = _post(base_url, "/api/settings", token, body=payload)
 
     assert status == 200
     assert body["companion"]["mcp_cli"] == "python -m bpmkit"
-    assert body["companion"]["auto_stage_release"] is True
+    assert body["companion"]["update_mode"] == "notify"
     assert body["companion"]["releases"]["enabled"] is True
 
     # Сохранено НА ДИСК, а не только отражено в ответе.
@@ -964,3 +966,82 @@ def test_companion_ui_has_no_external_resources():
             assert forbidden not in text, f"{name}: внешний ресурс {forbidden}"
         # Стили подключаются только со своего origin.
         assert 'rel="stylesheet" href="http' not in text
+
+
+# ======================================================================================
+# Режим обновлений (update_mode) и кольцо (update_ring) в /api/settings и в окне
+# ======================================================================================
+
+
+def test_settings_post_update_mode_off_mirrors_releases_flag(tmp_path, monkeypatch):
+    _install_stub_runner(monkeypatch, _StubRunner())
+    base_url, token, config_path, _httpd = _start_hub(tmp_path)
+
+    status, body, _ = _post(base_url, "/api/settings", token,
+                            body={"companion": {"update_mode": "off"}})
+
+    assert status == 200
+    assert body["companion"]["update_mode"] == "off"
+    assert body["companion"]["releases"]["enabled"] is False
+    saved = HubConfig.load(config_path).companion
+    assert (saved.update_mode, saved.releases.enabled) == ("off", False)
+
+
+def test_settings_post_rejects_unknown_update_mode(tmp_path, monkeypatch):
+    """Опечатка в режиме меняет, будет ли машина ставить обновления сама, — отказ 400,
+    файл не тронут."""
+    _install_stub_runner(monkeypatch, _StubRunner())
+    base_url, token, config_path, _httpd = _start_hub(tmp_path, companion=CompanionSettings(
+        update_mode="notify"))
+
+    status, body, _ = _post(base_url, "/api/settings", token,
+                            body={"companion": {"update_mode": "always"}})
+
+    assert status == 400
+    assert "update_mode" in body["error"]
+    assert HubConfig.load(config_path).companion.update_mode == "notify"
+
+
+def test_settings_post_ignores_update_ring(tmp_path, monkeypatch):
+    """Кольцо в окне — только для чтения: его задают установка и CLI BPMkit."""
+    _install_stub_runner(monkeypatch, _StubRunner())
+    base_url, token, config_path, _httpd = _start_hub(tmp_path)
+
+    status, body, _ = _post(base_url, "/api/settings", token,
+                            body={"companion": {"update_ring": "early"}})
+
+    assert status == 200
+    assert body["companion"]["update_ring"] == "stable"
+    assert HubConfig.load(config_path).companion.update_ring == "stable"
+
+
+def test_settings_post_legacy_releases_toggle_becomes_mode(tmp_path, monkeypatch):
+    _install_stub_runner(monkeypatch, _StubRunner())
+    base_url, token, config_path, _httpd = _start_hub(tmp_path)
+
+    status, body, _ = _post(base_url, "/api/settings", token,
+                            body={"companion": {"releases": {"enabled": False}}})
+
+    assert status == 200
+    assert body["companion"]["update_mode"] == "off"
+    assert HubConfig.load(config_path).companion.releases.enabled is False
+
+
+def test_updates_window_has_mode_switch_ring_and_pause_warning():
+    """Окно «Обновления»: переключатель режима (три значения), кольцо только для
+    чтения, предупреждение ручной установки на паузе раскатки."""
+    html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    js = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    block = html[html.index('id="upd-mode-select"'):]
+    block = block[:block.index("</select>")]
+    assert re.findall(r'<option value="([a-z]+)"', block) == ["auto", "notify", "off"]
+    assert 'id="upd-ring"' in html
+    assert 'id="upd-paused-note"' in html
+    assert "update_mode" in js and '"/api/settings"' in js
+    assert "function rolloutPausedFor(" in js
+    assert "confirmPausedInstall(" in js[js.index("async function installUpdateFlow"):][:1500]
+    # Настройки: режим — тем же полем формы; прежних флажков больше нет.
+    assert 'name="companion_update_mode"' in html
+    assert 'name="companion_auto_stage_release"' not in html
+    assert 'name="companion_releases_enabled"' not in html

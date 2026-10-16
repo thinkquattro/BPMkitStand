@@ -265,3 +265,37 @@ def test_apply_installer_rechecks_kind_before_launch(env, monkeypatch):
         releases.apply_installer(state, ctx)
     assert excinfo.value.kind == "artifact_kind_mismatch"
     assert called["popen"] is False
+
+
+# --------------------------------------------------------------------------------------
+# Автоматическое обновление: ключ /SWAPBUSY — только по swap_busy=True
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("swap_busy", [False, True])
+def test_apply_installer_passes_swapbusy_only_when_asked(env, monkeypatch, swap_busy):
+    """`/SWAPBUSY` (работающий bpmkit.exe → bpmkit.exe.old вместо отказа) передаёт только
+    автоматическое обновление; ручная кнопка запускает установщик как прежде."""
+    state, ctx = env
+    blob = _blob("3.0.2")
+    filename = "bpmkit-setup-3.0.2.exe"
+    client = FakeClient(_installer_meta("3.0.2", blob, filename=filename), blob,
+                        sidecar=_installer_sidecar(filename, blob))
+    releases.stage_installer(client, state, ctx, version="3.0.2")
+    launched = {}
+
+    class _FakeProcess:
+        pid = 4343
+
+    def _fake_popen(args, **kwargs):
+        launched["args"] = list(args)
+        return _FakeProcess()
+
+    monkeypatch.setattr("subprocess.Popen", _fake_popen)
+
+    result = releases.apply_installer(state, ctx, swap_busy=swap_busy)
+
+    assert result["launched"] is True
+    assert (releases.SWAPBUSY_FLAG in launched["args"]) is swap_busy
+    assert "/VERYSILENT" in launched["args"], "тихая установка — в обоих случаях"
+    assert state.releases["installer_launched"]["swap_busy"] is swap_busy
