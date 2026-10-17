@@ -794,19 +794,70 @@ def test_marker_attempts_before_install_are_not_counted(env):
     assert autoupdate.maybe_rollback(state, now=NOW)["decision"] == "rolled_back"
 
 
-def test_apply_remembers_startup_attempts_of_this_version(env, monkeypatch):
+def test_apply_resets_sticky_marker_of_same_version(env, monkeypatch):
+    """Маркер ТОЙ ЖЕ версии с `ok=true`, оставшийся до автоустановки (смоук, сервер из
+    исходников), сервер для той же версии не сбрасывает — установка переносит его в
+    `.prev` и начинает счёт с нуля. Маркер другой версии не трогается."""
     state, ctx, _binary, marker = env
-    _marker(marker, version="1.3.20", attempts=3, first="2026-10-20T09:00:00Z",
-            last="2026-10-20T09:10:00Z")
+    _marker(marker, version="1.3.20", attempts=3, ok=True, first="2026-10-19T09:00:00Z",
+            last="2026-10-19T09:30:00Z", ok_at="2026-10-19T09:00:05Z")
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    assert _run(state, ctx)["decision"] == "applied"
+
+    record = state.releases["auto"]
+    assert record["startup_attempts_at_install"] == 0
+    assert record["workdir"] == str(Path(ctx.workdir))
+    assert not marker.exists()
+    prev = marker.with_name(marker.name + ".prev")
+    assert json.loads(prev.read_text(encoding="utf-8"))["ok"] is True
+
+    # Сервер установленной версии начинает свой маркер — рабочий старт подтверждает.
+    _marker(marker, version="1.3.20", attempts=1, ok=True, first="2026-10-20T12:10:00Z",
+            last="2026-10-20T12:10:00Z", ok_at="2026-10-20T12:10:05Z")
+    assert autoupdate.reconcile_pending(state, now="2026-10-20T12:20:00Z")["kind"] == "confirmed"
+
+
+def test_apply_keeps_marker_of_other_version(env, monkeypatch):
+    state, ctx, _binary, marker = env
+    _marker(marker, version="1.3.19", attempts=5, ok=True, ok_at="2026-10-19T09:00:05Z")
     calls = _Calls()
     _stub_channel(monkeypatch, calls)
 
     _run(state, ctx)
 
-    record = state.releases["auto"]
-    assert record["startup_attempts_at_install"] == 3
-    assert record["server_running"] is False
-    assert record["workdir"] == str(Path(ctx.workdir))
+    assert json.loads(marker.read_text(encoding="utf-8"))["version"] == "1.3.19"
+
+
+def test_apply_refuses_when_sticky_marker_cannot_be_reset(env, monkeypatch):
+    state, ctx, _binary, _marker_path = env
+    monkeypatch.setattr(autoupdate, "_reset_startup_marker", lambda version: "занят")
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    payload = _run(state, ctx)
+
+    assert (payload["ok"], payload["decision"], payload["reason"]) == (
+        False, "waiting", "startup_marker_busy")
+    assert not [c for c in calls.log if c[0] == "apply_installer"]
+    assert state.releases.get("auto") is None
+
+
+def test_sticky_ok_before_install_does_not_block_rollback(env):
+    """`ok` с меткой ДО установки — не про установленный файл: две неудачные попытки
+    сверх счётчика при установке — откат (а не вечное ожидание)."""
+    state, _ctx, binary, marker = env
+    _broken_install(binary)
+    _pending(state, binary, swap_busy=True)
+    state.releases["auto"]["startup_attempts_at_install"] = 3
+    marker.write_text(json.dumps({
+        "version": "1.3.20", "attempts": 6, "ok": True,
+        "first_attempt_at": "2026-10-19T09:00:00Z", "last_attempt_at": "2026-10-20T11:50:00Z",
+        "ok_at": "2026-10-19T09:00:05Z"}), encoding="utf-8")
+
+    assert autoupdate.reconcile_pending(state, now=NOW) is None, "старый ok — не подтверждение"
+    assert autoupdate.maybe_rollback(state, now=NOW)["decision"] == "rolled_back"
 
 
 def test_rollback_prefers_this_installs_backup_over_old(env):
@@ -1145,7 +1196,8 @@ def test_server_started_while_downloading_defers_install(env, monkeypatch):
     assert not state.releases.get("auto_failures")
 
 
-#: Хвост журнала установщика BPMkit при отказе из-за запущенного MCP-сервера (образец).
+#: Хвост журнала установщика BPMkit при отказе из-за запущенного MCP-сервера (образец
+#: прежнего журнала без ASCII-маркера — запасной различитель).
 _INSTALLER_REFUSED_LOG = (
     "2026-10-20 11:00:02.000   BPMkit: обнаружены запущенные компоненты (MCP-сервер "
     "(мьютекс BPMkitMcpServer)) -- разбор гейта.\n"
@@ -1171,14 +1223,18 @@ def test_installer_refused_by_running_server_is_not_a_version_failure(env, monke
     assert state.releases["auto"] is None
 
 
-def test_server_visible_at_launch_without_swapbusy_is_deferred(env):
+def test_installer_ascii_deferred_marker_is_primary(env, tmp_path):
+    """Основной различитель — ASCII-маркер `BPMKIT_DEFERRED: server_running`."""
     state, _ctx, binary, _m = env
+    log = tmp_path / "installer_setup.log"
+    log.write_bytes(b"Log opened.\r\n" * 50
+                    + b"2026-10-20 11:00:02.100   BPMKIT_DEFERRED: server_running\r\n")
     _pending(state, binary)
-    state.releases["auto"]["server_running"] = True
-    state.releases["installer_launched"] = {"pid": 0, "log": "net.log",
+    state.releases["installer_launched"] = {"pid": 0, "log": str(log),
                                             "launched_at": "2026-10-20T11:00:00Z"}
 
     assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "install_deferred"
+    assert not state.releases.get("auto_failures")
 
 
 def test_mutex_at_reconcile_time_does_not_excuse_failed_install(env, monkeypatch, tmp_path):

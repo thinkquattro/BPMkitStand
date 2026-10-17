@@ -418,10 +418,12 @@ class CompanionSettings:
     def to_dict(self) -> dict:
         """Секция для записи в файл (read-modify-write: незнакомые ключи — как были).
 
-        Настройки, прочитанные с проблемой (`load_problem`), режим НЕ пишут: временное
-        «не прочитали» не должно становиться постоянным `notify`. Незнакомое значение
-        режима уходит обратно как было (оно лежит в `extra`); битый файл — без поля, и
-        следующее чтение выведет режим по правилу `derive_update_mode`.
+        Настройки, прочитанные с проблемой (`load_problem`): незнакомое значение режима
+        уходит обратно как было (оно лежит в `extra`) — временное «не прочитали» не
+        становится постоянным `notify`, а более новая версия не теряет свой выбор; битый
+        файл — явный `notify` (или `off`): выбор человека прочитать не удалось, и правило
+        вывода `derive_update_mode` (по умолчанию `auto`) здесь неприменимо — «не знаю»
+        не может стать «ставить без меня».
         """
         out = dict(self.extra or {})
         managed = {
@@ -438,7 +440,7 @@ class CompanionSettings:
             "update_mode": effective_update_mode(self),
             "update_ring": normalize_update_ring(self.update_ring),
         }
-        if self.load_problem:
+        if self.load_problem and "update_mode" in out:
             managed.pop("update_mode")
         out.update(managed)
         return out

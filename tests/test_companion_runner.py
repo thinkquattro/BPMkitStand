@@ -751,9 +751,7 @@ def test_status_reports_unreadable_settings(tmp_path, monkeypatch):
     status = runner_obj.status()
 
     assert status["settings_problem"] == "settings_unreadable"
-    assert "update_mode" not in status["settings"], (
-        "«не прочитали» не превращается в постоянный notify при записи")
-    assert runner_obj.settings().update_mode == "notify", "а действует — как notify"
+    assert status["settings"]["update_mode"] == "notify", "не прочитали — не auto"
 
 
 def test_status_lists_only_versions_automation_really_skips(tmp_path, monkeypatch):

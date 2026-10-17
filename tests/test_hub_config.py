@@ -377,13 +377,23 @@ class TestUpdateMode:
         assert saved["update_mode"] == "future_mode"
         assert HubConfig.load(cfg).companion.load_problem, "проблема видна и после записи"
 
-        cfg.write_text('{"companion": {"update_mode": "notify"', encoding="utf-8")
-        HubConfig.load(cfg).save(cfg)
+    def test_save_over_broken_config_never_derives_auto(self, tmp_path):
+        """Битый конфиг (человек выбирал off) и любая правка формы: в файле — явный
+        notify, а не auto по правилу вывода: «не прочитали» не значит «ставить без меня»."""
+        from standkit_hub.config import effective_update_mode
+
+        cfg = tmp_path / "standkit-hub.json"
+        cfg.write_text('{"companion": {"update_mode": "off", "releases": {"enabled": fal',
+                       encoding="utf-8")
+        current = HubConfig.load(cfg)
+        assert current.companion.load_problem and current.companion.update_mode == "notify"
+        data = current.to_dict()
+        data.update({"refresh_interval_sec": 7})
+        HubConfig.from_dict(data).save(cfg)
+
         saved = json.loads(cfg.read_text(encoding="utf-8"))["companion"]
-        assert "update_mode" not in saved
-        reread = HubConfig.load(cfg).companion
-        assert (reread.update_mode, reread.load_problem) == ("auto", ""), (
-            "нет поля — правило вывода, а не застрявший notify")
+        assert saved["update_mode"] == "notify"
+        assert effective_update_mode(HubConfig.load(cfg).companion) == "notify"
 
     def test_missing_file_is_auto_without_problem(self, tmp_path):
         cfg = HubConfig.load(tmp_path / "нет-файла.json").companion

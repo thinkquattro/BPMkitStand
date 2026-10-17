@@ -62,7 +62,8 @@
 (`{version, attempts, ok, first_attempt_at, last_attempt_at, ok_at}`) рядом с
 `mcp_runtime.json`. Установку подтверждает только явный `ok` маркера этой версии, позже
 автоустановки (`applied_at`); живость процесса — нет (он мог повиснуть до рабочего
-старта). Если версия маркера — последняя поставленная автоматикой, попыток старта сверх
+старта). Маркер ТОЙ ЖЕ версии, оставшийся до установки (сервер `ok` для той же версии не
+сбрасывает), автоустановка переносит в `mcp_startup.json.prev`: счёт начинается с нуля. Если версия маркера — последняя поставленная автоматикой, попыток старта сверх
 счётчика маркера в момент установки (маркер этой версии мог остаться от смоука того же
 exe) не меньше двух, последняя — после установки, рабочего старта (`ok`) не было и с
 последней попытки прошло не меньше двух минут (нет метки — отсчёт от последней записи
@@ -532,9 +533,13 @@ def _live_process_of(record: dict, applied: str) -> bool:
     return _pid_alive(runtime.get("pid"))
 
 
-#: Строки журнала установщика (`/LOG`), которыми он сообщает об отказе ДО копирования
-#: файлов из-за запущенного MCP-сервера (без `/SWAPBUSY`). Контракт с установщиком
-#: BPMkit: тихий режим не выбирает код выхода, различитель причины — журнал.
+#: Стабильный ASCII-маркер журнала установщика (`/LOG`): отказ ДО копирования файлов
+#: из-за запущенного MCP-сервера (без `/SWAPBUSY`). Контракт с установщиком BPMkit: тихий
+#: режим не выбирает код выхода, различитель причины — журнал.
+INSTALLER_LOG_DEFERRED = "BPMKIT_DEFERRED: server_running"
+
+#: Запасной различитель — человеческие строки того же отказа в журнале установщиков,
+#: которые ASCII-маркер ещё не пишут.
 INSTALLER_LOG_CANCELLED = "установка отменена ДО копирования файлов"
 INSTALLER_LOG_SERVER = "MCP-сервер (мьютекс"
 
@@ -557,6 +562,8 @@ def _installer_refused_by_server(log_path) -> bool:
         return False
     for encoding in ("utf-8", "utf-16", "cp1251"):
         content = raw.decode(encoding, errors="ignore")
+        if INSTALLER_LOG_DEFERRED in content:
+            return True
         if INSTALLER_LOG_CANCELLED in content and INSTALLER_LOG_SERVER in content:
             return True
     return False
@@ -603,8 +610,8 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
     * версия поставки на диске не читается дольше `PENDING_UNVERIFIED_SEC` —
       `install_unverified` (считается неудачей версии, ожидание не вечное);
     * поставка осталась прежней, а установщик отказал из-за работающего сервера (его
-      журнал, или сервер был виден уже при запуске без `/SWAPBUSY`) — `install_deferred`:
-      неудачей версии не считается, поставим в окно простоя.
+      журнал: маркер `BPMKIT_DEFERRED: server_running`, запасной — русская строка
+      отказа) — `install_deferred`: неудачей версии не считается, поставим в окно простоя.
 
     Подтверждение установщиком записывает `releases.current` (сам установщик состояние
     канала не трогает). Возвращает `{"kind": "confirmed"|"install_failed"|
@@ -648,10 +655,8 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
                   f"было. Проверьте установку BPMkit."))
     if _same_version(on_disk, applied):
         return None
-    if _installer_refused_by_server(launched.get("log")) or (
-            record.get("server_running") is True and not record.get("swap_busy")):
-        # Установщик отказал из-за работающего MCP-сервера (его журнал говорит об этом
-        # прямо; или сервер был виден уже при запуске, а `/SWAPBUSY` не передавался) —
+    if _installer_refused_by_server(launched.get("log")):
+        # Установщик отказал из-за работающего MCP-сервера (так говорит его журнал) —
         # это не неудача версии: ожидание снимается БЕЗ счёта, поставим в следующее окно
         # простоя. Мьютекс В МОМЕНТ СВЕРКИ ничего не доказывает: сервер мог подняться уже
         # после того, как установщик отработал (или не смог по другой причине).
@@ -742,7 +747,8 @@ def _int(value) -> int:
 def _rollback_due(state, moment) -> Optional[tuple]:
     """`(record, applied)`, если поставленную версию пора откатывать, иначе `None`.
 
-    * маркер старта — этой версии и без `ok`;
+    * маркер старта — этой версии и без `ok` позже установки (`ok` с меткой до неё —
+      «залипший» от смоука той же версии — не в счёт);
     * попыток старта ПОСЛЕ установки не меньше `ROLLBACK_MIN_ATTEMPTS`: счётчик маркера
       минус его значение в момент установки (`startup_attempts_at_install`; маркер этой
       версии мог остаться от смоука до неё); сервер начал счёт заново — сам счётчик;
@@ -758,8 +764,10 @@ def _rollback_due(state, moment) -> Optional[tuple]:
     applied = str(record.get("applied_version") or "")
     if marker is None or not _same_version(marker["version"], applied):
         return None
-    if marker["ok"]:
+    if marker["ok"] and _after_install(record, marker.get("ok_at")):
         return None
+    # `ok` с меткой ДО установки — не про установленный файл (маркер той же версии от
+    # смоука; при автоустановке он сбрасывается, см. `_reset_startup_marker`).
     baseline = _int(record.get("startup_attempts_at_install"))
     attempts = _int(marker["attempts"])
     new_attempts = attempts - baseline if attempts >= baseline else attempts
@@ -1228,13 +1236,35 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
         return _remember(state, _apply(state, ctx, artifact, binary=binary,
                                        version=version, current=current,
                                        trigger=trigger, at=at, payload=payload,
-                                       swap_busy=relocated,
-                                       server_running=server_running), at)
+                                       swap_busy=relocated), at)
+
+
+def _reset_startup_marker(version: str) -> Optional[str]:
+    """Сбросить маркер старта ТОЙ ЖЕ версии перед её автоустановкой. `None` — готово.
+
+    Сервер BPMkit для той же версии `ok`/`ok_at` не сбрасывает, а только прибавляет
+    попытки. Маркер этой версии, оставшийся ДО установки (сервер из исходников, смоук, VM
+    на машине кольца `early`), с `ok=true` сделал бы ожидание вечным (`ok_at` до
+    установки — не подтверждение) и выключил бы откат. Поэтому он атомарно переносится
+    в `mcp_startup.json.prev` (под замком машины — зовёт `_apply`), и счёт новой
+    установки начинается с нуля. Маркер другой версии не трогается: сервер новой версии
+    начнёт свой. Не удалось перенести — текст причины: ставить нельзя.
+    """
+    marker = read_startup_marker()
+    if marker is None or not _same_version(marker["version"], version):
+        return None
+    path = startup_marker_path()
+    try:
+        os.replace(path, path.with_name(path.name + ".prev"))
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return str(exc)
+    return None
 
 
 def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
-           trigger: str, at: str, payload: dict, swap_busy: bool = False,
-           server_running: bool = False) -> dict:
+           trigger: str, at: str, payload: dict, swap_busy: bool = False) -> dict:
     """Установка подготовленного артефакта (под замком машины).
 
     `swap_busy` — только при самопереносе работающего сервера (`self_relocate_active`):
@@ -1250,9 +1280,14 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
     before_auto = rel.get("auto")
     before_event = rel.get("last_auto_event")
     via = "installer" if artifact["kind"] == "installer" else "exe"
+    problem = _reset_startup_marker(version)
+    if problem:
+        return _payload(DECISION_WAITING, "startup_marker_busy", version=version,
+                        current=current, artifact=artifact, trigger=trigger, ok=False,
+                        detail=f"маркер старта той же версии не сброшен: {problem}")
     backup = _backup_before_install(ctx, binary, current) if via == "installer" else None
-    # Счётчик маркера старта ЭТОЙ версии в момент установки: попытки сверх него — уже
-    # запуски установленного файла (маркер мог остаться от смоука того же exe).
+    # Счётчик маркера старта ЭТОЙ версии в момент установки (после сброса — 0): попытки
+    # сверх него — уже запуски установленного файла.
     marker = read_startup_marker()
     attempts_before = (_int(marker["attempts"])
                        if marker is not None and _same_version(marker["version"], version)
@@ -1268,9 +1303,6 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
         # `/SWAPBUSY` (или переименование пути «только exe») разрешён этой установке:
         # только тогда `bpmkit.exe.old` может быть прежней версией ОТ НЕЁ (откат).
         "swap_busy": bool(swap_busy),
-        # мьютекс сервера при запуске (только с самопереносом он бывает виден) — для
-        # разбора отказа установщика (`install_deferred`).
-        "server_running": bool(server_running),
         "startup_attempts_at_install": attempts_before,
         # каталог замка машины для автоотката (у него нет лицензионного контекста).
         "workdir": str(releases.companion_workdir(ctx)),
