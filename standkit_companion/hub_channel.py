@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Optional
 
 from standkit import __version__ as _standkit_version
-from standkit.platform import ProcessError, spawn_hidden
+from standkit.platform import ProcessError, independent_child_env, spawn_hidden
 from standkit_hub import self_version as _self_version
 
 from . import fsutil, signature
@@ -556,7 +556,8 @@ def apply_self_update(state, ctx) -> dict:
         pid = spawn_hidden(
             [str(src), _APPLY_FLAG, _TARGET_FLAG, target_exe,
              _WAIT_PID_FLAG, str(current_pid)],
-            cwd=src.parent, log_path=log_path)
+            # помощник переживает диспетчер — без переменных загрузчика PyInstaller
+            cwd=src.parent, log_path=log_path, env=independent_child_env())
     except ProcessError as exc:
         cause = exc.__cause__
         if getattr(cause, "winerror", None) == ELEVATION_WINERROR:

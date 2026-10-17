@@ -57,7 +57,8 @@
   загрузчика (`_PYI_*`, `_MEIPASS2`) и с `PYINSTALLER_RESET_ENVIRONMENT=1`. Так запускается
   установщик (`apply_installer`): CLI BPMkit выходит сразу после запуска, а установщик зовёт тот
   же `bpmkit.exe setup …`, который иначе взял бы каталог распаковки вышедшего процесса. Запрос
-  контекста у CLI (`standkit_companion.context`) использует тот же хелпер.
+  контекста у CLI (`standkit_companion.context`) и помощник самообновления диспетчера
+  (`hub_channel.apply_self_update`) используют тот же хелпер.
 
 ### Изменено
 
