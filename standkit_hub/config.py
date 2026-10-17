@@ -248,6 +248,14 @@ def derive_update_mode(section: object) -> str:
     return UPDATE_MODE_AUTO
 
 
+#: Признак «настройки канала прочитать не удалось» (`CompanionSettings.load_problem`):
+#: файл конфига есть, но не читается или не разбирается, секция `companion` — не объект,
+#: `update_mode` — незнакомое значение. Дефолты в этом случае — не выбор человека, и
+#: режим в этом случае — `notify` (проверяет и готовит, но не ставит), а автоматика
+#: называет причину. Нет файла вовсе — не проблема (первый запуск, умолчание поставки).
+SETTINGS_UNREADABLE = "settings_unreadable"
+
+
 def effective_update_mode(settings: object) -> str:
     """Действующий режим для объекта настроек (в том числе собранного конструктором).
 
@@ -346,6 +354,9 @@ class CompanionSettings:
     # новый диспетчер). Хранятся и пишутся обратно как есть: запись конфига — это
     # read-modify-write, а не «оставить только своё».
     extra: dict = field(default_factory=dict)
+    # `SETTINGS_UNREADABLE`, если секцию прочитать не удалось (см. константу), иначе
+    # пусто. В файл не пишется (`to_dict`): это факт чтения, а не настройка.
+    load_problem: str = ""
 
     @property
     def stage_releases(self) -> bool:
@@ -354,9 +365,21 @@ class CompanionSettings:
 
     @classmethod
     def from_dict(cls, data: object) -> "CompanionSettings":
-        if not isinstance(data, dict):
+        if data is None:
             return cls()
-        mode = normalize_update_mode(data.get("update_mode")) or derive_update_mode(data)
+        if not isinstance(data, dict):
+            # Секция есть, но не объект — выбор человека не прочитан (см. SETTINGS_UNREADABLE).
+            return cls(update_mode=UPDATE_MODE_NOTIFY, load_problem=SETTINGS_UNREADABLE)
+        raw_mode = data.get("update_mode")
+        mode = normalize_update_mode(raw_mode) or derive_update_mode(data)
+        problem = ""
+        if raw_mode is not None and not normalize_update_mode(raw_mode):
+            # Незнакомый режим — не «поля нет»: человек (или более новая версия) что-то
+            # выбрал, а что — не понять. Ставить без него нельзя: `notify` (или `off`,
+            # если проверка релизов выключена явно), и признак для автоматики и окна.
+            problem = SETTINGS_UNREADABLE
+            if mode == UPDATE_MODE_AUTO:
+                mode = UPDATE_MODE_NOTIFY
         releases = CompanionCycle.from_dict(
             data.get("releases"), default_enabled=True,
             default_interval=_COMPANION_RELEASES_INTERVAL,
@@ -364,7 +387,7 @@ class CompanionSettings:
         # Зеркало режима: `off` — цикл релизов не тикает, иначе — тикает. Режим главнее
         # флажка (см. sync_legacy_releases_toggle — как прежний флажок переводится в режим).
         releases.enabled = mode != UPDATE_MODE_OFF
-        known = {f.name for f in fields(cls)} - {"extra"}
+        known = {f.name for f in fields(cls)} - {"extra", "load_problem"}
         return cls(
             enabled=bool(data.get("enabled", True)),
             backend_url=str(data.get("backend_url", "") or ""),
@@ -382,7 +405,9 @@ class CompanionSettings:
             require_pattern_signature=bool(data.get("require_pattern_signature", False)),
             update_mode=mode,
             update_ring=normalize_update_ring(data.get("update_ring")),
-            extra={key: value for key, value in data.items() if key not in known},
+            extra={key: value for key, value in data.items()
+                   if key not in known and key != "load_problem"},
+            load_problem=problem,
         )
 
     def to_dict(self) -> dict:
@@ -496,14 +521,19 @@ class HubConfig:
         if not p.exists():
             return cls()
 
-        raw = p.read_text(encoding="utf-8-sig")
         try:
-            data = json.loads(raw) if raw.strip() else {}
-        except json.JSONDecodeError:
-            # Битый конфиг хаба не должен ронять запуск диспетчера — тихо
-            # откатываемся на дефолты (в отличие от реестра, это не
-            # критичные для управления стендами данные).
-            return cls()
+            raw = p.read_text(encoding="utf-8-sig")
+            data = json.loads(raw) if raw.strip() else None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            data = None
+        if not isinstance(data, dict):
+            # Битый (пустой, нечитаемый, не объект) конфиг хаба не должен ронять запуск
+            # диспетчера — откатываемся на дефолты (в отличие от реестра, это не
+            # критичные для управления стендами данные). Но дефолты здесь — не выбор
+            # человека: канал обновлений получает признак `SETTINGS_UNREADABLE`, и
+            # автоматическая установка без него не идёт (ведёт себя как `notify`).
+            return cls(companion=CompanionSettings(update_mode=UPDATE_MODE_NOTIFY,
+                                                   load_problem=SETTINGS_UNREADABLE))
 
         return cls.from_dict(data)
 

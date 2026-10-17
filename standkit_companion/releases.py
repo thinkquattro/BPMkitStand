@@ -121,6 +121,7 @@ __all__ = [
     "OLD_SUFFIX",
     "BAD_SUFFIX",
     "parse_rollout",
+    "manifest_version",
 ]
 
 #: Подкаталог скачанного, но ещё не применённого бинаря.
@@ -298,6 +299,23 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
+def manifest_version(binary) -> Optional[str]:
+    """Версия поставки на диске по `manifest.json` корня установки (его пишет установщик,
+    а подмена «только exe» и откат синхронизируют — `_sync_install_companions`).
+    Нет файла, не читается, без версии — `None`."""
+    text = str(binary or "").strip()
+    if not text:
+        return None
+    manifest = _install_root_for(Path(text)) / "manifest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return str(data.get("version") or "").strip() or None
+
+
 def _current_version(state, ctx) -> Optional[str]:
     """Версия, относительно которой считается «есть ли обновление».
 
@@ -305,10 +323,19 @@ def _current_version(state, ctx) -> Optional[str]:
     уже новый, а РАБОТАЮЩИЙ MCP (который и отвечает на `companion-context`) до перезапуска
     продолжает докладывать старую версию. Взять её — значит на каждом тике заново
     предлагать уже установленное обновление и качать его повторно.
+
+    Состояние, в свою очередь, знает только о подменах, сделанных каналом. Установщик
+    (запущенный автоматикой, кнопкой или человеком вручную) пишет версию в `manifest.json`
+    поставки, а не в состояние, — поэтому версия поставки на диске, если она НОВЕЕ
+    записанной, главнее: иначе уже установленная версия ставилась бы снова и снова.
     """
     current = (state.releases.get("current") or {}).get("version")
-    text = str(current or getattr(ctx, "mcp_version", "") or "").strip()
-    return text or None
+    text = str(current or getattr(ctx, "mcp_version", "") or "").strip() or None
+    on_disk = manifest_version(getattr(ctx, "binary_path", "") or "")
+    if on_disk and is_numeric_version(on_disk) and (
+            not text or not is_numeric_version(text) or compare_versions(on_disk, text) > 0):
+        return on_disk
+    return text
 
 
 def _fetch_meta(client, target: str) -> dict:
@@ -1300,14 +1327,17 @@ def apply_staged(state, ctx, *, target: Optional[str] = None,
 
     `swap_busy=True` — путь «только exe» автоматического обновления при САМОПЕРЕНОСЕ
     работающего сервера (`autoupdate.self_relocate_active`: процесс исполняется из копии в
-    кэше версий): занятый файл не повод отказать. `bpmkit.exe` переименовывается в
-    `bpmkit.exe.old` (Windows разрешает переименовать исполняемый файл запущенного
+    кэше версий): занятый СЕРВЕРОМ файл не повод отказать. `bpmkit.exe` переименовывается
+    в `bpmkit.exe.old` (Windows разрешает переименовать исполняемый файл запущенного
     процесса, но не переписать его), новый кладётся на освободившееся имя и начинает
     работать при перезапуске хоста. Без самопереноса флаг не передаётся: живой процесс
     onefile-сборки, у которого подменили его собственный exe, ломается на первом же
     ленивом импорте. Подпись, применимость и бэкап — те же самые и в том
     же порядке: флаг меняет только то, ЧТО делается с занятым файлом, а не то, ЧТО
     разрешено поставить. Не удалось переименовать — отказ `mcp_running`, как без флага.
+    Переименование — ТОЛЬКО при видимом мьютексе сервера: самоперенос говорит о
+    сервере, а не о любом процессе. Мьютекса нет, а файл занят (антивирус, чужой процесс,
+    сервер без мьютекса) — отказ `local_io`, как без флага.
 
     Подпись проверяется ЗАНОВО, по сайдкару из состояния. Проверка при подготовке не
     заменяет эту: между `stage` и `apply_staged` проходит произвольное время, в течение
@@ -1434,18 +1464,18 @@ def apply_staged(state, ctx, *, target: Optional[str] = None,
     # Ловит занятый файл ЛЮБОЙ природы (старый сервер без мьютекса, чужой процесс) — тем
     # же текстом, каким закончилась бы настоящая подмена (см. except OSError ниже по
     # `replace_with_retry`), но раньше: ни бэкап, ни установленная версия ещё не тронуты.
+    # Занятость, о которой мьютекс не сказал, — отказ и при `swap_busy`: самоперенос
+    # разрешает переименовать файл, который держит СЕРВЕР, а не кто угодно.
     if not busy:
         try:
             fsutil.probe_writable(dest)
         except OSError as exc:
-            if not swap_busy:
-                raise ChannelError(
-                    f"Не удалось заменить файл MCP ({dest}): {exc}. Скорее всего, MCP-сервер "
-                    f"сейчас запущен и держит файл — закройте Claude Desktop и повторите. "
-                    f"Установленная версия не тронута, подготовленное обновление сохранено.",
-                    kind="local_io",
-                ) from None
-            busy = True
+            raise ChannelError(
+                f"Не удалось заменить файл MCP ({dest}): {exc}. Скорее всего, MCP-сервер "
+                f"сейчас запущен и держит файл — закройте Claude Desktop и повторите. "
+                f"Установленная версия не тронута, подготовленное обновление сохранено.",
+                kind="local_io",
+            ) from None
 
     # --- бэкап ДО подмены ---------------------------------------------------------------
     stamp = _safe_component(utc_now_iso())
@@ -1528,6 +1558,11 @@ OLD_SUFFIX = ".old"
 
 #: Суффикс бинаря новой версии, откаченного автоматикой (`autoupdate.maybe_rollback`).
 BAD_SUFFIX = ".bad"
+
+#: Сколько версий помнить в `releases.bad_versions` (их автоматика не ставит): откаченные
+#: автоматикой и откаченные человеком (`rollback`). Больше и не нужно — старые версии
+#: автоматика не ставит всё равно (она ставит только новее установленной).
+BAD_VERSIONS_KEEP = 20
 
 #: Суффикс временной копии нового бинаря рядом с целью (тот же том, что у цели:
 #: `os.replace` атомарен только в пределах одного тома).
@@ -2163,6 +2198,14 @@ def rollback(state, ctx, *, version: Optional[str] = None) -> dict:
     }
     del history[:index + 1]
     rel["restart_required"] = True
+    # Человек откатил версию — автоматическое обновление её больше не ставит (иначе в
+    # режиме `auto` она вернулась бы при первой же проверке). Снять запрет — команда
+    # `clear-bad-versions` CLI или кнопка окна «Обновления»; ручная установка доступна.
+    if rolled_from and is_numeric_version(rolled_from):
+        bad = [str(item) for item in (rel.get("bad_versions") or [])
+               if compare_versions(item, rolled_from) != 0]
+        bad.append(rolled_from)
+        rel["bad_versions"] = bad[-BAD_VERSIONS_KEEP:]
     message = (f"Возвращена версия {restored or 'предыдущая'}. Перезапустите Claude Desktop, "
                f"чтобы MCP-сервер запустился из вернувшегося файла.")
     state.mark("releases", "ok", message)

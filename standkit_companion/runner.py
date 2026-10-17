@@ -72,7 +72,7 @@ from . import (__version__, autoupdate, candidates, context, cookbook, hub_chann
               patterns, releases, revocations, skills_channel)
 from .backend import BackendClient
 from .errors import ChannelError, CompanionError, ContextUnavailable, NotModified
-from .state import STATE_FILE_NAME, CompanionState, index_sync_summary
+from .state import SHARED_KEYS, STATE_FILE_NAME, CompanionState, index_sync_summary
 
 __all__ = [
     "CYCLES",
@@ -107,7 +107,10 @@ ACTIONS = ("sync_patterns", "check_update", "stage_update", "apply_update",
            # автоматическое обновление (задача Планировщика через CLI BPMkit,
            # ручной запуск CLI). Своей кнопки в окне нет: в режиме `auto` то же делает
            # цикл релизов работающего диспетчера.
-           "auto_update")
+           "auto_update",
+           # снять запрет автоматики с плохих версий (кнопка окна, CLI
+           # `clear-bad-versions`) — локально, без сети и контекста.
+           "clear_bad_versions")
 
 #: Доля интервала, на которую срок «гуляет» в обе стороны (см. п.2 докстринга модуля).
 JITTER_FRACTION = 0.10
@@ -143,12 +146,12 @@ STATS_LOCK_WAIT_SEC = 10.0
 #: ждать ближайшего тика паттернов (часы) со сломанной новой версией MCP — слишком долго.
 HOUSEKEEPING_INTERVAL_SEC = 300.0
 
-#: Ключи `releases`, которыми владеет автоматическое обновление. Их пишут два процесса
-#: (диспетчер и CLI BPMkit из задачи Планировщика), и каждый пишет сразу на диск, поэтому
-#: на пробуждении диск для них главнее памяти — иначе диспетчер затёр бы своей старой
-#: копией запись о версии, которую только что поставил CLI.
-_AUTO_STATE_KEYS = ("auto", "bad_versions", "last_auto_event", "auto_failures",
-                    "last_auto_decision")
+#: Ключи `releases`, которые пишут два процесса (диспетчер и CLI BPMkit из задачи
+#: Планировщика): автоматика, установленная версия, стейджинг, запуск установщика. Каждый
+#: пишет сразу на диск, поэтому на пробуждении и перед проверкой релиза диск для них
+#: главнее памяти, а запись — слияние с диском (`CompanionState.save`): иначе диспетчер
+#: затёр бы своей старой копией запись о версии, которую только что поставил CLI.
+_AUTO_STATE_KEYS = SHARED_KEYS["releases"]
 
 
 def _update_mode(settings) -> str:
@@ -256,7 +259,13 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
     installer_staged = False
     hub_staged = False
     skills_staged = False
+    blocked_versions = False
     if state is not None:
+        try:
+            blocked_versions = bool(state.releases.get("bad_versions")
+                                    or state.releases.get("auto_failures"))
+        except (AttributeError, TypeError):
+            blocked_versions = False
         try:
             # «Установить обновление» установщиком — только когда подготовленный
             # и проверенный установщик ЛЕЖИТ на диске (та же логика «запись без файла —
@@ -306,6 +315,7 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
         "apply_skills": enabled and skills_staged,
         # не кнопка: автоматика зовёт его сама; ключ — для полноты «что разрешено».
         "auto_update": enabled and _update_mode(settings) != "off",
+        "clear_bad_versions": enabled and blocked_versions,
     }
 
 
@@ -419,6 +429,10 @@ class CompanionRunner:
     def settings(self):
         """Свежие настройки канала. Битый конфиг не роняет тик — берутся дефолты.
 
+        Дефолты вместо нечитаемого конфига — режим `notify` и признак `load_problem`
+        (`standkit_hub.config.SETTINGS_UNREADABLE`): автоматическая установка без
+        прочитанного выбора человека не идёт.
+
         Побочный эффект: смена настроек СНИМАЕТ блокировки циклов. Человек, который правит
         настройки, тем самым сообщает, что чинил ровно то, на что канал жаловался, — и
         новую попытку он ждёт немедленно, а не после перезапуска хаба.
@@ -429,9 +443,9 @@ class CompanionRunner:
             self._last_error = f"настройки канала не прочитаны: {exc}"
             if self._settings is not None:
                 return self._settings
-            from standkit_hub.config import CompanionSettings
+            from standkit_hub.config import SETTINGS_UNREADABLE, CompanionSettings
 
-            fresh = CompanionSettings()
+            fresh = CompanionSettings(update_mode="notify", load_problem=SETTINGS_UNREADABLE)
         key = repr(fresh.to_dict()) if hasattr(fresh, "to_dict") else repr(fresh)
         if self._settings is not None and key != self._settings_key:
             for runtime in self._runtime.values():
@@ -748,6 +762,9 @@ class CompanionRunner:
         флаг с этой версии или выпустит другую, без него).
         """
         mode = _update_mode(settings)
+        # CLI из задачи Планировщика мог уже поставить версию или пометить её плохой:
+        # проверка считает «есть ли обновление» по свежему состоянию, а не по памяти.
+        self._sync_auto_state()
         check = releases.check(session.client, self._state, session.ctx)
         staged = None
         installer = None
@@ -953,9 +970,9 @@ class CompanionRunner:
 
     # -- автоматическое обновление ---------------------------------------------------------
     def _sync_auto_state(self) -> None:
-        """Ключи автообновления — с диска (см. `_AUTO_STATE_KEYS`)."""
+        """Общие ключи — с диска (см. `_AUTO_STATE_KEYS`)."""
         try:
-            self._state.refresh_keys("releases", _AUTO_STATE_KEYS)
+            self._state.refresh_shared()
         except Exception:  # noqa: BLE001 - чтение состояния best-effort
             pass
 
@@ -1047,10 +1064,12 @@ class CompanionRunner:
         """Явное действие человека (кнопка UI, команда CLI) или автоматическое обновление.
 
         Отдельный вход, а не `run_cycle`, потому что `apply_update`, `rollback` и прочие
-        `apply_*` планировщик сам не зовёт (`SECURITY.md` §4.2), а `stage_update` умеет
-        адресоваться к конкретной версии.
+        `apply_*` планировщик напрямую не зовёт — без человека их вызывает только
+        `autoupdate` в режиме `auto` (`SECURITY.md` §4.2, «Тихое применение»), — а
+        `stage_update` умеет адресоваться к конкретной версии. `clear_bad_versions` —
+        снять запрет автоматики с плохих версий (локально, без контекста).
 
-        `auto_update` (`trigger` — `logon`/`schedule`/`manual`/`hub`, по умолчанию
+        `auto_update` (`trigger` — `logon`/`schedule`/`manual`/`hub`/`exit`, по умолчанию
         `manual`) — вход задачи Планировщика через CLI BPMkit: тот же путь, что у цикла
         релизов в режиме `auto` (`autoupdate.execute`), плюс автооткат. Он единственный не
         бросает исключений — исход всегда словарь (см. `_auto_update`); `trigger` прочим
@@ -1074,6 +1093,8 @@ class CompanionRunner:
         with self._run_lock:
             if action == "auto_update":
                 return self._auto_update(settings, trigger=str(trigger or "manual"))
+            if action == "clear_bad_versions":
+                return autoupdate.clear_bad_versions(self._state, version=version)
             if action == "apply_update":
                 if releases.staged_info(self._state) is None:
                     raise ChannelError(
@@ -1244,6 +1265,9 @@ class CompanionRunner:
             "edition": "companion",
             "companion_version": __version__,
             "settings": settings.to_dict(),
+            # настройки канала не прочитаны (битый конфиг, незнакомый режим) —
+            # автоматика ведёт себя как `notify`; окно «Обновления» говорит почему.
+            "settings_problem": str(getattr(settings, "load_problem", "") or "") or None,
             "state": self._state.summary(),
             "cycles": cycles,
             "context": self._context_status(settings),

@@ -71,6 +71,8 @@ ACTION_ROUTES = {
     "/api/companion/check-skills": "check_skills",
     "/api/companion/stage-skills": "stage_skills",
     "/api/companion/apply-skills": "apply_skills",
+    # снять запрет автоматической установки с плохих версий.
+    "/api/companion/clear-bad-versions": "clear_bad_versions",
 }
 
 

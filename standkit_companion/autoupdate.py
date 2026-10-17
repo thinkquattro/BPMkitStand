@@ -32,12 +32,21 @@
 * `applied` — установщик запущен (или бинарь подменён путём «только exe»);
 * `staged` — артефакт скачан и проверен, установка ждёт перезапуска хоста после
   предыдущего автоматического обновления (ставить вторую версию поверх неподтверждённой
-  нельзя: `bpmkit.exe.old` — единственная точка отката);
+  нельзя: копия прежнего бинаря — единственная точка отката);
 * `waiting` — кольцо раскатки ещё не наступило, раскатка не известна, файл/установщик
-  заняты, сеть недоступна;
-* `skipped` — режим, пауза, установка «для всех пользователей», плохая версия, нет
-  обновления;
+  заняты, сервер запущен без самопереноса, сеть недоступна;
+* `skipped` — режим, пауза, установка «для всех пользователей», настройки канала не
+  прочитаны (`settings_unreadable`), номер версии не известен (`version_unknown`),
+  плохая версия, нет обновления;
 * `rolled_back` — новая версия дважды не дошла до рабочего старта и откачена.
+
+**Два процесса.** Файл состояния пишут диспетчер (цикл релизов) и CLI BPMkit из задачи
+Планировщика. Под замком машины (`autoupdate.lock`, владелец — pid) общие ключи
+перечитываются с диска, политика и установленная версия считаются заново, а запись
+сливается с диском (`state.SHARED_KEYS`): решение «ставить» принимается по тому, что
+уже сделал другой процесс, и не затирает его записи. Установленная версия — из
+состояния или из `manifest.json` поставки, если там новее (установщик пишет туда, а не в
+состояние); подтверждение установки установщиком записывает её и в состояние.
 
 **Кольца раскатки.** `early` ставит сразу после публикации, `stable` — не раньше
 `stable_after` из поля `rollout` ответа `GET /v1/version/latest` (нет срока — сразу).
@@ -51,13 +60,20 @@
 
 **Автооткат.** Сервер BPMkit пишет маркер старта `mcp_startup.json`
 (`{version, attempts, ok, first_attempt_at, last_attempt_at, ok_at}`) рядом с
-`mcp_runtime.json`. Если версия маркера — последняя поставленная автоматикой, попыток
-старта не меньше двух, рабочего старта (`ok`) не было и с последней попытки прошло не
-меньше двух минут, `bpmkit.exe` переименовывается в `bpmkit.exe.bad`, а
-`bpmkit.exe.old` (или копия, снятая перед запуском установщика) возвращается на место;
-версия попадает в `releases.bad_versions` и больше автоматически не ставится. Для
-отката не нужен лицензионный контекст: сломанный бинарь — это и есть CLI, у которого
-контекст спрашивается, поэтому всё нужное для отката запоминается в момент установки.
+`mcp_runtime.json`. Маркер засчитывается, только если его метки ПОЗЖЕ автоустановки
+(`applied_at`): смоук того же exe до установки не доказывает ни старт, ни провал. Если
+версия маркера — последняя поставленная автоматикой, все попытки старта (не меньше двух)
+были после установки, рабочего старта (`ok`) не было и с последней попытки прошло не
+меньше двух минут (нет метки — отсчёт от последней записи маркера), `bpmkit.exe`
+переименовывается в `bpmkit.exe.bad`, а на место возвращается копия, снятая ЭТОЙ
+установкой; `bpmkit.exe.old` — только если копии нет, а установка шла с подменой
+занятого файла (иначе `.old` остался от прежней подмены, и откат на него вернул бы не ту
+версию). Процесс поставленной версии, живой и запущенный после установки (маркер
+`mcp_runtime.json` и мьютекс сервера), — рабочий старт: такой сервер не откатывается.
+Версия попадает в `releases.bad_versions` и больше автоматически не ставится (снять —
+`clear_bad_versions`: команда CLI и кнопка окна). Для отката не нужен лицензионный
+контекст: сломанный бинарь — это и есть CLI, у которого контекст спрашивается, поэтому
+всё нужное для отката запоминается в момент установки.
 """
 from __future__ import annotations
 
@@ -68,6 +84,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from standkit.platform import is_alive
 
 from . import fsutil, mcp_mutex, releases
 from .errors import ChannelError, CompanionError
@@ -87,6 +105,7 @@ __all__ = [
     "pending_record",
     "reconcile_pending",
     "maybe_rollback",
+    "clear_bad_versions",
     "precheck",
     "execute",
     "error_payload",
@@ -122,9 +141,8 @@ ROLLBACK_MIN_ATTEMPTS = 2
 #: антивирусом — десятки секунд).
 ROLLBACK_GRACE_SEC = 120
 
-#: Сколько плохих версий помнить. Больше и не нужно: старые версии автоматика не ставит
-#: всё равно (она ставит только новее установленной).
-BAD_VERSIONS_KEEP = 20
+#: Сколько плохих версий помнить (общая константа канала — её же использует ручной откат).
+BAD_VERSIONS_KEEP = releases.BAD_VERSIONS_KEEP
 
 #: После скольких неудачных автоматических запусков установщика одной и той же версии
 #: автоматика перестаёт пробовать её снова (ручная кнопка по-прежнему доступна).
@@ -143,7 +161,12 @@ LOCK_STALE_SEC = 900
 AUTO_BACKUP_DIRNAME = "auto"
 
 #: Причины, по которым режим ведёт себя как `notify`: подготовка в фоне продолжается.
-_NOTIFY_LIKE = frozenset({"mode_notify", "machine_scope"})
+_NOTIFY_LIKE = frozenset({"mode_notify", "machine_scope", "settings_unreadable"})
+
+#: Сколько секунд после автоматического запуска установщика ждать, прежде чем
+#: признать установку «не подтверждаемой», если версию поставки на диске прочитать
+#: нельзя (`manifest.json` нет или он битый): ожидание подтверждения не вечное.
+PENDING_UNVERIFIED_SEC = 6 * 3600
 
 
 # ======================================================================================
@@ -193,17 +216,21 @@ def decide(*, update_mode: str, available: bool, version: Optional[str],
            bad_versions=(), rollout: Optional[dict] = None, ring: str = "stable",
            now=None, install_writable: bool = True, pending_restart: bool = False,
            channel_enabled: bool = True, install_failures: int = 0,
-           server_running: bool = False, self_relocate: bool = False) -> dict:
+           server_running: bool = False, self_relocate: bool = False,
+           settings_readable: bool = True) -> dict:
     """Что делать с найденным релизом: `{decision, reason, stage, apply}`.
 
     Без сети, без диска, без часов (кроме переданных) — весь выбор здесь, исполнитель
     только выполняет. Порядок проверок — от «нечего обсуждать» к «можно ставить»:
 
     1. канал выключен / режим `off` / нет обновления — `skipped`, ничего не качаем;
+    1а. номер новой версии не известен (не числовой) — `skipped / version_unknown`: без
+       номера не проверить ни плохую версию, ни раскатку, ни что поставилось;
     2. версия помечена плохой или издатель поставил её раскатку на паузу — `skipped`, и
        скачивать её тоже незачем;
-    3. режим `notify` или установка «для всех пользователей» — `skipped`, но подготовка
-       в фоне идёт, как в `notify`;
+    3. настройки канала не прочитаны (`settings_unreadable`), режим `notify` или
+       установка «для всех пользователей» — `skipped`, но подготовка в фоне идёт, как в
+       `notify`;
     4. автоматический запуск установщика этой версии уже не удался `INSTALL_FAILURES_LIMIT`
        раз — `skipped` (не жжём установщик каждые два часа);
     5. раскатка не известна или кольцо `stable` ещё не наступило — `waiting` с подготовкой
@@ -220,10 +247,14 @@ def decide(*, update_mode: str, available: bool, version: Optional[str],
         return _policy(DECISION_SKIPPED, "mode_off", stage=False)
     if not available:
         return _policy(DECISION_SKIPPED, "no_update", stage=False)
+    if not releases.is_numeric_version(version):
+        return _policy(DECISION_SKIPPED, "version_unknown", stage=False)
     if any(_same_version(version, bad) for bad in (bad_versions or ())):
         return _policy(DECISION_SKIPPED, "bad_version", stage=False)
     if isinstance(rollout, dict) and rollout.get("paused") is True:
         return _policy(DECISION_SKIPPED, "paused", stage=False)
+    if not settings_readable:
+        return _policy(DECISION_SKIPPED, "settings_unreadable", stage=True)
     if mode != "auto":
         return _policy(DECISION_SKIPPED, "mode_notify", stage=True)
     if not install_writable:
@@ -251,10 +282,10 @@ def rollout_for(rel: dict, version: Optional[str]) -> Optional[dict]:
     сведения о версии), это сведения не о ней — «не знаю», а не «паузы нет».
     """
     rollout = rel.get("rollout")
-    if not isinstance(rollout, dict):
+    if not isinstance(rollout, dict) or not str(version or "").strip():
         return None
     known = str(rel.get("rollout_version") or "").strip()
-    if known and version and not _same_version(known, version):
+    if known and not _same_version(known, version):
         return None
     return dict(rollout)
 
@@ -300,14 +331,41 @@ def _manifest_features(binary: Path) -> set:
     return set()
 
 
+def _pid_alive(pid) -> bool:
+    """Жив ли процесс `pid` (мусор и неположительные — «нет»)."""
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if number <= 0:
+        return False
+    try:
+        return bool(is_alive(number))
+    except Exception:  # noqa: BLE001 - «не знаю» = «не доказано»
+        return False
+
+
+def _same_file(a, b) -> bool:
+    """Один и тот же путь (без учёта регистра на Windows, с разрешением `..`)."""
+    def norm(value) -> str:
+        text = os.path.normcase(os.path.abspath(str(value)))
+        return text
+    try:
+        return norm(a) == norm(b)
+    except (TypeError, ValueError, OSError):
+        return False
+
+
 def self_relocate_active(binary_path) -> bool:
     """Работающий сервер исполняется из копии (самоперенос) — `bpmkit.exe` никто не держит.
 
-    Оба признака обязательны: поставка умеет самоперенос (`manifest.json`:
+    Все признаки обязательны: поставка умеет самоперенос (`manifest.json`:
     `_meta["pro.bpmkit"]["features"]`, запасной путь — верхний `features`, содержит
-    `self_relocate`) И работающий процесс это сделал
-    (`mcp_runtime.json`: `relocated: true`). Одного «умеет» мало — процесс, запущенный из
-    исходников или до обновления, исполняется из самого `bpmkit.exe`.
+    `self_relocate`), работающий процесс это сделал (`mcp_runtime.json`:
+    `relocated: true`), процесс маркера жив (`pid`), и исполняется он НЕ из самого
+    `bpmkit.exe` (`binary` маркера — копия в кэше версий). Одного «умеет» мало — процесс,
+    запущенный из исходников или до обновления, исполняется из самого `bpmkit.exe`;
+    маркер умершего процесса ничего не говорит о том, кто держит файл сейчас.
     """
     text = str(binary_path or "").strip()
     if not text:
@@ -315,7 +373,12 @@ def self_relocate_active(binary_path) -> bool:
     if SELF_RELOCATE_FEATURE not in _manifest_features(Path(text)):
         return False
     runtime = releases.read_runtime_marker()
-    return bool(runtime) and runtime.get("relocated") is True
+    if not runtime or runtime.get("relocated") is not True:
+        return False
+    if not _pid_alive(runtime.get("pid")):
+        return False
+    running_from = str(runtime.get("binary") or "").strip()
+    return bool(running_from) and not _same_file(running_from, text)
 
 
 def install_dir_writable(binary_path) -> bool:
@@ -353,10 +416,16 @@ def startup_marker_path() -> Path:
 
 
 def read_startup_marker() -> Optional[dict]:
-    """Маркер старта новой версии, best-effort. `None` — нет, не читается, без версии."""
+    """Маркер старта новой версии, best-effort. `None` — нет, не читается, без версии.
+
+    `mtime` — время последней записи файла (UTC ISO): запасная метка последней попытки
+    старта, если `last_attempt_at` в маркере нет или она не разбирается.
+    """
+    path = startup_marker_path()
     try:
-        data = json.loads(startup_marker_path().read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        mtime = _iso(datetime.fromtimestamp(path.stat().st_mtime, timezone.utc))
+    except (OSError, ValueError, OverflowError):
         return None
     if not isinstance(data, dict):
         return None
@@ -374,7 +443,20 @@ def read_startup_marker() -> Optional[dict]:
         "first_attempt_at": data.get("first_attempt_at"),
         "last_attempt_at": data.get("last_attempt_at"),
         "ok_at": data.get("ok_at"),
+        "mtime": mtime,
     }
+
+
+def _after_install(record: dict, moment) -> bool:
+    """Метка маркера старта позже автоустановки (`applied_at` записи `releases.auto`).
+
+    Маркер ЭТОЙ версии мог появиться раньше установки (смоук или VM на машине кольца
+    `early` запускали тот же exe до неё) — такая метка не доказывает ни рабочий старт, ни
+    провал установленной версии. Нет любой из меток — «не доказано».
+    """
+    applied_at = parse_iso(record.get("applied_at"))
+    stamp = parse_iso(moment) if isinstance(moment, str) else None
+    return applied_at is not None and stamp is not None and stamp > applied_at
 
 
 def pending_record(state) -> Optional[dict]:
@@ -385,18 +467,6 @@ def pending_record(state) -> Optional[dict]:
     if record.get("confirmed_at"):
         return None
     return record
-
-
-def _disk_version(binary: Path) -> Optional[str]:
-    """Версия поставки на диске по `manifest.json` корня установки (его пишет установщик)."""
-    manifest = releases._install_root_for(binary) / "manifest.json"
-    try:
-        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    return str(data.get("version") or "").strip() or None
 
 
 def _event(rel: dict, kind: str, *, src, dst, at: str, **extra) -> dict:
@@ -412,9 +482,41 @@ def _runtime_marker_confirms(record: dict, applied: str) -> bool:
     runtime = releases.read_runtime_marker()
     if runtime is None or not _same_version(runtime.get("version"), applied):
         return False
-    started = parse_iso(runtime.get("started_at"))
-    applied_at = parse_iso(record.get("applied_at"))
-    return started is not None and applied_at is not None and started > applied_at
+    return _after_install(record, runtime.get("started_at"))
+
+
+def _live_process_confirms(record: dict, applied: str) -> bool:
+    """Поставленная версия РАБОТАЕТ прямо сейчас: маркер процесса этой версии моложе
+    установки и мьютекс сервера виден. Маркер старта без `ok` (запись не удалась, процесс
+    упал уже после рабочего старта) этого факта не отменяет: откатывать живой рабочий
+    сервер — хуже, чем не откатить."""
+    if not _runtime_marker_confirms(record, applied):
+        return False
+    return mcp_mutex.server_mutex_exists()
+
+
+def _confirm(state, record: dict, applied: str, at: str, *, via: str = "") -> dict:
+    """Установка подтверждена рабочим стартом: запись и установленная версия.
+
+    `releases.current` пишет здесь путь установщика — он сам состояния канала не
+    трогает, и без этой записи проверка релиза считала бы установленной прежнюю версию
+    (и ставила бы новую снова). Путь «только exe» `current` уже записал при подмене.
+    """
+    record["confirmed_at"] = at
+    if via:
+        record["confirmed_via"] = via
+    rel = state.releases
+    current = rel.get("current") if isinstance(rel.get("current"), dict) else {}
+    if not _same_version(current.get("version"), applied):
+        rel["current"] = {
+            "version": applied,
+            "path": record.get("binary") or None,
+            "applied_at": record.get("applied_at"),
+            "via": record.get("via") or None,
+            "confirmed_at": at,
+        }
+    state.save()
+    return {"kind": "confirmed", "version": applied}
 
 
 def reconcile_pending(state, *, now=None) -> Optional[dict]:
@@ -429,46 +531,90 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
       снимается: при следующей проверке автоматика попробует снова (до
       `INSTALL_FAILURES_LIMIT` раз).
 
-    Возвращает `{"kind": "confirmed"|"install_failed"}` или `None` (нечего делать).
+    * маркер старта есть, но без `ok`, а процесс поставленной версии жив (маркер
+      `mcp_runtime.json` моложе установки, мьютекс сервера виден) — тоже подтверждение;
+    * версия поставки на диске не читается дольше `PENDING_UNVERIFIED_SEC` —
+      `install_unverified` (считается неудачей версии, ожидание не вечное);
+    * поставка осталась прежней, а сервер запущен и установщик шёл без `/SWAPBUSY` —
+      `install_deferred`: неудачей версии не считается, поставим в окно простоя.
+
+    Подтверждение установщиком записывает `releases.current` (сам установщик состояние
+    канала не трогает). Возвращает `{"kind": "confirmed"|"install_failed"|
+    "install_unverified"|"install_deferred"}` или `None` (нечего делать).
     """
     record = pending_record(state)
     if record is None:
         return None
     rel = state.releases
-    at = _iso(_aware(now))
+    moment = _aware(now)
+    at = _iso(moment)
     applied = str(record.get("applied_version") or "")
     marker = read_startup_marker()
-    if marker is not None and marker["ok"] and _same_version(marker["version"], applied):
-        record["confirmed_at"] = at
-        state.save()
-        return {"kind": "confirmed", "version": applied}
+    if (marker is not None and marker["ok"] and _same_version(marker["version"], applied)
+            and _after_install(record, marker.get("ok_at"))):
+        return _confirm(state, record, applied, at)
     if marker is None and _runtime_marker_confirms(record, applied):
         # Сервер без маркера старта (версия до него) — подтверждение по маркеру
         # работающего процесса: поставленная версия запустилась ПОСЛЕ установки. Иначе
         # ожидание не снялось бы никогда, и автоматика встала бы на первой же версии.
-        record["confirmed_at"] = at
-        record["confirmed_via"] = "runtime"
-        state.save()
-        return {"kind": "confirmed", "version": applied}
+        return _confirm(state, record, applied, at, via="runtime")
+    if marker is not None and _live_process_confirms(record, applied):
+        # Маркер старта есть, но без `ok` (запись не удалась), а процесс этой версии
+        # жив и запущен после установки — это рабочий старт.
+        return _confirm(state, record, applied, at, via="runtime")
     if record.get("via") != "installer":
         return None
     launched = (releases.installer_status(state) or {}).get("launched") or {}
     if launched.get("running"):
         return None
-    on_disk = _disk_version(Path(str(record.get("binary") or "")))
-    if on_disk is None or _same_version(on_disk, applied):
+    on_disk = releases.manifest_version(record.get("binary") or "")
+    if on_disk is None:
+        # Версию поставки прочитать нельзя: ни подтвердить, ни опровергнуть. Ждать
+        # вечно нельзя (автоматика встала бы навсегда) — по истечении срока ожидание
+        # снимается как «не подтверждено» и считается неудачей этой версии
+        # (повторы ограничены `INSTALL_FAILURES_LIMIT`), а человек видит причину.
+        applied_at = parse_iso(record.get("applied_at"))
+        if applied_at is not None and (
+                moment - applied_at).total_seconds() < PENDING_UNVERIFIED_SEC:
+            return None
+        return _install_not_confirmed(
+            state, record, applied, at, kind="install_unverified", log=launched.get("log"),
+            text=(f"Автоматическую установку версии {applied} не удалось подтвердить: "
+                  f"manifest.json поставки не читается, рабочего старта новой версии не "
+                  f"было. Проверьте установку BPMkit."))
+    if _same_version(on_disk, applied):
         return None
+    if mcp_mutex.server_mutex_exists(strict=True) and not record.get("swap_busy"):
+        # Установщик без `/SWAPBUSY` не смог заменить файл, который держит сервер,
+        # запущенный уже после решения «ставить», — это не неудача версии: ожидание
+        # снимается БЕЗ счёта, поставим в следующее окно простоя.
+        rel["auto"] = None
+        _event(rel, "install_deferred", src=record.get("previous_version"), dst=applied,
+               at=at, log=launched.get("log"))
+        state.mark("releases", "ok",
+                   f"Установка версии {applied} отложена: MCP-сервер был запущен и держал "
+                   f"файл. Повторим, когда он будет остановлен.")
+        state.save()
+        return {"kind": "install_deferred", "version": applied}
+    return _install_not_confirmed(
+        state, record, applied, at, kind="install_failed", log=launched.get("log"),
+        text=(f"Автоматическая установка версии {applied} не завершилась: на диске "
+              f"осталась версия {on_disk}. Журнал установщика: "
+              f"{launched.get('log') or '—'}"))
+
+
+def _install_not_confirmed(state, record: dict, applied: str, at: str, *, kind: str,
+                           log, text: str) -> dict:
+    """Снять ожидание как неудачу версии: счётчик, событие, причина в статусе."""
+    rel = state.releases
     failures = dict(rel.get("auto_failures") or {})
     failures[applied] = int(failures.get(applied) or 0) + 1
     rel["auto_failures"] = failures
     rel["auto"] = None
-    _event(rel, "install_failed", src=record.get("previous_version"), dst=applied, at=at,
-           log=launched.get("log"))
-    state.mark("releases", "error",
-               f"Автоматическая установка версии {applied} не завершилась: на диске "
-               f"осталась версия {on_disk}. Журнал установщика: {launched.get('log') or '—'}")
+    _event(rel, kind, src=record.get("previous_version"), dst=applied, at=at, log=log)
+    state.mark("releases", "error", text)
     state.save()
-    return {"kind": "install_failed", "version": applied}
+    return {"kind": kind, "version": applied}
 
 
 # ======================================================================================
@@ -488,6 +634,23 @@ def _payload(decision: str, reason: str, *, version=None, current=None, artifact
     }
 
 
+def _rollback_source(record: dict, binary: Path, old: Path) -> Optional[Path]:
+    """Чем откатывать: копия ЭТОЙ установки, иначе `.old`, только если он от неё.
+
+    Копия (`record["backup"]`) снята прямо перед установкой — это ровно прежняя версия.
+    `bpmkit.exe.old` появляется только при подмене занятого файла (`/SWAPBUSY` или
+    `apply_staged(swap_busy=True)`); без неё он остался от какой-то прежней подмены, и
+    откат на него вернул бы не ту версию, а `current` соврал бы. Поэтому `.old` берётся,
+    только если копии нет, а запись говорит, что эта установка шла с `swap_busy`.
+    """
+    backup = Path(str(record.get("backup") or "")) if record.get("backup") else None
+    if backup is not None and backup.is_file():
+        return backup
+    if record.get("swap_busy") is True and old.is_file():
+        return old
+    return None
+
+
 def maybe_rollback(state, *, now=None, trigger: str = "") -> Optional[dict]:
     """Откатить автоматически поставленную версию, если она не дошла до рабочего старта.
 
@@ -503,11 +666,27 @@ def maybe_rollback(state, *, now=None, trigger: str = "") -> Optional[dict]:
         return None
     if marker["ok"]:
         return None
+    # Попытки засчитываются, только если ВСЕ они после установки: первая попытка раньше
+    # `applied_at` — это ещё и запуски до неё (смоук того же exe), отличить нельзя.
+    if not _after_install(record, marker.get("first_attempt_at")):
+        return None
     if marker["attempts"] < ROLLBACK_MIN_ATTEMPTS:
         return None
     moment = _aware(now)
+    # Пауза после последней попытки — всегда. Нет метки или мусор — отсчёт от
+    # последней записи маркера (сервер пишет его на каждой попытке), а не «паузы нет».
     last = parse_iso(marker.get("last_attempt_at"))
-    if last is not None and (moment - last).total_seconds() < ROLLBACK_GRACE_SEC:
+    if last is None:
+        stamps = [stamp for stamp in (parse_iso(marker.get("mtime")),
+                                      parse_iso(marker.get("first_attempt_at")))
+                  if stamp is not None]
+        last = max(stamps) if stamps else None
+    if last is None or (moment - last).total_seconds() < ROLLBACK_GRACE_SEC:
+        return None
+    if _live_process_confirms(record, applied):
+        # Процесс этой версии жив и запущен после установки — рабочий старт был (запись
+        # `ok` в маркер просто не удалась). Откатывать работающий сервер нельзя;
+        # подтвердит `reconcile_pending`.
         return None
 
     rel = state.releases
@@ -516,9 +695,7 @@ def maybe_rollback(state, *, now=None, trigger: str = "") -> Optional[dict]:
     binary = Path(str(record.get("binary") or ""))
     old = binary.with_name(binary.name + releases.OLD_SUFFIX)
     bad = binary.with_name(binary.name + releases.BAD_SUFFIX)
-    backup = Path(str(record.get("backup") or "")) if record.get("backup") else None
-    source = old if old.is_file() else (backup if backup is not None and backup.is_file()
-                                        else None)
+    source = _rollback_source(record, binary, old)
 
     bad_versions = [str(v) for v in (rel.get("bad_versions") or [])
                     if not _same_version(v, applied)]
@@ -528,7 +705,8 @@ def maybe_rollback(state, *, now=None, trigger: str = "") -> Optional[dict]:
     if source is None or not str(binary):
         rel["auto"] = None
         _event(rel, "rollback_failed", src=applied, dst=previous, at=at,
-               detail="нет ни bpmkit.exe.old, ни резервной копии", trigger=trigger or None)
+               detail="нет ни резервной копии этой установки, ни bpmkit.exe.old от неё",
+               trigger=trigger or None)
         state.mark("releases", "error",
                    f"Версия {applied} не дошла до рабочего старта, откатить её нечем — "
                    f"переустановите BPMkit. Автоматически эта версия больше не ставится.")
@@ -587,6 +765,33 @@ def maybe_rollback(state, *, now=None, trigger: str = "") -> Optional[dict]:
                     current=previous, trigger=trigger,
                     artifact={"binary": str(binary), "bad": str(bad),
                               "source": str(source), "install_sync": install_sync})
+
+
+def clear_bad_versions(state, *, version: Optional[str] = None) -> dict:
+    """Снять запрет автоматики: `releases.bad_versions` и счётчик неудачных запусков.
+
+    Явное действие человека (CLI `clear-bad-versions`, кнопка окна «Обновления»): версия,
+    помеченная плохой (откат после неудачного старта, ручной откат) или исчерпавшая
+    `INSTALL_FAILURES_LIMIT`, снова может ставиться автоматически. `version` — снять
+    только её, иначе — все. Ничего не ставит само и сети не трогает.
+    """
+    _refresh_shared(state)
+    rel = state.releases
+    wanted = str(version or "").strip()
+    bad = [str(item) for item in (rel.get("bad_versions") or [])]
+    failures = dict(rel.get("auto_failures") or {})
+
+    def _hit(item) -> bool:
+        return not wanted or _same_version(item, wanted)
+
+    cleared = sorted({item for item in bad if _hit(item)}
+                     | {item for item in failures if _hit(item)},
+                     key=releases.parse_version)
+    rel["bad_versions"] = [item for item in bad if not _hit(item)]
+    rel["auto_failures"] = {key: value for key, value in failures.items() if not _hit(key)}
+    state.save()
+    return {"cleared": cleared, "bad_versions": list(rel["bad_versions"]),
+            "reason": "bad_versions_cleared" if cleared else "nothing_to_clear"}
 
 
 # ======================================================================================
@@ -702,11 +907,31 @@ def _backup_before_install(ctx, binary: Path, current) -> Optional[str]:
 
 
 class _MachineLock:
-    """Замок «одно автообновление на машину» — файл, созданный с `O_EXCL`."""
+    """Замок «одно автообновление на машину» — файл, созданный с `O_EXCL`.
+
+    Брошенным замок считается, если процесс-владелец (`pid` в файле) уже не жив — сразу,
+    не дожидаясь срока, — или если замку больше `LOCK_STALE_SEC` (владелец не известен
+    или pid переиспользован). Живой владелец со свежим замком — «занято».
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.acquired = False
+
+    def _abandoned(self) -> bool:
+        try:
+            age = time.time() - self.path.stat().st_mtime
+        except OSError:
+            age = 0.0
+        if age >= LOCK_STALE_SEC:
+            return True
+        try:
+            owner = json.loads(self.path.read_text(encoding="utf-8")).get("pid")
+        except (OSError, ValueError, AttributeError):
+            return False
+        if owner is None:
+            return False
+        return not _pid_alive(owner)
 
     def __enter__(self) -> "_MachineLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -714,11 +939,7 @@ class _MachineLock:
             try:
                 fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
-                try:
-                    age = time.time() - self.path.stat().st_mtime
-                except OSError:
-                    age = 0.0
-                if age < LOCK_STALE_SEC:
+                if not self._abandoned():
                     return self
                 try:
                     self.path.unlink()
@@ -756,31 +977,39 @@ def _remember(state, payload: dict, at: str) -> dict:
     return payload
 
 
-def execute(state, session, settings, *, trigger: str = "manual", now=None,
-            check: Optional[dict] = None) -> dict:
-    """Проверка → политика → подготовка → установка. Исход — словарь, не исключение.
+def _refresh_shared(state) -> None:
+    """Общие ключи состояния — с диска (их пишет и другой процесс, см.
+    `state.SHARED_KEYS`). Best-effort: нечитаемый файл память не трогает."""
+    refresh = getattr(state, "refresh_shared", None)
+    if refresh is None:
+        return
+    try:
+        refresh()
+    except Exception:  # noqa: BLE001 - чтение состояния best-effort
+        pass
 
-    Исключение поднимается только из самой ПРОВЕРКИ релиза (`releases.check`): это та
-    же ошибка, что у цикла `releases` в режиме `notify`, и разбирает её тот же код
-    (`runner._execute`: нет лицензии — цикл встаёт, сеть — повтор). Подготовка и
-    установка ошибок наружу не бросают: проверка уже состоялась, а «не скачалось» или
-    «файл занят» — повод подождать, а не остановить канал.
+
+def _evaluate(state, ctx, settings, check: dict, binary: Path, moment) -> tuple:
+    """Политика по ТЕКУЩЕМУ состоянию: `(policy, version, current, relocated)`.
+
+    Установленная версия пересчитывается (`releases._current_version`: состояние и
+    `manifest.json` поставки), а не берётся из `check`: между проверкой и этим местом
+    другой процесс мог поставить ту же версию.
     """
-    moment = _aware(now)
-    at = _iso(moment)
-    client, ctx = session.client, session.ctx
-    if check is None:
-        check = releases.check(client, state, ctx)
     rel = state.releases
     version = str(check.get("latest") or "").strip()
-    current = check.get("current")
-    binary = Path(str(getattr(ctx, "binary_path", "") or ""))
+    current = releases._current_version(state, ctx) or check.get("current")
+    available = bool(check.get("available"))
+    if (available and releases.is_numeric_version(version)
+            and releases.is_numeric_version(current)
+            and releases.compare_versions(version, current) <= 0):
+        available = False
     failures = rel.get("auto_failures") or {}
-    server_running = mcp_mutex.server_mutex_exists()
+    server_running = mcp_mutex.server_mutex_exists(strict=True)
     relocated = server_running and self_relocate_active(binary)
     policy = decide(
         update_mode=_mode_of(settings),
-        available=bool(check.get("available")),
+        available=available,
         version=version,
         bad_versions=rel.get("bad_versions") or (),
         rollout=rollout_for(rel, version),
@@ -792,7 +1021,36 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
         install_failures=int(failures.get(version) or 0) if isinstance(failures, dict) else 0,
         server_running=server_running,
         self_relocate=relocated,
+        settings_readable=not str(getattr(settings, "load_problem", "") or ""),
     )
+    return policy, version, current, relocated
+
+
+def execute(state, session, settings, *, trigger: str = "manual", now=None,
+            check: Optional[dict] = None) -> dict:
+    """Проверка → политика → подготовка → установка. Исход — словарь, не исключение.
+
+    Исключение поднимается только из самой ПРОВЕРКИ релиза (`releases.check`): это та
+    же ошибка, что у цикла `releases` в режиме `notify`, и разбирает её тот же код
+    (`runner._execute`: нет лицензии — цикл встаёт, сеть — повтор). Подготовка и
+    установка ошибок наружу не бросают: проверка уже состоялась, а «не скачалось» или
+    «файл занят» — повод подождать, а не остановить канал.
+
+    Два процесса (диспетчер и CLI из задачи Планировщика) делят файл состояния: под
+    замком машины общие ключи перечитываются с диска и политика считается ЗАНОВО —
+    решение «ставить» принимается по тому, что уже сделал другой. Мьютекс сервера и
+    самоперенос проверяются ещё раз прямо перед установкой: подготовка (скачивание)
+    могла длиться минуты.
+    """
+    moment = _aware(now)
+    at = _iso(moment)
+    client, ctx = session.client, session.ctx
+    _refresh_shared(state)
+    if check is None:
+        check = releases.check(client, state, ctx)
+    binary = Path(str(getattr(ctx, "binary_path", "") or ""))
+    policy, version, current, _relocated = _evaluate(state, ctx, settings, check, binary,
+                                                     moment)
     payload = _payload(policy["decision"], policy["reason"], version=version,
                        current=current, trigger=trigger)
     if not policy["stage"]:
@@ -804,6 +1062,13 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
             return _remember(state, _payload(DECISION_WAITING, "busy_other_process",
                                              version=version, current=current,
                                              trigger=trigger), at)
+        _refresh_shared(state)
+        policy, version, current, _relocated = _evaluate(state, ctx, settings, check,
+                                                         binary, moment)
+        payload = _payload(policy["decision"], policy["reason"], version=version,
+                           current=current, trigger=trigger)
+        if not policy["stage"]:
+            return _remember(state, payload, at)
         try:
             artifact = _stage_artifact(client, state, ctx, check, version)
         except Exception as exc:  # noqa: BLE001 - исход, а не исключение (см. докстринг)
@@ -815,12 +1080,26 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
                 failed["decision"], failed["reason"] = DECISION_SKIPPED, policy["reason"]
             return _remember(state, failed, at)
         payload["artifact"] = artifact
+        if not _same_version(artifact.get("version"), version):
+            # Подготовлен файл не той версии, которую разрешила политика (плохую версию,
+            # раскатку и сбои проверяли для `version`) — ставить его нельзя.
+            return _remember(state, _payload(
+                DECISION_SKIPPED, "artifact_version_mismatch", version=version,
+                current=current, artifact=artifact, trigger=trigger, ok=False,
+                detail=f"подготовлена версия {artifact.get('version') or '—'}, "
+                       f"ожидалась {version}"), at)
         if not policy["apply"]:
             return _remember(state, payload, at)
 
         launched = releases.installer_status(state).get("launched") or {}
         if launched.get("running"):
             return _remember(state, _payload(DECISION_WAITING, "installer_running",
+                                             version=version, current=current,
+                                             artifact=artifact, trigger=trigger), at)
+        server_running = mcp_mutex.server_mutex_exists(strict=True)
+        relocated = server_running and self_relocate_active(binary)
+        if server_running and not relocated:
+            return _remember(state, _payload(DECISION_WAITING, "mcp_running",
                                              version=version, current=current,
                                              artifact=artifact, trigger=trigger), at)
         return _remember(state, _apply(state, ctx, artifact, binary=binary,
@@ -855,6 +1134,9 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
         "via": via,
         "applied_at": at,
         "trigger": trigger or None,
+        # `/SWAPBUSY` (или переименование пути «только exe») разрешён этой установке:
+        # только тогда `bpmkit.exe.old` может быть прежней версией ОТ НЕЁ (откат).
+        "swap_busy": bool(swap_busy),
         "confirmed_at": None,
     }
     _event(rel, "applied", src=current, dst=version, at=at, via=via, trigger=trigger or None,
@@ -870,6 +1152,7 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
         else:
             result = releases.apply_staged(state, ctx, swap_busy=bool(swap_busy))
             rel["auto"]["backup"] = result.get("backup")
+            rel["auto"]["swap_busy"] = bool(result.get("old_path"))
     except Exception as exc:  # noqa: BLE001 - исход, а не исключение
         rel["auto"] = before_auto
         rel["last_auto_event"] = before_event

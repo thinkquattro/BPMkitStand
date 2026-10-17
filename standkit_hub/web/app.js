@@ -2917,6 +2917,8 @@
     check_skills: "/api/companion/check-skills",
     stage_skills: "/api/companion/stage-skills",
     apply_skills: "/api/companion/apply-skills",
+    // снять запрет автоматической установки с плохих версий (без сети).
+    clear_bad_versions: "/api/companion/clear-bad-versions",
   };
 
   // Подпись занятой кнопки: «Обновляем…» честнее универсального «Подождите» —
@@ -2949,11 +2951,13 @@
     check_skills: "Проверка выполнена",
     stage_skills: "Скиллы/плагин скачаны и проверены",
     apply_skills: "Скиллы применены",
+    clear_bad_versions: "Эти версии снова могут устанавливаться автоматически",
   };
 
   // Почему действие сейчас недоступно. Кнопка не прячется — она выключается и
   // объясняется: спрятанная кнопка читается как «функции нет вовсе».
   const COMPANION_ACTION_REASONS = {
+    clear_bad_versions: "Запрещённых для автоматической установки версий нет",
     apply_update: "Устанавливать нечего: новая версия ещё не скачана",
     rollback: "Откатываться не на что: канал ещё не устанавливал обновлений на этой машине",
     apply_installer: "Устанавливать нечего: установщик новой версии ещё не скачан — нажмите «Проверить обновления»",
@@ -3077,7 +3081,44 @@
     if (event.kind === "rolled_back") return `Версия ${from} не запустилась и откачена до ${to}${when}`;
     if (event.kind === "install_failed") return `Автоматическая установка версии ${to} не удалась${when}`;
     if (event.kind === "rollback_failed") return `Версия ${from} не запустилась, откатить её не удалось — переустановите BPMkit`;
+    if (event.kind === "install_unverified") return `Автоматическую установку версии ${to} не удалось подтвердить${when} — проверьте установку BPMkit`;
+    if (event.kind === "install_deferred") return `Установка версии ${to} отложена${when}: MCP-сервер был запущен`;
     return "";
+  }
+
+  // Почему автоматика сейчас не ставит найденную версию — по последнему исходу
+  // (`last_auto_decision`). Пусто — объяснять нечего (поставлено, нет обновления,
+  // режим не `auto`, пауза — у паузы своя строка).
+  const AUTO_REASON_TEXT = {
+    mcp_running: (v) => `Версия ${v} скачана и проверена; установится, когда MCP-сервер не запущен (после выхода из приложения)`,
+    ring: (v) => `Версия ${v} скачана; установится, когда наступит срок стабильного кольца`,
+    rollout_unknown: (v) => `Версия ${v} скачана; ждём от издателя сведений о раскатке`,
+    pending_restart: (v) => `Версия ${v} скачана; установится после перезапуска приложения с уже поставленной версией`,
+    busy: () => "Установка отложена: файл MCP занят — повторим позже",
+    busy_other_process: () => "Установка отложена: обновление уже идёт в другом процессе",
+    installer_running: () => "Установка отложена: установщик ещё работает",
+    machine_scope: () => "BPMkit установлен для всех пользователей: обновления скачиваются заранее и ставятся по кнопке",
+    settings_unreadable: () => "Настройки канала не прочитаны: обновления скачиваются заранее и ставятся по кнопке",
+    bad_version: (v) => `Версия ${v} ранее не запустилась или откачена — автоматически не ставится`,
+    install_failed: (v) => `Автоматическая установка версии ${v} не удалась несколько раз — поставьте её кнопкой`,
+    version_unknown: () => "Номер новой версии не известен — автоматическая установка пропущена",
+    requires_installer: (v) => `Версия ${v} ставится только установщиком, а он не опубликован`,
+    artifact_version_mismatch: (v) => `Скачанный файл не совпал с версией ${v} — автоматическая установка пропущена`,
+  };
+
+  function describeAutoDecision(decision) {
+    if (!decision || !decision.reason) return "";
+    if (decision.decision === "applied" || decision.decision === "rolled_back") return "";
+    const text = AUTO_REASON_TEXT[decision.reason];
+    return text ? text(decision.version || "обновления") : "";
+  }
+
+  /** Автоматика ставит только по кнопке: установка «для всех пользователей» или
+   * нечитаемые настройки канала (режим `auto` ведёт себя как `notify`). */
+  function autoInstallsByButton(status) {
+    if (status && status.settings_problem) return true;
+    const decision = releasesBlock(status).last_auto_decision;
+    return !!(decision && (decision.reason === "machine_scope" || decision.reason === "settings_unreadable"));
   }
 
   function renderUpdateModeRow(status) {
@@ -3104,6 +3145,31 @@
       const text = describeAutoEvent(rel.last_auto_event);
       eventEl.hidden = !text;
       eventEl.textContent = text;
+    }
+    const reasonEl = byId("upd-auto-reason");
+    if (reasonEl) {
+      let text = mode === "auto" ? describeAutoDecision(rel.last_auto_decision) : "";
+      if (status && status.settings_problem) text = AUTO_REASON_TEXT.settings_unreadable();
+      reasonEl.hidden = !text;
+      reasonEl.textContent = text;
+    }
+    const pendingEl = byId("upd-auto-pending");
+    if (pendingEl) {
+      const pending = rel.auto_pending_version;
+      const since = rel.auto_pending_since ? ` ${describeMoment(rel.auto_pending_since)}` : "";
+      pendingEl.hidden = !pending;
+      pendingEl.textContent = pending
+        ? `Версия ${pending} установлена${since} и ждёт первого рабочего запуска — перезапустите приложение`
+        : "";
+    }
+    const badEl = byId("upd-bad-versions");
+    if (badEl) {
+      const bad = Array.isArray(rel.bad_versions) ? rel.bad_versions : [];
+      const failed = Object.keys(rel.auto_failures || {}).filter((v) => bad.indexOf(v) < 0);
+      const all = bad.concat(failed);
+      badEl.hidden = all.length === 0;
+      const textEl = byId("upd-bad-versions-text");
+      if (textEl) textEl.textContent = all.length ? `Автоматически не ставятся: ${all.join(", ")}` : "";
     }
   }
 
@@ -3132,6 +3198,7 @@
       // `typeof` — функция живёт и в песочнице тестов, где состояния окна нет.
       const status = typeof lastCompanionStatus === "undefined" ? null : lastCompanionStatus;
       const mode = ((status && status.settings) || {}).update_mode;
+      if (mode === "auto" && autoInstallsByButton(status)) return "Скачивание — заранее, установка — по вашей кнопке";
       if (mode === "auto") return "Обновления MCP ставятся автоматически; новая версия включится после перезапуска приложения";
       if (mode === "off") return "Проверка новых версий MCP выключена";
       return "Скачивание — заранее, установка — только по вашей кнопке";

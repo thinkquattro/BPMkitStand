@@ -688,6 +688,90 @@ def test_actions_include_auto_update():
     assert "auto_update" in runner.ACTIONS
 
 
+def test_hub_cycle_sees_bad_version_written_by_other_process(tmp_path, monkeypatch):
+    """Два процесса: CLI пометил версию плохой на диске, у диспетчера в памяти — старая
+    копия. Цикл релизов в `auto` решает по диску (не ставит) и не затирает запись CLI."""
+    from standkit_companion import autoupdate
+
+    log: list = []
+    patch_cycles(monkeypatch, log, releases_check=Recorder(
+        "releases", log, result={"available": True, "target": "1.2.3", "latest": "1.2.3",
+                                 "current": "1.2.2"}))
+    applied: list = []
+    monkeypatch.setattr(releases, "apply_installer",
+                        lambda st, c, *, target=None, swap_busy=False:
+                        applied.append(target) or {"launched": True, "pid": 1})
+    monkeypatch.setattr(releases, "stage_installer", Recorder(
+        "stage_installer", log, result={"version": "1.2.3",
+                                        "filename": "bpmkit-setup-1.2.3.exe"}))
+    monkeypatch.setattr(autoupdate, "install_dir_writable", lambda b: True)
+    monkeypatch.setattr(autoupdate.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto",
+                                                       update_ring="early"))
+    runner_obj._state.releases["rollout"] = {"paused": False}
+    runner_obj._state.releases["rollout_version"] = "1.2.3"
+    runner_obj._state.save()
+
+    other = CompanionState.load(tmp_path / "companion-state.json")
+    other.releases["bad_versions"] = ["1.2.3"]
+    other.save()
+
+    outcome = runner_obj.run_cycle("releases")
+
+    auto = outcome["result"]["auto"]
+    assert (auto["decision"], auto["reason"]) == ("skipped", "bad_version")
+    assert applied == []
+    disk = json.loads((tmp_path / "companion-state.json").read_text(encoding="utf-8"))
+    assert disk["releases"]["bad_versions"] == ["1.2.3"], "запись другого процесса цела"
+
+
+def test_clear_bad_versions_action_and_status(tmp_path, monkeypatch):
+    patch_cycles(monkeypatch, [])
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto"))
+    runner_obj._state.releases["bad_versions"] = ["1.2.3"]
+    runner_obj._state.save()
+    assert runner_obj.status()["actions"]["clear_bad_versions"] is True
+
+    result = runner_obj.run_action("clear_bad_versions")
+
+    assert result["cleared"] == ["1.2.3"]
+    status = runner_obj.status()
+    assert status["actions"]["clear_bad_versions"] is False
+    assert status["state"]["releases"]["bad_versions"] == []
+    assert "clear_bad_versions" in runner.ACTIONS
+
+
+def test_status_reports_unreadable_settings(tmp_path, monkeypatch):
+    """Битый конфиг: статус называет причину, автоматика ведёт себя как `notify`."""
+    patch_cycles(monkeypatch, [])
+    config = tmp_path / "standkit-hub.json"
+    config.write_text("{битый", encoding="utf-8")
+    runner_obj = runner.build_runner(config, state_path=tmp_path / "companion-state.json")
+
+    status = runner_obj.status()
+
+    assert status["settings_problem"] == "settings_unreadable"
+    assert status["settings"]["update_mode"] == "notify"
+
+
+def test_cli_clear_bad_versions(tmp_path, capsys):
+    from standkit_companion import __main__ as cli
+
+    config = tmp_path / "standkit-hub.json"
+    config.write_text(json.dumps({"companion": {"update_mode": "auto"}}), encoding="utf-8")
+    state_file = tmp_path / "companion-state.json"
+    state = CompanionState.load(state_file)
+    state.releases["bad_versions"] = ["1.2.3", "1.2.4"]
+    state.save()
+
+    rc = cli.main(["clear-bad-versions", "--version", "1.2.3", "--json",
+                   "--config", str(config)])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["cleared"] == ["1.2.3"]
+    assert CompanionState.load(state_file).releases["bad_versions"] == ["1.2.4"]
+
+
 # --------------------------------------------------------------------------------------
 # 8. Конверт в статусе
 # --------------------------------------------------------------------------------------

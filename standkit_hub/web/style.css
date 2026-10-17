@@ -2466,6 +2466,12 @@ span.value-has-reason {
   margin: 0;
 }
 
+.upd-mode .upd-inline-btn {
+  margin-left: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 .upd-mode-note[hidden] {
   display: none;
 }

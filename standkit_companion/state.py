@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import time
 from pathlib import Path
@@ -31,7 +32,7 @@ from standkit.registry import bpmkit_config_dir
 from . import fsutil
 from .patterns import compare_versions
 
-__all__ = ["STATE_FILE_NAME", "CompanionState", "state_path", "utc_now_iso"]
+__all__ = ["STATE_FILE_NAME", "SHARED_KEYS", "CompanionState", "state_path", "utc_now_iso"]
 
 STATE_FILE_NAME = "companion-state.json"
 
@@ -41,6 +42,20 @@ _SCHEMA_VERSION = 1
 # вообще имеет смысл (текущая + предыдущая); держим 3, чтобы пережить один неудачный
 # промежуточный релиз.
 RELEASE_HISTORY_KEEP = 3
+
+#: Ключи, которые пишут НЕСКОЛЬКО процессов: диспетчер (долгоживущий, держит состояние в
+#: памяти) и CLI BPMkit, запущенный задачей Планировщика (автообновление, ручные
+#: команды `apply-update`/`rollback`). Каждый пишет сразу на диск, поэтому для этих ключей
+#: запись — слияние с диском, а не «моя память поверх всего» (см. `CompanionState.save`):
+#: иначе диспетчер, сохраняя что-то своё, затёр бы старой копией плохую версию, запуск
+#: установщика или установленную версию, только что записанные CLI.
+SHARED_KEYS = {
+    "releases": ("auto", "bad_versions", "last_auto_event", "auto_failures",
+                 "last_auto_decision", "current", "restart_required", "staged",
+                 "history", "installer_staged", "installer_launched"),
+}
+
+_MISSING = object()
 
 
 def utc_now_iso() -> str:
@@ -258,6 +273,9 @@ class CompanionState:
     def __init__(self, path: Path, data: Optional[dict] = None) -> None:
         self.path = Path(path)
         self.data = data if data is not None else _default_state()
+        # Значения общих ключей (`SHARED_KEYS`) на момент последнего чтения/записи: по
+        # ним `save` отличает «этот процесс изменил ключ» от «ключ изменил другой».
+        self._baseline = self._shared_snapshot()
 
     # -- загрузка/сохранение -----------------------------------------------------------
     @classmethod
@@ -307,6 +325,66 @@ class CompanionState:
             return
         if isinstance(data, dict):
             self.data = self._migrate(data)
+            self._baseline = self._shared_snapshot()
+
+    def _shared_snapshot(self) -> dict:
+        snapshot = {}
+        for section, keys in SHARED_KEYS.items():
+            block = self.data.get(section) if isinstance(self.data, dict) else None
+            if not isinstance(block, dict):
+                continue
+            for key in keys:
+                if key in block:
+                    snapshot[(section, key)] = copy.deepcopy(block[key])
+        return snapshot
+
+    def _read_disk(self) -> Optional[dict]:
+        try:
+            data = json.loads(Path(self.path).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def refresh_shared(self) -> None:
+        """Общие ключи (`SHARED_KEYS`) — с диска: другой процесс мог их изменить.
+
+        Зовётся под замком машины автообновления перед решением «ставить ли». Нет файла
+        или он не читается — память не трогается.
+        """
+        data = self._read_disk()
+        if data is None:
+            return
+        for section, keys in SHARED_KEYS.items():
+            block = data.get(section)
+            if not isinstance(block, dict):
+                continue
+            target = self.data.setdefault(section, {})
+            for key in keys:
+                if key in block:
+                    target[key] = copy.deepcopy(block[key])
+                    self._baseline[(section, key)] = copy.deepcopy(block[key])
+
+    def _merge_shared_from_disk(self) -> None:
+        """Слияние общих ключей перед записью: ключ, который ЭТОТ процесс не менял с
+        последнего чтения, берётся с диска (его мог записать другой процесс); изменённый
+        здесь — из памяти."""
+        data = self._read_disk()
+        if data is None:
+            return
+        for section, keys in SHARED_KEYS.items():
+            disk_block = data.get(section)
+            block = self.data.get(section)
+            if not isinstance(disk_block, dict) or not isinstance(block, dict):
+                continue
+            for key in keys:
+                if key not in disk_block:
+                    continue
+                mine = block.get(key, _MISSING)
+                base = self._baseline.get((section, key), _MISSING)
+                changed_here = (mine is _MISSING) != (base is _MISSING) or (
+                    mine is not _MISSING and mine != base)
+                if not changed_here:
+                    block[key] = copy.deepcopy(disk_block[key])
 
     def refresh_keys(self, section: str, keys) -> None:
         """Перечитать с диска только `keys` секции `section` (диск главнее памяти).
@@ -324,11 +402,15 @@ class CompanionState:
         target = self.data.setdefault(section, {})
         for key in keys:
             if key in block:
-                target[key] = block[key]
+                target[key] = copy.deepcopy(block[key])
+                self._baseline[(section, key)] = copy.deepcopy(block[key])
 
     def save(self) -> None:
+        """Атомарная запись; общие ключи (`SHARED_KEYS`) — слиянием с диском."""
+        self._merge_shared_from_disk()
         fsutil.atomic_write_text(
             self.path, json.dumps(self.data, ensure_ascii=False, indent=2) + "\n")
+        self._baseline = self._shared_snapshot()
 
     # -- доступ к секциям ---------------------------------------------------------------
     @property
@@ -488,6 +570,13 @@ class CompanionState:
                                          if isinstance(rel.get("auto"), dict)
                                          and not (rel.get("auto") or {}).get("confirmed_at")
                                          else None),
+                # с какого момента ждём подтверждения рабочим стартом (для окна).
+                "auto_pending_since": ((rel.get("auto") or {}).get("applied_at")
+                                       if isinstance(rel.get("auto"), dict)
+                                       and not (rel.get("auto") or {}).get("confirmed_at")
+                                       else None),
+                "auto_failures": ({str(k): v for k, v in rel["auto_failures"].items()}
+                                  if isinstance(rel.get("auto_failures"), dict) else {}),
             },
             "cookbook": {
                 "last_check_at": cb.get("last_check_at"),

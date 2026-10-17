@@ -1458,6 +1458,15 @@
             <span class="upd-meta" id="upd-ring" title="Кольцо раскатки задаётся при установке BPMkit">кольцо: стабильное</span>
             <p class="upd-detail" id="upd-paused-note" hidden></p>
             <p class="upd-meta upd-mode-note" id="upd-auto-event" hidden></p>
+            <!-- почему автоматика сейчас не ставит (последний исход), установка, ждущая
+                 первого рабочего запуска, и версии, которые автоматика не ставит
+                 (кнопка снимает запрет; ручная установка доступна и без неё). -->
+            <p class="upd-meta upd-mode-note" id="upd-auto-reason" hidden></p>
+            <p class="upd-meta upd-mode-note" id="upd-auto-pending" hidden></p>
+            <p class="upd-meta upd-mode-note" id="upd-bad-versions" hidden>
+              <span id="upd-bad-versions-text"></span>
+              <button type="button" class="secondary upd-inline-btn" id="upd-clear-bad-btn" data-companion-action="clear_bad_versions">Разрешить снова</button>
+            </p>
           </div>
         </div>
 

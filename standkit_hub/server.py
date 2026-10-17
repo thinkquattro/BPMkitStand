@@ -812,6 +812,9 @@ COMPANION_ACTION_ROUTES = {
     "/api/companion/check-skills": "check_skills",
     "/api/companion/stage-skills": "stage_skills",
     "/api/companion/apply-skills": "apply_skills",
+    # снять запрет автоматической установки с плохих версий (откат, исчерпанные
+    # попытки) — локально, без сети; ручная установка этих версий доступна и так.
+    "/api/companion/clear-bad-versions": "clear_bad_versions",
 }
 
 #: Действия, которые умеют адресоваться к конкретной версии (тело
@@ -820,7 +823,8 @@ COMPANION_ACTION_ROUTES = {
 COMPANION_VERSION_ACTIONS = frozenset({"stage_update", "rollback",
                                        "stage_installer", "apply_installer",
                                        "check_hub", "stage_hub",
-                                       "check_skills", "stage_skills"})
+                                       "check_skills", "stage_skills",
+                                       "clear_bad_versions"})
 
 #: ``CompanionError.kind`` → HTTP-код. Смысл группировки, а не «все ошибки 500»:
 #:

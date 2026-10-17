@@ -9,6 +9,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from standkit.registry import default_registry_path
 from standkit_hub.config import CompanionSettings, HubConfig, RemoteAgent
 
@@ -344,11 +346,40 @@ class TestUpdateMode:
         assert (on.update_mode, on.releases.enabled) == ("notify", True)
         assert (off.update_mode, off.releases.enabled) == ("off", False)
 
-    def test_garbage_mode_falls_back_to_derived_rule(self):
-        assert CompanionSettings.from_dict({"update_mode": "always"}).update_mode == "auto"
-        assert CompanionSettings.from_dict({
-            "update_mode": 1, "releases": {"enabled": False}}).update_mode == "off"
-        assert CompanionSettings.from_dict({"update_mode": " NOTIFY "}).update_mode == "notify"
+    def test_garbage_mode_is_notify_with_problem(self):
+        """Незнакомый режим — не «поля нет»: что выбрано, не понять, поэтому `notify`
+        (или `off` при явно выключенной проверке) и признак `settings_unreadable`."""
+        from standkit_hub.config import SETTINGS_UNREADABLE
+
+        always = CompanionSettings.from_dict({"update_mode": "always"})
+        assert (always.update_mode, always.load_problem) == ("notify", SETTINGS_UNREADABLE)
+        off = CompanionSettings.from_dict({"update_mode": 1, "releases": {"enabled": False}})
+        assert (off.update_mode, off.load_problem) == ("off", SETTINGS_UNREADABLE)
+        clean = CompanionSettings.from_dict({"update_mode": " NOTIFY "})
+        assert (clean.update_mode, clean.load_problem) == ("notify", "")
+        assert CompanionSettings.from_dict({}).load_problem == "", "поля нет — не проблема"
+        assert "load_problem" not in always.to_dict(), "факт чтения в файл не пишется"
+
+    def test_missing_file_is_auto_without_problem(self, tmp_path):
+        cfg = HubConfig.load(tmp_path / "нет-файла.json").companion
+        assert (cfg.update_mode, cfg.load_problem) == ("auto", "")
+
+    @pytest.mark.parametrize("content", [
+        '{"companion": {"update_mode": "auto", "releases": {"enabled": tru',
+        "",
+        "[1, 2]",
+        '{"companion": "мусор"}',
+    ])
+    def test_broken_config_is_notify_with_problem(self, tmp_path, content):
+        """Битый файл (обрезанный, пустой, не объект, секция не объект) — дефолты, но не
+        выбор человека: `notify` и `settings_unreadable` (автоматика не ставит)."""
+        from standkit_hub.config import SETTINGS_UNREADABLE
+
+        path = tmp_path / "standkit-hub.json"
+        path.write_text(content, encoding="utf-8")
+        cfg = HubConfig.load(path).companion
+        assert cfg.load_problem == SETTINGS_UNREADABLE
+        assert cfg.update_mode == "notify"
 
     def test_ring_normalized_to_stable(self):
         assert CompanionSettings.from_dict({"update_ring": "early"}).update_ring == "early"

@@ -269,6 +269,20 @@ def _cmd_auto_update(args) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def _cmd_clear_bad_versions(args) -> int:
+    """Снять запрет автоматики с плохих версий (все или `--version`). Ручная установка
+    этих версий и без того доступна; команда возвращает их автоматике."""
+    result = build_runner(_config_path(args)).run_action("clear_bad_versions",
+                                                         version=args.version)
+    if args.json:
+        _out(json.dumps(result, ensure_ascii=False, indent=2))
+    elif result.get("cleared"):
+        _out("Снят запрет автоматической установки: " + ", ".join(result["cleared"]))
+    else:
+        _out("Запрещённых для автоматики версий нет")
+    return 0
+
+
 def _cmd_run(args) -> int:
     """Поднять планировщик. `--once` — один проход циклов, у которых наступил срок."""
     runner = build_runner(_config_path(args))
@@ -310,6 +324,7 @@ _COMMANDS = {
     "rollback": _cmd_rollback,
     "revocations": _cmd_revocations,
     "auto-update": _cmd_auto_update,
+    "clear-bad-versions": _cmd_clear_bad_versions,
     "run": _cmd_run,
 }
 
@@ -358,9 +373,18 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="автоматическое обновление одним проходом (по режиму "
                                "companion.update_mode)")
     auto.add_argument("--trigger", default="manual", choices=TRIGGERS,
-                      help="кто запускает (для журнала): logon, schedule, manual, hub")
+                      help="кто запускает (для журнала): logon, schedule, manual, "
+                           "hub, exit")
     auto.add_argument("--json", action="store_true",
                       help="машинный вывод вместо человеческого")
+
+    clear = sub.add_parser("clear-bad-versions", parents=[common],
+                           help="снять запрет автоматической установки с версий, "
+                                "помеченных плохими (откат) или исчерпавших попытки")
+    clear.add_argument("--version", default=None,
+                       help="только эта версия (по умолчанию — все)")
+    clear.add_argument("--json", action="store_true",
+                       help="машинный вывод вместо человеческого")
 
     run = sub.add_parser("run", parents=[common], help="поднять планировщик канала")
     run.add_argument("--once", action="store_true",

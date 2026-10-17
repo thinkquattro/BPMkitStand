@@ -422,17 +422,20 @@ def test_precheck_without_network():
 # --------------------------------------------------------------------------------------
 # Автооткат и подтверждение
 # --------------------------------------------------------------------------------------
-def _pending(state, binary, *, via="installer", backup=None):
+def _pending(state, binary, *, via="installer", backup=None, swap_busy=False):
     state.releases["auto"] = {"applied_version": "1.3.20", "previous_version": "1.3.19",
                               "binary": str(binary), "backup": backup, "via": via,
-                              "applied_at": "2026-10-20T11:00:00Z", "confirmed_at": None}
+                              "applied_at": "2026-10-20T11:00:00Z", "swap_busy": swap_busy,
+                              "confirmed_at": None}
 
 
 def _marker(path, *, version="1.3.20", attempts=2, ok=False,
-            last="2026-10-20T11:55:00Z"):
+            first="2026-10-20T11:50:00Z", last="2026-10-20T11:55:00Z", ok_at=None):
+    if ok and ok_at is None:
+        ok_at = last
     path.write_text(json.dumps({"version": version, "attempts": attempts, "ok": ok,
-                                "first_attempt_at": "2026-10-20T11:50:00Z",
-                                "last_attempt_at": last, "ok_at": None}), encoding="utf-8")
+                                "first_attempt_at": first,
+                                "last_attempt_at": last, "ok_at": ok_at}), encoding="utf-8")
 
 
 def _broken_install(binary):
@@ -449,7 +452,7 @@ def test_rollback_after_two_failed_starts(env):
     old = _broken_install(binary)
     sidecar = binary.with_name(binary.name + ".sha256")
     sidecar.write_text("0" * 64 + "  bpmkit.exe\n", encoding="utf-8")
-    _pending(state, binary)
+    _pending(state, binary, swap_busy=True)  # `.old` — от ЭТОЙ установки (/SWAPBUSY)
     _marker(marker)
 
     payload = autoupdate.maybe_rollback(state, now=NOW, trigger="logon")
@@ -601,10 +604,17 @@ def _relocating_install(binary, *, features=("self_relocate",), where="root"):
                         encoding="utf-8")
 
 
-def _runtime(monkeypatch, *, relocated):
+#: Копия бинаря в кэше версий, из которой исполняется перенесённый сервер.
+CACHE_COPY = str(Path("cache") / "versions" / "1.3.19" / "bpmkit.exe")
+
+
+def _runtime(monkeypatch, *, relocated, pid=None, binary=CACHE_COPY, version="1.3.19",
+             started_at="2026-10-20T09:00:00Z"):
+    """Маркер работающего процесса: по умолчанию — ЖИВОЙ процесс (этот) из кэша версий."""
     monkeypatch.setattr(releases, "read_runtime_marker", lambda: {
-        "version": "1.3.19", "started_at": "2026-10-20T09:00:00Z", "pid": 1, "frozen": True,
-        "binary": "x", "relocated": relocated})
+        "version": version, "started_at": started_at,
+        "pid": os.getpid() if pid is None else pid, "frozen": True,
+        "binary": binary, "relocated": relocated})
 
 
 @pytest.mark.parametrize("where", ["root", "server"])
@@ -679,13 +689,14 @@ def test_execute_exe_path_swap_only_with_self_relocation(env, monkeypatch):
     assert ("apply_staged", False) in calls.log
 
     state.releases["auto"] = None
+    state.save()  # под замком общие ключи перечитываются с диска
     monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
     _relocating_install(binary)
     _runtime(monkeypatch, relocated=True)
     calls2 = _Calls()
     _stub_channel(monkeypatch, calls2, installer=False)
-    _run(state, ctx)
-    assert ("apply_staged", True) in calls2.log
+    payload = _run(state, ctx)
+    assert ("apply_staged", True) in calls2.log, payload
 
 
 def test_exit_trigger_is_an_ordinary_pass_and_logged(env, monkeypatch):
@@ -726,3 +737,387 @@ def test_self_relocate_feature_location_in_manifest(env, monkeypatch, manifest, 
     _runtime(monkeypatch, relocated=True)
 
     assert autoupdate.self_relocate_active(binary) is expected
+
+
+
+# --------------------------------------------------------------------------------------
+# Маркер старта засчитывается только ПОСЛЕ автоустановки; источник отката — копия ЭТОЙ
+# установки, `.old` — запасной
+# --------------------------------------------------------------------------------------
+def test_marker_older_than_install_neither_confirms_nor_rolls_back(env):
+    """Смоук/VM на машине кольца early написали маркер этой версии ДО установки: он не
+    доказывает ни рабочий старт, ни провал новой версии."""
+    state, _ctx, binary, marker = env
+    _broken_install(binary)
+    _pending(state, binary)  # applied_at 11:00
+    _marker(marker, attempts=3, first="2026-10-20T09:00:00Z", last="2026-10-20T09:10:00Z")
+
+    assert autoupdate.maybe_rollback(state, now=NOW) is None
+    assert autoupdate.reconcile_pending(state, now=NOW) is None
+    assert binary.read_bytes() == b"MZ slomannyj 1.3.20"
+
+    _marker(marker, attempts=1, ok=True, first="2026-10-20T09:00:00Z",
+            last="2026-10-20T09:00:05Z", ok_at="2026-10-20T09:00:06Z")
+    assert autoupdate.reconcile_pending(state, now=NOW) is None
+    assert autoupdate.pending_record(state) is not None, "старый ok не подтверждает установку"
+
+
+def test_marker_attempts_started_before_install_are_not_counted(env):
+    """Попытки, начавшиеся до установки (first_attempt_at раньше applied_at), — не
+    доказательство двух неудачных стартов НОВОЙ установки: отката нет."""
+    state, _ctx, binary, marker = env
+    _broken_install(binary)
+    _pending(state, binary)
+    _marker(marker, attempts=3, first="2026-10-20T10:00:00Z", last="2026-10-20T11:55:00Z")
+
+    assert autoupdate.maybe_rollback(state, now=NOW) is None
+
+
+def test_rollback_prefers_this_installs_backup_over_old(env):
+    """`.old` мог остаться от ПРЕДЫДУЩЕЙ подмены (позапрошлая версия) — откат «через
+    версию»; первой берётся копия, снятая этой установкой."""
+    state, _ctx, binary, marker = env
+    old = binary.with_name(binary.name + releases.OLD_SUFFIX)
+    old.write_bytes(b"MZ pozaproshlaya 1.3.18")
+    backup = binary.parent.parent / "backup-1.3.19.exe"
+    backup.write_bytes(b"MZ stary 1.3.19")
+    binary.write_bytes(b"MZ slomannyj 1.3.20")
+    _pending(state, binary, backup=str(backup))
+    _marker(marker)
+
+    payload = autoupdate.maybe_rollback(state, now=NOW)
+
+    assert payload["decision"] == "rolled_back"
+    assert binary.read_bytes() == b"MZ stary 1.3.19"
+    assert old.read_bytes() == b"MZ pozaproshlaya 1.3.18", ".old не тронут"
+
+
+def test_self_relocate_needs_live_process_running_from_cache_copy(env, monkeypatch):
+    """Маркер умершего процесса или процесса, исполняющегося из самого `bpmkit.exe`, —
+    не самоперенос: файл держит (или может держать) сервер."""
+    _state, _ctx, binary, _marker = env
+    _relocating_install(binary)
+    monkeypatch.setattr(autoupdate, "_pid_alive", lambda pid: False)
+    _runtime(monkeypatch, relocated=True)
+    assert autoupdate.self_relocate_active(binary) is False, "процесс маркера не жив"
+
+    monkeypatch.setattr(autoupdate, "_pid_alive", lambda pid: True)
+    _runtime(monkeypatch, relocated=True, binary=str(binary))
+    assert autoupdate.self_relocate_active(binary) is False, "исполняется из bpmkit.exe"
+    _runtime(monkeypatch, relocated=True, binary="")
+    assert autoupdate.self_relocate_active(binary) is False, "откуда — не известно"
+    _runtime(monkeypatch, relocated=True)
+    assert autoupdate.self_relocate_active(binary) is True
+
+
+# --------------------------------------------------------------------------------------
+# Ревью: повторная установка, битый конфиг, живой процесс, несогласованный `.old`,
+# неизвестная версия, два процесса, пауза без метки, окно простоя под замком
+# --------------------------------------------------------------------------------------
+class _VersionClient(FakeClient):
+    """Подставной бэкенд с `GET /v1/version/latest` (раскатка) поверх релизного канала."""
+
+    def __init__(self, *a, latest=None, rollout=None, **k):
+        super().__init__(*a, **k)
+        self._latest = latest
+        self._rollout = rollout if rollout is not None else {"paused": False}
+
+    def get_json(self, path, *, params=None, authorized=True, etag=None):
+        if path == "/v1/version/latest":
+            self.calls.append(("GET", path))
+            return {"latest": self._latest, "rollout": self._rollout}, {}
+        return super().get_json(path, params=params, authorized=authorized, etag=etag)
+
+
+def test_installed_by_installer_is_not_installed_again(env, monkeypatch):
+    """Установщик не пишет `releases.current`; после установки и подтверждения та же
+    версия не ставится снова — установленную версию даёт `manifest.json` поставки."""
+    from tests.test_companion_releases import _meta
+
+    state, ctx, binary, _m = env
+    (binary.parent.parent / "manifest.json").write_text(json.dumps({"version": "1.3.20"}),
+                                                       encoding="utf-8")
+    ctx.mcp_version = "1.3.20"
+    state.releases["current"] = {"version": "1.3.19", "applied_at": "2026-10-01T00:00:00Z",
+                                 "path": str(binary)}
+    state.releases["auto"] = {"applied_version": "1.3.20", "previous_version": "1.3.19",
+                              "binary": str(binary), "via": "installer",
+                              "applied_at": "2026-10-20T10:00:00Z",
+                              "confirmed_at": "2026-10-20T10:30:00Z"}
+    blob = _blob("1.3.20")
+    client = _VersionClient(_meta("1.3.20", blob), blob, latest="1.3.20")
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    payload = autoupdate.execute(state, _Session(client, ctx), _settings(),
+                                 trigger="schedule", now=NOW)
+
+    assert (payload["decision"], payload["reason"]) == ("skipped", "no_update")
+    assert payload["current"] == "1.3.20"
+    assert not [c for c in calls.log if c[0] in ("apply_installer", "apply_staged")]
+
+
+def test_confirmation_of_installer_records_installed_version(env):
+    state, _ctx, binary, marker = env
+    state.releases["current"] = {"version": "1.3.19"}
+    _pending(state, binary)
+    _marker(marker, attempts=1, ok=True)
+
+    assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "confirmed"
+    assert state.releases["current"]["version"] == "1.3.20"
+    assert state.releases["current"]["via"] == "installer"
+
+
+def test_unknown_update_mode_or_broken_config_does_not_install(env, monkeypatch, tmp_path):
+    """Битый конфиг (или незнакомый режим) — не выбор человека: автоматика ведёт себя как
+    `notify` (проверяет и готовит, но не ставит) с причиной `settings_unreadable`."""
+    from standkit_hub.config import SETTINGS_UNREADABLE, HubConfig
+
+    state, ctx, _binary, _m = env
+    cfg = tmp_path / "standkit-hub.json"
+    cfg.write_text('{"companion": {"update_mode": "notify", "releases": {"enabled": tru',
+                   encoding="utf-8")
+    broken = HubConfig.load(cfg).companion
+    cfg.write_text(json.dumps({"companion": {"update_mode": "turbo"}}), encoding="utf-8")
+    unknown = HubConfig.load(cfg).companion
+
+    for settings in (broken, unknown):
+        assert settings.load_problem == SETTINGS_UNREADABLE
+        state.releases["auto"] = None
+        state.save()
+        calls = _Calls()
+        _stub_channel(monkeypatch, calls)
+        payload = _run(state, ctx, settings=settings)
+        assert (payload["decision"], payload["reason"]) == ("skipped", "settings_unreadable")
+        assert [c[0] for c in calls.log] == ["stage_installer"], "подготовка — как в notify"
+
+
+def test_rollback_skipped_while_this_version_runs(env, monkeypatch):
+    """Маркер старта без `ok` (запись не удалась), но процесс этой версии жив и запущен
+    после установки — откат не делается, установка подтверждается."""
+    state, _ctx, binary, marker = env
+    old = binary.with_name(binary.name + releases.OLD_SUFFIX)
+    old.write_bytes(binary.read_bytes())
+    binary.write_bytes(b"MZ rabochij 1.3.20")
+    _pending(state, binary, swap_busy=True)
+    _marker(marker, attempts=2, ok=False, last="2026-10-20T11:55:00Z")
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+    _runtime(monkeypatch, relocated=False, version="1.3.20", binary=str(binary),
+             started_at="2026-10-20T11:55:00Z")
+
+    assert autoupdate.maybe_rollback(state, now=NOW) is None
+    assert binary.read_bytes() == b"MZ rabochij 1.3.20"
+    assert not state.releases.get("bad_versions")
+    assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "confirmed"
+
+
+def test_rollback_does_not_use_inconsistent_old(env):
+    """Установка без `/SWAPBUSY` `.old` не создаёт: оставшийся `.old` — от прежней подмены.
+    Без копии этой установки откатывать им нельзя — честное «откатить нечем»."""
+    state, _ctx, binary, marker = env
+    old = binary.with_name(binary.name + releases.OLD_SUFFIX)
+    old.write_bytes(b"MZ pozaproshlaya 1.3.18")
+    binary.write_bytes(b"MZ slomannyj 1.3.20")
+    _pending(state, binary, swap_busy=False)
+    _marker(marker)
+
+    payload = autoupdate.maybe_rollback(state, now=NOW)
+
+    assert (payload["decision"], payload["reason"]) == ("skipped", "rollback_unavailable")
+    assert binary.read_bytes() == b"MZ slomannyj 1.3.20"
+    assert old.read_bytes() == b"MZ pozaproshlaya 1.3.18"
+
+
+@pytest.mark.parametrize("latest", [None, "", "latest", "1.3.20-beta"])
+def test_unknown_version_is_never_installed(env, monkeypatch, latest):
+    """Номер новой версии не известен — не проверить ни плохую версию, ни раскатку:
+    `skipped / version_unknown`, ничего не качается и не ставится."""
+    state, ctx, _binary, _m = env
+    state.releases["bad_versions"] = ["1.3.20"]
+    state.releases["rollout_version"] = "1.3.19"
+    assert autoupdate.rollout_for(state.releases, latest) is None
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+    check = {"available": True, "latest": latest, "current": "1.3.19", "target": "latest",
+             "requires_installer": False, "reason": "version_unknown_use_latest"}
+
+    payload = _run(state, ctx, check=check)
+
+    assert (payload["decision"], payload["reason"]) == ("skipped", "version_unknown")
+    assert calls.log == []
+
+
+def test_staged_artifact_of_other_version_is_not_installed(env, monkeypatch):
+    state, ctx, _binary, _m = env
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    def stage_other(client, st, c, version="latest"):
+        calls.log.append(("stage_installer", version))
+        return {"version": "1.3.21", "filename": "bpmkit-setup-1.3.21.exe", "path": "x"}
+
+    monkeypatch.setattr(releases, "stage_installer", stage_other)
+
+    payload = _run(state, ctx)
+
+    assert (payload["ok"], payload["decision"], payload["reason"]) == (
+        False, "skipped", "artifact_version_mismatch")
+    assert not [c for c in calls.log if c[0] == "apply_installer"]
+
+
+def test_second_process_bad_version_is_seen_under_lock_and_kept(env, monkeypatch):
+    """Два процесса: CLI пометил версию плохой на диске, у диспетчера в памяти — старая
+    копия. Под замком решение принимается по диску, а запись диспетчера не затирает
+    запись CLI."""
+    state, ctx, _binary, _m = env
+    state.save()
+    other = CompanionState.load(state.path)
+    other.releases["bad_versions"] = ["1.3.20"]
+    other.save()
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    payload = _run(state, ctx)
+
+    assert (payload["decision"], payload["reason"]) == ("skipped", "bad_version")
+    assert not [c for c in calls.log if c[0] == "apply_installer"]
+    disk = json.loads(Path(state.path).read_text(encoding="utf-8"))
+    assert disk["releases"]["bad_versions"] == ["1.3.20"]
+
+
+def test_save_merges_keys_written_by_another_process(tmp_path):
+    """Общие ключи, которые этот процесс не менял, при записи берутся с диска;
+    изменённые здесь — из памяти."""
+    path = tmp_path / "companion-state.json"
+    hub = CompanionState(path)
+    hub.save()
+    cli = CompanionState.load(path)
+    cli.releases["bad_versions"] = ["1.3.20"]
+    cli.releases["installer_launched"] = {"pid": 5, "launched_at": NOW}
+    cli.save()
+
+    hub.releases["last_auto_decision"] = {"decision": "waiting"}
+    hub.patterns["since"] = "2026-10-20T00:00:00Z"
+    hub.save()
+
+    disk = json.loads(path.read_text(encoding="utf-8"))
+    assert disk["releases"]["bad_versions"] == ["1.3.20"]
+    assert disk["releases"]["installer_launched"]["pid"] == 5
+    assert disk["releases"]["last_auto_decision"] == {"decision": "waiting"}
+    assert disk["patterns"]["since"] == "2026-10-20T00:00:00Z"
+    assert hub.releases["bad_versions"] == ["1.3.20"], "память догоняет диск"
+
+
+@pytest.mark.parametrize("last", [None, "мусор"])
+def test_rollback_grace_applies_without_last_attempt(env, last):
+    """Нет `last_attempt_at` (или мусор) — пауза всё равно выдерживается: отсчёт от
+    последней записи маркера, а не «паузы нет»."""
+    state, _ctx, binary, marker = env
+    old = binary.with_name(binary.name + releases.OLD_SUFFIX)
+    old.write_bytes(binary.read_bytes())
+    binary.write_bytes(b"MZ novyj 1.3.20")
+    _pending(state, binary, swap_busy=True)
+    marker.write_text(json.dumps({"version": "1.3.20", "attempts": 2, "ok": False,
+                                  "first_attempt_at": "2026-10-20T11:30:00Z",
+                                  "last_attempt_at": last}), encoding="utf-8")
+    written = autoupdate.parse_iso(NOW).timestamp() - 30
+    os.utime(marker, (written, written))
+
+    assert autoupdate.maybe_rollback(state, now=NOW) is None, "маркер писался 30 с назад"
+    later = "2026-10-20T12:05:00Z"
+    assert autoupdate.maybe_rollback(state, now=later)["decision"] == "rolled_back"
+
+
+def test_server_started_while_downloading_defers_install(env, monkeypatch):
+    """Мьютекс перепроверяется под замком прямо перед установкой: сервер, запущенный,
+    пока качался файл, — `waiting / mcp_running`, без установки и без счёта неудач."""
+    state, ctx, _binary, _m = env
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+    seen = []
+
+    def mutex(*a, **k):
+        seen.append(k.get("strict"))
+        return len(seen) > 2  # видим только после подготовки
+
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", mutex)
+
+    payload = _run(state, ctx)
+
+    assert (payload["decision"], payload["reason"]) == ("waiting", "mcp_running")
+    assert not [c for c in calls.log if c[0] == "apply_installer"]
+    assert set(seen) == {True}, "автоматика спрашивает мьютекс строго"
+    assert not state.releases.get("auto_failures")
+
+
+def test_installer_refused_by_running_server_is_not_a_version_failure(env, monkeypatch):
+    state, _ctx, binary, _m = env
+    _pending(state, binary)
+    state.releases["installer_launched"] = {"pid": 0, "log": "setup.log",
+                                            "launched_at": "2026-10-20T11:00:00Z"}
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+
+    result = autoupdate.reconcile_pending(state, now=NOW)
+
+    assert result["kind"] == "install_deferred"
+    assert not state.releases.get("auto_failures")
+    assert state.releases["auto"] is None
+
+
+def test_pending_with_unreadable_manifest_is_not_eternal(env):
+    state, _ctx, binary, _m = env
+    (binary.parent.parent / "manifest.json").write_text("{битый", encoding="utf-8")
+    _pending(state, binary)  # applied_at 11:00
+
+    assert autoupdate.reconcile_pending(state, now=NOW) is None, "ещё ждём"
+    later = "2026-10-20T17:30:00Z"
+    result = autoupdate.reconcile_pending(state, now=later)
+    assert result["kind"] == "install_unverified"
+    assert state.releases["auto"] is None
+    assert state.releases["auto_failures"] == {"1.3.20": 1}
+    assert state.releases["last_auto_event"]["kind"] == "install_unverified"
+
+
+def test_machine_lock_of_dead_process_is_taken_over(env, monkeypatch):
+    state, ctx, _binary, _m = env
+    lock = Path(ctx.workdir) / autoupdate.LOCK_FILENAME
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(json.dumps({"pid": 999999, "at": NOW}), encoding="utf-8")
+    monkeypatch.setattr(autoupdate, "_pid_alive", lambda pid: False)
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    assert _run(state, ctx)["decision"] == "applied"
+
+
+def test_machine_lock_of_live_process_waits(env, monkeypatch):
+    state, ctx, _binary, _m = env
+    lock = Path(ctx.workdir) / autoupdate.LOCK_FILENAME
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(json.dumps({"pid": os.getpid(), "at": NOW}), encoding="utf-8")
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    payload = _run(state, ctx)
+
+    assert (payload["decision"], payload["reason"]) == ("waiting", "busy_other_process")
+    assert lock.exists()
+
+
+def test_clear_bad_versions(env):
+    state, _ctx, _binary, _m = env
+    state.releases["bad_versions"] = ["1.3.18", "1.3.20"]
+    state.releases["auto_failures"] = {"1.3.21": 3}
+    state.save()
+
+    one = autoupdate.clear_bad_versions(state, version="1.3.20")
+    assert one["cleared"] == ["1.3.20"]
+    assert state.releases["bad_versions"] == ["1.3.18"]
+
+    rest = autoupdate.clear_bad_versions(state)
+    assert rest["cleared"] == ["1.3.18", "1.3.21"]
+    assert (state.releases["bad_versions"], state.releases["auto_failures"]) == ([], {})
+    disk = json.loads(Path(state.path).read_text(encoding="utf-8"))
+    assert disk["releases"]["bad_versions"] == []
+    assert autoupdate.clear_bad_versions(state)["reason"] == "nothing_to_clear"
+

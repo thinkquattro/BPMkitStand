@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import inspect
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -986,18 +987,11 @@ def _stage_for_swap(env):
     return state, ctx, blob, Path(ctx.binary_path).read_bytes()
 
 
-@pytest.mark.parametrize("busy_signal", ["mutex", "probe"])
-def test_apply_staged_swap_busy_renames_running_binary_to_old(env, monkeypatch, busy_signal):
-    """Занятый бинарь (мьютекс сервера или проба записи) при `swap_busy=True` не повод
+def test_apply_staged_swap_busy_renames_running_binary_to_old(env, monkeypatch):
+    """Бинарь, занятый СЕРВЕРОМ (мьютекс виден), при `swap_busy=True` не повод
     отказать: он переименовывается в `bpmkit.exe.old`, новый ложится на его имя."""
     state, ctx, blob, old_bytes = _stage_for_swap(env)
-    if busy_signal == "mutex":
-        monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
-    else:
-        def probe_says_busy(path):
-            raise PermissionError(32, "The process cannot access the file")
-
-        monkeypatch.setattr(fsutil, "probe_writable", probe_says_busy)
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
 
     result = releases.apply_staged(state, ctx, swap_busy=True)
 
@@ -1012,6 +1006,57 @@ def test_apply_staged_swap_busy_renames_running_binary_to_old(env, monkeypatch, 
     assert result["backup"] and Path(result["backup"]).read_bytes() == old_bytes, (
         "бэкап для отката делается и на этом пути")
     assert not binary.with_name(binary.name + ".new").exists()
+
+
+def test_apply_staged_swap_busy_refuses_file_busy_without_server_mutex(env, monkeypatch):
+    """Мьютекса сервера нет, а проба записи упала (файл держит антивирус или чужой
+    процесс — о нём самоперенос ничего не говорит): отказ `local_io`, как без флага, и
+    никакого переименования."""
+    state, ctx, _blob_bytes, old_bytes = _stage_for_swap(env)
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
+
+    def probe_says_busy(path):
+        raise PermissionError(32, "The process cannot access the file")
+
+    monkeypatch.setattr(fsutil, "probe_writable", probe_says_busy)
+
+    with pytest.raises(ChannelError) as excinfo:
+        releases.apply_staged(state, ctx, swap_busy=True)
+
+    binary = Path(ctx.binary_path)
+    assert excinfo.value.kind == "local_io"
+    assert binary.read_bytes() == old_bytes
+    assert not binary.with_name(binary.name + releases.OLD_SUFFIX).exists()
+    assert releases.staged_info(state) is not None, "подготовленное обновление сохранено"
+
+
+def test_current_version_prefers_newer_manifest_on_disk(env):
+    """Установщик пишет версию в `manifest.json` поставки, а не в состояние канала:
+    более новая версия на диске главнее записанной (иначе её ставили бы снова)."""
+    state, ctx = env
+    binary = Path(ctx.binary_path)
+    manifest = releases._install_root_for(binary) / "manifest.json"
+    state.releases["current"] = {"version": "0.306.0"}
+    manifest.write_text(json.dumps({"version": "0.307.0"}), encoding="utf-8")
+    assert releases._current_version(state, ctx) == "0.307.0"
+
+    manifest.write_text(json.dumps({"version": "0.305.0"}), encoding="utf-8")
+    assert releases._current_version(state, ctx) == "0.306.0", "старее — не главнее"
+
+    manifest.write_text("{битый", encoding="utf-8")
+    assert releases._current_version(state, ctx) == "0.306.0"
+
+
+def test_manual_rollback_marks_version_bad_for_automation(env):
+    """Человек откатил версию — автоматика её больше не ставит (снять — clear-bad-versions)."""
+    state, ctx = env
+    client, _blob_bytes, _meta_dict = _client("0.307.0")
+    releases.stage(client, state, ctx)
+    releases.apply_staged(state, ctx)
+
+    releases.rollback(state, ctx)
+
+    assert state.releases["bad_versions"] == ["0.307.0"]
 
 
 def test_apply_staged_swap_busy_still_verifies_signature(env, monkeypatch):
