@@ -388,6 +388,12 @@ class CompanionSettings:
         # флажка (см. sync_legacy_releases_toggle — как прежний флажок переводится в режим).
         releases.enabled = mode != UPDATE_MODE_OFF
         known = {f.name for f in fields(cls)} - {"extra", "load_problem"}
+        extra = {key: value for key, value in data.items()
+                 if key not in known and key != "load_problem"}
+        if problem:
+            # Исходное значение режима не теряется: пересохранение конфига (любая правка
+            # формы) пишет его обратно как есть (`to_dict`), а не `notify`.
+            extra["update_mode"] = raw_mode
         return cls(
             enabled=bool(data.get("enabled", True)),
             backend_url=str(data.get("backend_url", "") or ""),
@@ -405,14 +411,20 @@ class CompanionSettings:
             require_pattern_signature=bool(data.get("require_pattern_signature", False)),
             update_mode=mode,
             update_ring=normalize_update_ring(data.get("update_ring")),
-            extra={key: value for key, value in data.items()
-                   if key not in known and key != "load_problem"},
+            extra=extra,
             load_problem=problem,
         )
 
     def to_dict(self) -> dict:
+        """Секция для записи в файл (read-modify-write: незнакомые ключи — как были).
+
+        Настройки, прочитанные с проблемой (`load_problem`), режим НЕ пишут: временное
+        «не прочитали» не должно становиться постоянным `notify`. Незнакомое значение
+        режима уходит обратно как было (оно лежит в `extra`); битый файл — без поля, и
+        следующее чтение выведет режим по правилу `derive_update_mode`.
+        """
         out = dict(self.extra or {})
-        out.update({
+        managed = {
             "enabled": bool(self.enabled),
             "backend_url": self.backend_url,
             "mcp_cli": self.mcp_cli,
@@ -425,7 +437,10 @@ class CompanionSettings:
             # выключенным циклом релизов, обязаны пережить запись и чтение как `off`.
             "update_mode": effective_update_mode(self),
             "update_ring": normalize_update_ring(self.update_ring),
-        })
+        }
+        if self.load_problem:
+            managed.pop("update_mode")
+        out.update(managed)
         return out
 
 

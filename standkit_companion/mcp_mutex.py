@@ -40,13 +40,20 @@ from __future__ import annotations
 
 import sys
 
-__all__ = ["SERVER_MUTEX_NAME", "server_mutex_exists", "server_mutex_state",
+__all__ = ["SERVER_MUTEX_NAME", "SERVER_PINNED_MUTEX_NAME", "server_mutex_exists",
+           "server_mutex_state", "pinned_server_running",
            "MUTEX_PRESENT", "MUTEX_ABSENT", "MUTEX_UNKNOWN"]
 
 #: ПЕРВОИСТОЧНИК — `SERVER_MUTEX_NAME` в `BPMkit/server/bpmkit/core.py` поставки BPMkit
 #: (другой репозиторий). Вторая копия литерала здесь неизбежна (отдельный
 #: репозиторий, импорт невозможен) — при смене имени там поправить ТОЛЬКО эту строку.
 SERVER_MUTEX_NAME = "BPMkitMcpServer"
+
+#: Второй мьютекс сервера BPMkit (тот же первоисточник, `core.py` поставки BPMkit):
+#: его держит сервер с самопереносом, работающий НЕ из копии в кэше версий (самоперенос
+#: выключен, откатился или проиграл гонку) — то есть держащий сам `bpmkit.exe`. Пока он
+#: виден, подменять занятый файл нельзя, даже если другой процесс объявил `relocated`.
+SERVER_PINNED_MUTEX_NAME = "BPMkitMcpServerPinned"
 
 #: `SYNCHRONIZE` — минимальные права доступа, достаточные, чтобы открыть мьютекс и
 #: проверить сам факт его существования; ждать (`WaitForSingleObject`) здесь не нужно.
@@ -125,3 +132,13 @@ def server_mutex_exists(name: str = SERVER_MUTEX_NAME, *, strict: bool = False) 
     if state == MUTEX_UNKNOWN:
         return bool(strict)
     return state == MUTEX_PRESENT
+
+
+def pinned_server_running() -> bool:
+    """Работает сервер, держащий сам `bpmkit.exe` (мьютекс `SERVER_PINNED_MUTEX_NAME`).
+
+    Строгий детект: «нет» — только `ERROR_FILE_NOT_FOUND` (и не-Windows, где мьютексов
+    нет); «есть» и «не знаю» — `True`: разрешение подменить занятый файл не выдаётся по
+    сбою детекта.
+    """
+    return server_mutex_state(SERVER_PINNED_MUTEX_NAME) != MUTEX_ABSENT

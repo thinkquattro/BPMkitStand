@@ -360,6 +360,31 @@ class TestUpdateMode:
         assert CompanionSettings.from_dict({}).load_problem == "", "поля нет — не проблема"
         assert "load_problem" not in always.to_dict(), "факт чтения в файл не пишется"
 
+    def test_unreadable_mode_is_not_persisted_as_notify(self, tmp_path):
+        """Пересохранение конфига с проблемой чтения (любая правка формы) не делает
+        временное «не прочитали» постоянным notify: незнакомое значение уходит обратно
+        как было, а битый файл — без поля режима."""
+        cfg = tmp_path / "standkit-hub.json"
+        cfg.write_text(json.dumps({"companion": {"update_mode": "future_mode"}}),
+                       encoding="utf-8")
+        current = HubConfig.load(cfg)
+        assert current.companion.load_problem
+        data = current.to_dict()
+        data.update({"refresh_interval_sec": 7})
+        HubConfig.from_dict(data).save(cfg)
+
+        saved = json.loads(cfg.read_text(encoding="utf-8"))["companion"]
+        assert saved["update_mode"] == "future_mode"
+        assert HubConfig.load(cfg).companion.load_problem, "проблема видна и после записи"
+
+        cfg.write_text('{"companion": {"update_mode": "notify"', encoding="utf-8")
+        HubConfig.load(cfg).save(cfg)
+        saved = json.loads(cfg.read_text(encoding="utf-8"))["companion"]
+        assert "update_mode" not in saved
+        reread = HubConfig.load(cfg).companion
+        assert (reread.update_mode, reread.load_problem) == ("auto", ""), (
+            "нет поля — правило вывода, а не застрявший notify")
+
     def test_missing_file_is_auto_without_problem(self, tmp_path):
         cfg = HubConfig.load(tmp_path / "нет-файла.json").companion
         assert (cfg.update_mode, cfg.load_problem) == ("auto", "")

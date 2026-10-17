@@ -3083,6 +3083,7 @@
     if (event.kind === "rollback_failed") return `Версия ${from} не запустилась, откатить её не удалось — переустановите BPMkit`;
     if (event.kind === "install_unverified") return `Автоматическую установку версии ${to} не удалось подтвердить${when} — проверьте установку BPMkit`;
     if (event.kind === "install_deferred") return `Установка версии ${to} отложена${when}: MCP-сервер был запущен`;
+    if (event.kind === "manual_rollback") return `Версия ${from} откачена вручную${when} — автоматически не ставится`;
     return "";
   }
 
@@ -3164,9 +3165,11 @@
     }
     const badEl = byId("upd-bad-versions");
     if (badEl) {
-      const bad = Array.isArray(rel.bad_versions) ? rel.bad_versions : [];
-      const failed = Object.keys(rel.auto_failures || {}).filter((v) => bad.indexOf(v) < 0);
-      const all = bad.concat(failed);
+      // Только то, что автоматика действительно не ставит: плохие версии и исчерпавшие
+      // лимит неудачных запусков (список считает сервер). Одна-две неудачи — не запрет.
+      const all = Array.isArray(rel.auto_blocked_versions)
+        ? rel.auto_blocked_versions
+        : (Array.isArray(rel.bad_versions) ? rel.bad_versions : []);
       badEl.hidden = all.length === 0;
       const textEl = byId("upd-bad-versions-text");
       if (textEl) textEl.textContent = all.length ? `Автоматически не ставятся: ${all.join(", ")}` : "";
@@ -5769,6 +5772,9 @@
         value = Math.round(amount * unit);
       } else {
         value = String(input.value || "").trim();
+        // Режим не выбран (настройки канала не прочитаны или в файле незнакомое
+        // значение — сервер его не отдаёт): не отправляем, файл сохранит как было.
+        if (field === "companion_update_mode" && !value) return;
       }
       const target = path.length === 1 ? companion : (companion[path[0]] = companion[path[0]] || {});
       target[path[path.length - 1]] = value;

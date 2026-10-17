@@ -128,7 +128,21 @@ def env(tmp_path, monkeypatch):
     # Маркер работающего процесса — машины прогона (живой BPMkit) — тестам не виден.
     monkeypatch.setattr(releases, "read_runtime_marker", lambda: None)
     monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
+    monkeypatch.setattr(releases.mcp_mutex, "pinned_server_running", lambda: False)
+    # Копия бинаря в кэше версий (вне каталога установки), из которой исполняется
+    # перенесённый сервер, — по образцу самопереноса поставки.
+    cache = tmp_path / "LocalAppData" / "BPMkit" / "run" / "1.3.19-0a1b2c3d" / "bpmkit.exe"
+    cache.parent.mkdir(parents=True)
+    cache.write_bytes(b"MZ stary 1.3.19 (kopiya)")
+    _CACHE["copy"] = str(cache)
     return state, ctx, binary, marker
+
+
+#: Путь копии в кэше версий текущего теста (кладёт фикстура `env`).
+_CACHE: dict = {}
+
+#: Настоящее чтение маркера процесса (фикстура `env` его глушит).
+_REAL_READ_RUNTIME_MARKER = releases.read_runtime_marker
 
 
 def _settings(**overrides) -> CompanionSettings:
@@ -604,17 +618,20 @@ def _relocating_install(binary, *, features=("self_relocate",), where="root"):
                         encoding="utf-8")
 
 
-#: Копия бинаря в кэше версий, из которой исполняется перенесённый сервер.
-CACHE_COPY = str(Path("cache") / "versions" / "1.3.19" / "bpmkit.exe")
+_UNSET = object()
 
 
-def _runtime(monkeypatch, *, relocated, pid=None, binary=CACHE_COPY, version="1.3.19",
-             started_at="2026-10-20T09:00:00Z"):
-    """Маркер работающего процесса: по умолчанию — ЖИВОЙ процесс (этот) из кэша версий."""
+def _runtime(monkeypatch, *, relocated, pid=None, binary="", version="1.3.19",
+             started_at="2026-10-20T09:00:00Z", relocated_binary=_UNSET):
+    """Маркер работающего процесса: по умолчанию — ЖИВОЙ процесс (этот); перенесённый —
+    из копии в кэше версий (`relocated_binary`), `binary` — установленный exe."""
+    copy = (_CACHE.get("copy", "") if relocated else "") if relocated_binary is _UNSET \
+        else relocated_binary
     monkeypatch.setattr(releases, "read_runtime_marker", lambda: {
         "version": version, "started_at": started_at,
         "pid": os.getpid() if pid is None else pid, "frozen": True,
-        "binary": binary, "relocated": relocated})
+        "binary": binary, "relocated": relocated,
+        "relocated_from": binary if relocated else "", "relocated_binary": copy})
 
 
 @pytest.mark.parametrize("where", ["root", "server"])
@@ -762,15 +779,34 @@ def test_marker_older_than_install_neither_confirms_nor_rolls_back(env):
     assert autoupdate.pending_record(state) is not None, "старый ok не подтверждает установку"
 
 
-def test_marker_attempts_started_before_install_are_not_counted(env):
-    """Попытки, начавшиеся до установки (first_attempt_at раньше applied_at), — не
-    доказательство двух неудачных стартов НОВОЙ установки: отката нет."""
+def test_marker_attempts_before_install_are_not_counted(env):
+    """Счётчик маркера этой версии в момент установки (смоук того же exe до неё)
+    запоминается: откат — только при двух попытках СВЕРХ него."""
     state, _ctx, binary, marker = env
     _broken_install(binary)
-    _pending(state, binary)
+    _pending(state, binary, swap_busy=True)
+    state.releases["auto"]["startup_attempts_at_install"] = 2
     _marker(marker, attempts=3, first="2026-10-20T10:00:00Z", last="2026-10-20T11:55:00Z")
 
-    assert autoupdate.maybe_rollback(state, now=NOW) is None
+    assert autoupdate.maybe_rollback(state, now=NOW) is None, "после установки — 1 попытка"
+
+    _marker(marker, attempts=4, first="2026-10-20T10:00:00Z", last="2026-10-20T11:55:00Z")
+    assert autoupdate.maybe_rollback(state, now=NOW)["decision"] == "rolled_back"
+
+
+def test_apply_remembers_startup_attempts_of_this_version(env, monkeypatch):
+    state, ctx, _binary, marker = env
+    _marker(marker, version="1.3.20", attempts=3, first="2026-10-20T09:00:00Z",
+            last="2026-10-20T09:10:00Z")
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    _run(state, ctx)
+
+    record = state.releases["auto"]
+    assert record["startup_attempts_at_install"] == 3
+    assert record["server_running"] is False
+    assert record["workdir"] == str(Path(ctx.workdir))
 
 
 def test_rollback_prefers_this_installs_backup_over_old(env):
@@ -802,12 +838,48 @@ def test_self_relocate_needs_live_process_running_from_cache_copy(env, monkeypat
     assert autoupdate.self_relocate_active(binary) is False, "процесс маркера не жив"
 
     monkeypatch.setattr(autoupdate, "_pid_alive", lambda pid: True)
-    _runtime(monkeypatch, relocated=True, binary=str(binary))
+    _runtime(monkeypatch, relocated=True, relocated_binary=str(binary))
     assert autoupdate.self_relocate_active(binary) is False, "исполняется из bpmkit.exe"
-    _runtime(monkeypatch, relocated=True, binary="")
+    inside = binary.parent / "cache" / "bpmkit.exe"
+    inside.parent.mkdir()
+    inside.write_bytes(b"MZ")
+    _runtime(monkeypatch, relocated=True, relocated_binary=str(inside))
+    assert autoupdate.self_relocate_active(binary) is False, "копия в каталоге установки"
+    _runtime(monkeypatch, relocated=True, relocated_binary="")
     assert autoupdate.self_relocate_active(binary) is False, "откуда — не известно"
+    _runtime(monkeypatch, relocated=True,
+             relocated_binary=str(binary.parent.parent.parent / "net" / "bpmkit.exe"))
+    assert autoupdate.self_relocate_active(binary) is False, "копии на диске нет"
     _runtime(monkeypatch, relocated=True)
     assert autoupdate.self_relocate_active(binary) is True
+    monkeypatch.setattr(releases.mcp_mutex, "pinned_server_running", lambda: True)
+    assert autoupdate.self_relocate_active(binary) is False, (
+        "виден BPMkitMcpServerPinned — второй сервер держит сам bpmkit.exe")
+
+
+def test_self_relocate_contract_with_copy_marker_sample(env, monkeypatch, tmp_path):
+    """Контракт с самопереносом поставки: образец `mcp_runtime.json`, который пишет копия
+    (`binary` — установленный exe, путь копии — `relocated_binary`)."""
+    _state, _ctx, binary, _marker = env
+    _relocating_install(binary)
+    marker = tmp_path / "mcp_runtime.json"
+    sample = {"version": "1.3.19", "started_at": "2026-10-20T09:00:00Z", "pid": os.getpid(),
+              "frozen": True, "binary": str(binary), "relocated": True,
+              "relocated_from": str(binary), "relocated_binary": _CACHE["copy"]}
+    marker.write_text(json.dumps(sample, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(releases, "read_runtime_marker", _REAL_READ_RUNTIME_MARKER)
+    monkeypatch.setattr(releases, "_runtime_marker_path", lambda: marker)
+
+    read = releases.read_runtime_marker()
+    assert (read["binary"], read["relocated_binary"], read["relocated_from"]) == (
+        str(binary), _CACHE["copy"], str(binary)), "поле relocated_binary не выбрасывается"
+    assert autoupdate.self_relocate_active(binary) is True
+
+    # Обычный процесс (прежние пять полей) — не самоперенос.
+    marker.write_text(json.dumps({key: sample[key] for key in (
+        "version", "started_at", "pid", "frozen", "binary")}), encoding="utf-8")
+    assert releases.read_runtime_marker()["relocated_binary"] == ""
+    assert autoupdate.self_relocate_active(binary) is False
 
 
 # --------------------------------------------------------------------------------------
@@ -892,23 +964,46 @@ def test_unknown_update_mode_or_broken_config_does_not_install(env, monkeypatch,
         assert [c[0] for c in calls.log] == ["stage_installer"], "подготовка — как в notify"
 
 
-def test_rollback_skipped_while_this_version_runs(env, monkeypatch):
-    """Маркер старта без `ok` (запись не удалась), но процесс этой версии жив и запущен
-    после установки — откат не делается, установка подтверждается."""
+def test_live_process_postpones_rollback_but_never_confirms(env, monkeypatch):
+    """Две попытки без `ok`, процесс этой версии жив (возможно, повис до рабочего старта):
+    откат откладывается, но установка НЕ подтверждается; процесс завершился — откат."""
     state, _ctx, binary, marker = env
     old = binary.with_name(binary.name + releases.OLD_SUFFIX)
     old.write_bytes(binary.read_bytes())
-    binary.write_bytes(b"MZ rabochij 1.3.20")
+    binary.write_bytes(b"MZ visit 1.3.20")
+    (binary.parent.parent / "manifest.json").write_text(json.dumps({"version": "1.3.20"}),
+                                                       encoding="utf-8")
     _pending(state, binary, swap_busy=True)
     _marker(marker, attempts=2, ok=False, last="2026-10-20T11:55:00Z")
     monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
     _runtime(monkeypatch, relocated=False, version="1.3.20", binary=str(binary),
              started_at="2026-10-20T11:55:00Z")
 
-    assert autoupdate.maybe_rollback(state, now=NOW) is None
-    assert binary.read_bytes() == b"MZ rabochij 1.3.20"
+    assert autoupdate.maybe_rollback(state, now=NOW) is None, "жив — откат отложен"
+    assert autoupdate.reconcile_pending(state, now=NOW) is None, "живость — не ok"
+    assert autoupdate.pending_record(state) is not None
     assert not state.releases.get("bad_versions")
-    assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "confirmed"
+
+    _runtime(monkeypatch, relocated=False, version="1.3.20", binary=str(binary),
+             started_at="2026-10-20T11:55:00Z", pid=999999)
+    monkeypatch.setattr(autoupdate, "_pid_alive", lambda pid: False)
+    assert autoupdate.maybe_rollback(state, now=NOW)["decision"] == "rolled_back"
+
+
+def test_liveness_without_ok_never_confirms(env, monkeypatch):
+    """Попытка 1 без `ok`, мьютекс держит какой-то сервер, маркер процесса этой версии —
+    подтверждения нет: подтверждает только явный `ok` маркера старта."""
+    state, _ctx, binary, marker = env
+    (binary.parent.parent / "manifest.json").write_text(json.dumps({"version": "1.3.20"}),
+                                                       encoding="utf-8")
+    _pending(state, binary)
+    _marker(marker, attempts=1, ok=False, last="2026-10-20T11:50:00Z")
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+    for pid in (999999, None):
+        _runtime(monkeypatch, relocated=False, version="1.3.20", binary=str(binary),
+                 started_at="2026-10-20T11:50:00Z", pid=pid)
+        assert autoupdate.reconcile_pending(state, now=NOW) is None
+        assert autoupdate.pending_record(state) is not None
 
 
 def test_rollback_does_not_use_inconsistent_old(env):
@@ -1050,18 +1145,82 @@ def test_server_started_while_downloading_defers_install(env, monkeypatch):
     assert not state.releases.get("auto_failures")
 
 
-def test_installer_refused_by_running_server_is_not_a_version_failure(env, monkeypatch):
+#: Хвост журнала установщика BPMkit при отказе из-за запущенного MCP-сервера (образец).
+_INSTALLER_REFUSED_LOG = (
+    "2026-10-20 11:00:02.000   BPMkit: обнаружены запущенные компоненты (MCP-сервер "
+    "(мьютекс BPMkitMcpServer)) -- разбор гейта.\n"
+    "2026-10-20 11:00:02.100   BPMkit: установка отменена ДО копирования файлов -- "
+    "закройте приложение с BPMkit.\n")
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "cp1251"])
+def test_installer_refused_by_running_server_is_not_a_version_failure(env, monkeypatch,
+                                                                      tmp_path, encoding):
+    """Отказ установщика из-за сервера — по его журналу: ожидание снимается без счёта."""
     state, _ctx, binary, _m = env
+    log = tmp_path / "installer_setup.log"
+    log.write_bytes(("Log opened.\n" * 50 + _INSTALLER_REFUSED_LOG).encode(encoding))
     _pending(state, binary)
-    state.releases["installer_launched"] = {"pid": 0, "log": "setup.log",
+    state.releases["installer_launched"] = {"pid": 0, "log": str(log),
                                             "launched_at": "2026-10-20T11:00:00Z"}
-    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
 
     result = autoupdate.reconcile_pending(state, now=NOW)
 
     assert result["kind"] == "install_deferred"
     assert not state.releases.get("auto_failures")
     assert state.releases["auto"] is None
+
+
+def test_server_visible_at_launch_without_swapbusy_is_deferred(env):
+    state, _ctx, binary, _m = env
+    _pending(state, binary)
+    state.releases["auto"]["server_running"] = True
+    state.releases["installer_launched"] = {"pid": 0, "log": "net.log",
+                                            "launched_at": "2026-10-20T11:00:00Z"}
+
+    assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "install_deferred"
+
+
+def test_mutex_at_reconcile_time_does_not_excuse_failed_install(env, monkeypatch, tmp_path):
+    """Сервер поднялся уже после работы установщика: мьютекс в момент сверки ничего не
+    доказывает — неудача версии считается."""
+    state, _ctx, binary, _m = env
+    log = tmp_path / "installer_setup.log"
+    log.write_text("Log opened.\nInstallation process failed: disk full\n", encoding="utf-8")
+    _pending(state, binary)
+    state.releases["installer_launched"] = {"pid": 0, "log": str(log),
+                                            "launched_at": "2026-10-20T11:00:00Z"}
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+
+    assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "install_failed"
+    assert state.releases["auto_failures"] == {"1.3.20": 1}
+
+
+def test_rollback_and_clear_wait_for_machine_lock(env):
+    """Автооткат и снятие запрета — под тем же замком машины, что и установка."""
+    from standkit_companion.errors import ChannelError as _ChannelError
+
+    state, ctx, binary, marker = env
+    _broken_install(binary)
+    _pending(state, binary, swap_busy=True)
+    state.releases["auto"]["workdir"] = ctx.workdir
+    state.releases["bad_versions"] = ["1.3.18"]
+    state.save()
+    _marker(marker)
+    lock = Path(ctx.workdir) / autoupdate.LOCK_FILENAME
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(json.dumps({"pid": os.getpid(), "at": NOW}), encoding="utf-8")
+
+    payload = autoupdate.maybe_rollback(state, now=NOW)
+    assert (payload["decision"], payload["reason"]) == ("waiting", "busy_other_process")
+    assert binary.read_bytes() == b"MZ slomannyj 1.3.20", "под чужим замком не откатываем"
+    with pytest.raises(_ChannelError):
+        autoupdate.clear_bad_versions(state)
+    assert state.releases["bad_versions"] == ["1.3.18"]
+
+    lock.unlink()
+    assert autoupdate.maybe_rollback(state, now=NOW)["decision"] == "rolled_back"
+    assert not lock.exists(), "свой замок снимается"
 
 
 def test_pending_with_unreadable_manifest_is_not_eternal(env):

@@ -84,6 +84,7 @@ __all__ = [
     "build_runner",
     "status_snapshot",
     "available_actions",
+    "auto_blocked_versions",
 ]
 
 #: Имена циклов. Совпадают с именами секций состояния (`state.py`) и полей настроек
@@ -228,6 +229,23 @@ def _stable_seed(config_path) -> int:
     return int.from_bytes(hashlib.sha256(raw).digest()[:8], "big")
 
 
+def auto_blocked_versions(rel: dict) -> list:
+    """Версии, которые автоматика не ставит: плохие (откат автоматикой или человеком) и
+    исчерпавшие `autoupdate.INSTALL_FAILURES_LIMIT` неудачных запусков установщика.
+    Одна-две неудачи — ещё не запрет (автоматика попробует снова), их здесь нет."""
+    blocked = [str(item) for item in (rel.get("bad_versions") or [])]
+    failures = rel.get("auto_failures") or {}
+    if isinstance(failures, dict):
+        for version, count in failures.items():
+            try:
+                exhausted = int(count or 0) >= autoupdate.INSTALL_FAILURES_LIMIT
+            except (TypeError, ValueError):
+                exhausted = False
+            if exhausted and str(version) not in blocked:
+                blocked.append(str(version))
+    return blocked
+
+
 def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
     """Что сейчас разрешено дёрнуть руками — для кнопок UI и для `status()`.
 
@@ -262,8 +280,7 @@ def available_actions(settings, state: Optional[CompanionState] = None) -> dict:
     blocked_versions = False
     if state is not None:
         try:
-            blocked_versions = bool(state.releases.get("bad_versions")
-                                    or state.releases.get("auto_failures"))
+            blocked_versions = bool(auto_blocked_versions(state.releases))
         except (AttributeError, TypeError):
             blocked_versions = False
         try:
@@ -1091,6 +1108,9 @@ class CompanionRunner:
             raise ValueError(f"неизвестное действие канала: {action!r}")
         settings = self.settings()
         with self._run_lock:
+            # Общие ключи состояния — с диска: действие человека (откат, установка) должно
+            # видеть, что уже сделал CLI из задачи Планировщика.
+            self._sync_auto_state()
             if action == "auto_update":
                 return self._auto_update(settings, trigger=str(trigger or "manual"))
             if action == "clear_bad_versions":
@@ -1215,6 +1235,17 @@ class CompanionRunner:
         return cycle
 
     # -- статус ---------------------------------------------------------------------------
+    def _state_summary(self) -> dict:
+        """Сводка состояния + версии, которые автоматика не ставит (для окна «Обновления»)."""
+        summary = self._state.summary()
+        block = summary.get("releases")
+        if isinstance(block, dict):
+            try:
+                block["auto_blocked_versions"] = auto_blocked_versions(self._state.releases)
+            except (AttributeError, TypeError):
+                block["auto_blocked_versions"] = []
+        return summary
+
     def status(self) -> dict:
         """Карточка канала для `/api/companion/status`, UI и CLI.
 
@@ -1268,7 +1299,7 @@ class CompanionRunner:
             # настройки канала не прочитаны (битый конфиг, незнакомый режим) —
             # автоматика ведёт себя как `notify`; окно «Обновления» говорит почему.
             "settings_problem": str(getattr(settings, "load_problem", "") or "") or None,
-            "state": self._state.summary(),
+            "state": self._state_summary(),
             "cycles": cycles,
             "context": self._context_status(settings),
             "actions": available_actions(settings, self._state),

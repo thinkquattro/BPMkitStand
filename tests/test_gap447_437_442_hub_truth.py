@@ -81,7 +81,7 @@ def test_read_runtime_marker_reads_valid_json(marker_path):
         "version": "1.1.90", "started_at": "2026-09-21T10:05:00Z",
         "pid": 4242, "frozen": True, "binary": "bpmkit.exe",
         # сервер до самопереноса поля не пишет — значит «не перенесён»
-        "relocated": False,
+        "relocated": False, "relocated_from": "", "relocated_binary": "",
     }
 
 

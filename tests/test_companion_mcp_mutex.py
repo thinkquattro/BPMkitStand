@@ -144,3 +144,29 @@ def test_non_windows_is_absent_even_for_automation(restore_platform, monkeypatch
     restore_platform("linux")
 
     assert mcp_mutex.server_mutex_exists(strict=True) is False
+
+
+def test_pinned_server_mutex_strict(restore_platform, monkeypatch):
+    """`BPMkitMcpServerPinned` (сервер, держащий сам bpmkit.exe): «нет» — только
+    ERROR_FILE_NOT_FOUND; «есть» и «не знаю» — работает."""
+    seen = []
+
+    def fake_open(name):
+        seen.append(name)
+        return 0
+
+    restore_platform("win32")
+    monkeypatch.setattr(mcp_mutex, "_win_open_mutex_handle", fake_open)
+    assert mcp_mutex.pinned_server_running() is False
+    assert seen == ["BPMkitMcpServerPinned"]
+
+    def broken(name):
+        raise OSError(6, "The handle is invalid")
+
+    monkeypatch.setattr(mcp_mutex, "_win_open_mutex_handle", broken)
+    assert mcp_mutex.pinned_server_running() is True
+    monkeypatch.setattr(mcp_mutex, "_win_open_mutex_handle", lambda name: 5)
+    assert mcp_mutex.pinned_server_running() is True
+    restore_platform("linux")
+    assert mcp_mutex.pinned_server_running() is False
+

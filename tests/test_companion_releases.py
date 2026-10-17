@@ -1059,6 +1059,37 @@ def test_manual_rollback_marks_version_bad_for_automation(env):
     assert state.releases["bad_versions"] == ["0.307.0"]
 
 
+def test_manual_rollback_of_pending_auto_install_releases_the_wait(env):
+    """Ручной откат версии, ждущей подтверждения автоустановки, снимает ожидание: иначе
+    автоматика вечно отвечала бы «ждём перезапуска» и не ставила следующие версии."""
+    state, ctx = env
+    client, _blob_bytes, _meta_dict = _client("0.307.0")
+    releases.stage(client, state, ctx)
+    releases.apply_staged(state, ctx)
+    state.releases["auto"] = {"applied_version": "0.307.0", "previous_version": "0.306.0",
+                              "binary": ctx.binary_path, "via": "exe",
+                              "applied_at": "2026-10-20T11:00:00Z", "confirmed_at": None}
+
+    releases.rollback(state, ctx)
+
+    assert state.releases["auto"] is None
+    event = state.releases["last_auto_event"]
+    assert (event["kind"], event["from"]) == ("manual_rollback", "0.307.0")
+
+
+def test_manual_rollback_of_other_version_keeps_auto_record(env):
+    state, ctx = env
+    client, _blob_bytes, _meta_dict = _client("0.307.0")
+    releases.stage(client, state, ctx)
+    releases.apply_staged(state, ctx)
+    record = {"applied_version": "0.308.0", "confirmed_at": None, "via": "installer"}
+    state.releases["auto"] = dict(record)
+
+    releases.rollback(state, ctx)
+
+    assert state.releases["auto"] == record
+
+
 def test_apply_staged_swap_busy_still_verifies_signature(env, monkeypatch):
     """`swap_busy` не выключатель проверки: подменённый в стейджинге файл не ставится."""
     state, ctx, _blob_bytes, old_bytes = _stage_for_swap(env)

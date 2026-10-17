@@ -751,7 +751,30 @@ def test_status_reports_unreadable_settings(tmp_path, monkeypatch):
     status = runner_obj.status()
 
     assert status["settings_problem"] == "settings_unreadable"
-    assert status["settings"]["update_mode"] == "notify"
+    assert "update_mode" not in status["settings"], (
+        "«не прочитали» не превращается в постоянный notify при записи")
+    assert runner_obj.settings().update_mode == "notify", "а действует — как notify"
+
+
+def test_status_lists_only_versions_automation_really_skips(tmp_path, monkeypatch):
+    """«Автоматически не ставятся» — плохие версии и исчерпавшие лимит неудач; одна-две
+    неудачи установщика — ещё не запрет."""
+    from standkit_companion import autoupdate
+
+    patch_cycles(monkeypatch, [])
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto"))
+    runner_obj._state.releases["bad_versions"] = ["1.2.1"]
+    runner_obj._state.releases["auto_failures"] = {
+        "1.2.2": 1, "1.2.3": autoupdate.INSTALL_FAILURES_LIMIT}
+    runner_obj._state.save()
+
+    status = runner_obj.status()
+
+    assert status["state"]["releases"]["auto_blocked_versions"] == ["1.2.1", "1.2.3"]
+    runner_obj._state.releases["bad_versions"] = []
+    runner_obj._state.releases["auto_failures"] = {"1.2.2": 1}
+    runner_obj._state.save()
+    assert runner_obj.status()["actions"]["clear_bad_versions"] is False
 
 
 def test_cli_clear_bad_versions(tmp_path, capsys):

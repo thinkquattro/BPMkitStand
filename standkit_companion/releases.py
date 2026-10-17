@@ -214,6 +214,16 @@ def compare_versions(a, b) -> int:
     return (va > vb) - (va < vb)
 
 
+def _same_version_text(a, b) -> bool:
+    """Одна и та же версия: числовые — сверкой версий, прочие — текстом."""
+    left, right = str(a or "").strip(), str(b or "").strip()
+    if not left or not right:
+        return False
+    if is_numeric_version(left) and is_numeric_version(right):
+        return compare_versions(left, right) == 0
+    return left == right
+
+
 def is_numeric_version(value) -> bool:
     """Годится ли строка как сегмент `{version}` в URL сервера.
 
@@ -424,10 +434,14 @@ def read_runtime_marker() -> Optional[dict]:
 
     Формат — контракт серверной ветки: `{"version": str, "started_at":
     ISO-8601 UTC с суффиксом "Z", "pid": int, "frozen": bool, "binary": str,
-    "relocated": bool}`. Запись без `version`/`started_at` считается отсутствующей:
-    остальные поля справочные, а без этих двух сверить нечего. `relocated` — процесс
-    исполняется из копии в кэше версий (самоперенос), а не из самого `bpmkit.exe`;
-    только строгое `true`, отсутствие поля (сервер до самопереноса) — `False`.
+    "relocated": bool, "relocated_from": str, "relocated_binary": str}`. Запись без
+    `version`/`started_at` считается отсутствующей: остальные поля справочные, а без этих
+    двух сверить нечего. `relocated` — процесс исполняется из копии в кэше версий
+    (самоперенос), а не из самого `bpmkit.exe`; только строгое `true`, отсутствие поля
+    (сервер до самопереноса) — `False`. У копии `binary` — путь УСТАНОВЛЕННОГО exe (от него
+    считают каталог установки кукбук и канал скиллов), путь самой копии — в
+    `relocated_binary`, установленного exe — в `relocated_from`; у обычного процесса эти два
+    поля пустые.
     """
     path = _runtime_marker_path()
     try:
@@ -448,6 +462,8 @@ def read_runtime_marker() -> Optional[dict]:
         "frozen": bool(data.get("frozen")),
         "binary": str(data.get("binary") or ""),
         "relocated": data.get("relocated") is True,
+        "relocated_from": str(data.get("relocated_from") or ""),
+        "relocated_binary": str(data.get("relocated_binary") or ""),
     }
 
 
@@ -2206,6 +2222,15 @@ def rollback(state, ctx, *, version: Optional[str] = None) -> dict:
                if compare_versions(item, rolled_from) != 0]
         bad.append(rolled_from)
         rel["bad_versions"] = bad[-BAD_VERSIONS_KEEP:]
+    # Откатили версию, поставленную автоматикой: её запись больше не ждёт
+    # подтверждения (иначе автоматика вечно отвечала бы «ждём перезапуска» и не ставила
+    # следующие версии), событие — для окна «Обновления».
+    auto = rel.get("auto")
+    if isinstance(auto, dict) and rolled_from and _same_version_text(
+            auto.get("applied_version"), rolled_from):
+        rel["auto"] = None
+        rel["last_auto_event"] = {"kind": "manual_rollback", "from": rolled_from,
+                                  "to": restored or None, "at": utc_now_iso()}
     message = (f"Возвращена версия {restored or 'предыдущая'}. Перезапустите Claude Desktop, "
                f"чтобы MCP-сервер запустился из вернувшегося файла.")
     state.mark("releases", "ok", message)

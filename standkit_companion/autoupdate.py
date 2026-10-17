@@ -60,18 +60,20 @@
 
 **Автооткат.** Сервер BPMkit пишет маркер старта `mcp_startup.json`
 (`{version, attempts, ok, first_attempt_at, last_attempt_at, ok_at}`) рядом с
-`mcp_runtime.json`. Маркер засчитывается, только если его метки ПОЗЖЕ автоустановки
-(`applied_at`): смоук того же exe до установки не доказывает ни старт, ни провал. Если
-версия маркера — последняя поставленная автоматикой, все попытки старта (не меньше двух)
-были после установки, рабочего старта (`ok`) не было и с последней попытки прошло не
-меньше двух минут (нет метки — отсчёт от последней записи маркера), `bpmkit.exe`
-переименовывается в `bpmkit.exe.bad`, а на место возвращается копия, снятая ЭТОЙ
-установкой; `bpmkit.exe.old` — только если копии нет, а установка шла с подменой
-занятого файла (иначе `.old` остался от прежней подмены, и откат на него вернул бы не ту
-версию). Процесс поставленной версии, живой и запущенный после установки (маркер
-`mcp_runtime.json` и мьютекс сервера), — рабочий старт: такой сервер не откатывается.
-Версия попадает в `releases.bad_versions` и больше автоматически не ставится (снять —
-`clear_bad_versions`: команда CLI и кнопка окна). Для отката не нужен лицензионный
+`mcp_runtime.json`. Установку подтверждает только явный `ok` маркера этой версии, позже
+автоустановки (`applied_at`); живость процесса — нет (он мог повиснуть до рабочего
+старта). Если версия маркера — последняя поставленная автоматикой, попыток старта сверх
+счётчика маркера в момент установки (маркер этой версии мог остаться от смоука того же
+exe) не меньше двух, последняя — после установки, рабочего старта (`ok`) не было и с
+последней попытки прошло не меньше двух минут (нет метки — отсчёт от последней записи
+маркера), `bpmkit.exe` переименовывается в `bpmkit.exe.bad`, а на место возвращается
+копия, снятая ЭТОЙ установкой; `bpmkit.exe.old` — только если копии нет, а установка шла с
+подменой занятого файла (иначе `.old` остался от прежней подмены, и откат на него вернул
+бы не ту версию). Пока жив процесс поставленной версии (маркер `mcp_runtime.json` этой
+версии, запущенный после установки, и живой `pid`), откат откладывается: файл держит он,
+а вердикт выносит его завершение. Откат — под замком машины. Версия попадает в
+`releases.bad_versions` и больше автоматически не ставится (снять — `clear_bad_versions`:
+кнопка окна и команда CLI). Для отката не нужен лицензионный
 контекст: сломанный бинарь — это и есть CLI, у которого контекст спрашивается, поэтому
 всё нужное для отката запоминается в момент установки.
 """
@@ -356,16 +358,35 @@ def _same_file(a, b) -> bool:
         return False
 
 
+def _is_within(path, root) -> bool:
+    """`path` лежит внутри каталога `root` (без учёта регистра на Windows)."""
+    try:
+        target = os.path.normcase(os.path.abspath(str(path)))
+        base = os.path.normcase(os.path.abspath(str(root)))
+        return os.path.commonpath([target, base]) == base
+    except (TypeError, ValueError, OSError):
+        return False
+
+
 def self_relocate_active(binary_path) -> bool:
     """Работающий сервер исполняется из копии (самоперенос) — `bpmkit.exe` никто не держит.
 
-    Все признаки обязательны: поставка умеет самоперенос (`manifest.json`:
-    `_meta["pro.bpmkit"]["features"]`, запасной путь — верхний `features`, содержит
-    `self_relocate`), работающий процесс это сделал (`mcp_runtime.json`:
-    `relocated: true`), процесс маркера жив (`pid`), и исполняется он НЕ из самого
-    `bpmkit.exe` (`binary` маркера — копия в кэше версий). Одного «умеет» мало — процесс,
-    запущенный из исходников или до обновления, исполняется из самого `bpmkit.exe`;
-    маркер умершего процесса ничего не говорит о том, кто держит файл сейчас.
+    Все признаки обязательны:
+
+    * поставка умеет самоперенос (`manifest.json`: `_meta["pro.bpmkit"]["features"]`,
+      запасной путь — верхний `features`, содержит `self_relocate`);
+    * работающий процесс это сделал: `mcp_runtime.json` — `relocated: true`, а
+      `relocated_binary` (путь копии; `binary` у копии — установленный exe) существует и
+      лежит НЕ в каталоге установки;
+    * процесс маркера жив (`pid`) — маркер умершего процесса ничего не говорит о том,
+      кто держит файл сейчас;
+    * не виден мьютекс `BPMkitMcpServerPinned` — его держит сервер, работающий НЕ из
+      копии (самоперенос выключен, откатился, проиграл гонку): второй хост с таким
+      сервером держит сам `bpmkit.exe` (строгий детект: «нет» — только
+      `ERROR_FILE_NOT_FOUND`).
+
+    Одного «умеет» мало — процесс, запущенный из исходников или до обновления, исполняется
+    из самого `bpmkit.exe`.
     """
     text = str(binary_path or "").strip()
     if not text:
@@ -375,10 +396,19 @@ def self_relocate_active(binary_path) -> bool:
     runtime = releases.read_runtime_marker()
     if not runtime or runtime.get("relocated") is not True:
         return False
+    copy = str(runtime.get("relocated_binary") or "").strip()
+    if not copy or _same_file(copy, text):
+        return False
+    if _is_within(copy, releases._install_root_for(Path(text))):
+        return False
+    try:
+        if not Path(copy).is_file():
+            return False
+    except OSError:
+        return False
     if not _pid_alive(runtime.get("pid")):
         return False
-    running_from = str(runtime.get("binary") or "").strip()
-    return bool(running_from) and not _same_file(running_from, text)
+    return not mcp_mutex.pinned_server_running()
 
 
 def install_dir_writable(binary_path) -> bool:
@@ -485,14 +515,51 @@ def _runtime_marker_confirms(record: dict, applied: str) -> bool:
     return _after_install(record, runtime.get("started_at"))
 
 
-def _live_process_confirms(record: dict, applied: str) -> bool:
-    """Поставленная версия РАБОТАЕТ прямо сейчас: маркер процесса этой версии моложе
-    установки и мьютекс сервера виден. Маркер старта без `ok` (запись не удалась, процесс
-    упал уже после рабочего старта) этого факта не отменяет: откатывать живой рабочий
-    сервер — хуже, чем не откатить."""
-    if not _runtime_marker_confirms(record, applied):
+def _live_process_of(record: dict, applied: str) -> bool:
+    """Процесс поставленной версии жив прямо сейчас: маркер `mcp_runtime.json` этой
+    версии, запущенный позже установки, и его `pid` жив.
+
+    Это НЕ подтверждение установки: процесс мог повиснуть, не дойдя до рабочего старта,
+    а мьютекс держит любой сервер. Живость только ОТКЛАДЫВАЕТ автооткат (живой процесс
+    держит файл, и вердикт выносит его завершение); подтверждает установку только явный
+    `ok` маркера старта этой версии.
+    """
+    runtime = releases.read_runtime_marker()
+    if runtime is None or not _same_version(runtime.get("version"), applied):
         return False
-    return mcp_mutex.server_mutex_exists()
+    if not _after_install(record, runtime.get("started_at")):
+        return False
+    return _pid_alive(runtime.get("pid"))
+
+
+#: Строки журнала установщика (`/LOG`), которыми он сообщает об отказе ДО копирования
+#: файлов из-за запущенного MCP-сервера (без `/SWAPBUSY`). Контракт с установщиком
+#: BPMkit: тихий режим не выбирает код выхода, различитель причины — журнал.
+INSTALLER_LOG_CANCELLED = "установка отменена ДО копирования файлов"
+INSTALLER_LOG_SERVER = "MCP-сервер (мьютекс"
+
+#: Сколько последних байт журнала установщика читать (причина отказа — в конце).
+_INSTALLER_LOG_TAIL = 256 * 1024
+
+
+def _installer_refused_by_server(log_path) -> bool:
+    """Установщик отказал, потому что работал MCP-сервер (по его журналу `/LOG`)."""
+    text = str(log_path or "").strip()
+    if not text:
+        return False
+    try:
+        with open(text, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - _INSTALLER_LOG_TAIL))
+            raw = fh.read()
+    except OSError:
+        return False
+    for encoding in ("utf-8", "utf-16", "cp1251"):
+        content = raw.decode(encoding, errors="ignore")
+        if INSTALLER_LOG_CANCELLED in content and INSTALLER_LOG_SERVER in content:
+            return True
+    return False
 
 
 def _confirm(state, record: dict, applied: str, at: str, *, via: str = "") -> dict:
@@ -531,12 +598,13 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
       снимается: при следующей проверке автоматика попробует снова (до
       `INSTALL_FAILURES_LIMIT` раз).
 
-    * маркер старта есть, но без `ok`, а процесс поставленной версии жив (маркер
-      `mcp_runtime.json` моложе установки, мьютекс сервера виден) — тоже подтверждение;
+    * живость процесса поставленной версии установку НЕ подтверждает (он мог
+      повиснуть до рабочего старта) — только явный `ok` маркера старта этой версии;
     * версия поставки на диске не читается дольше `PENDING_UNVERIFIED_SEC` —
       `install_unverified` (считается неудачей версии, ожидание не вечное);
-    * поставка осталась прежней, а сервер запущен и установщик шёл без `/SWAPBUSY` —
-      `install_deferred`: неудачей версии не считается, поставим в окно простоя.
+    * поставка осталась прежней, а установщик отказал из-за работающего сервера (его
+      журнал, или сервер был виден уже при запуске без `/SWAPBUSY`) — `install_deferred`:
+      неудачей версии не считается, поставим в окно простоя.
 
     Подтверждение установщиком записывает `releases.current` (сам установщик состояние
     канала не трогает). Возвращает `{"kind": "confirmed"|"install_failed"|
@@ -557,10 +625,6 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
         # Сервер без маркера старта (версия до него) — подтверждение по маркеру
         # работающего процесса: поставленная версия запустилась ПОСЛЕ установки. Иначе
         # ожидание не снялось бы никогда, и автоматика встала бы на первой же версии.
-        return _confirm(state, record, applied, at, via="runtime")
-    if marker is not None and _live_process_confirms(record, applied):
-        # Маркер старта есть, но без `ok` (запись не удалась), а процесс этой версии
-        # жив и запущен после установки — это рабочий старт.
         return _confirm(state, record, applied, at, via="runtime")
     if record.get("via") != "installer":
         return None
@@ -584,10 +648,13 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
                   f"было. Проверьте установку BPMkit."))
     if _same_version(on_disk, applied):
         return None
-    if mcp_mutex.server_mutex_exists(strict=True) and not record.get("swap_busy"):
-        # Установщик без `/SWAPBUSY` не смог заменить файл, который держит сервер,
-        # запущенный уже после решения «ставить», — это не неудача версии: ожидание
-        # снимается БЕЗ счёта, поставим в следующее окно простоя.
+    if _installer_refused_by_server(launched.get("log")) or (
+            record.get("server_running") is True and not record.get("swap_busy")):
+        # Установщик отказал из-за работающего MCP-сервера (его журнал говорит об этом
+        # прямо; или сервер был виден уже при запуске, а `/SWAPBUSY` не передавался) —
+        # это не неудача версии: ожидание снимается БЕЗ счёта, поставим в следующее окно
+        # простоя. Мьютекс В МОМЕНТ СВЕРКИ ничего не доказывает: сервер мог подняться уже
+        # после того, как установщик отработал (или не смог по другой причине).
         rel["auto"] = None
         _event(rel, "install_deferred", src=record.get("previous_version"), dst=applied,
                at=at, log=launched.get("log"))
@@ -651,11 +718,38 @@ def _rollback_source(record: dict, binary: Path, old: Path) -> Optional[Path]:
     return None
 
 
-def maybe_rollback(state, *, now=None, trigger: str = "") -> Optional[dict]:
-    """Откатить автоматически поставленную версию, если она не дошла до рабочего старта.
+def _lock_path(state, *, ctx=None, record: Optional[dict] = None) -> Path:
+    """Файл замка машины: рабочий каталог канала (`releases.companion_workdir`).
 
-    Лицензионный контекст не нужен (см. докстринг модуля). Возвращает исход
-    `rolled_back`/`waiting`/`skipped` либо `None`, если откатывать нечего.
+    Без контекста (автооткат, снятие запрета) — каталог, записанный установкой, иначе
+    `companion` рядом с файлом состояния (там же, где рабочий каталог по умолчанию).
+    """
+    if ctx is not None:
+        return releases.companion_workdir(ctx) / LOCK_FILENAME
+    workdir = str((record or {}).get("workdir") or "").strip()
+    if workdir:
+        return Path(workdir) / LOCK_FILENAME
+    return Path(state.path).parent / releases.COMPANION_DIRNAME / LOCK_FILENAME
+
+
+def _int(value) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rollback_due(state, moment) -> Optional[tuple]:
+    """`(record, applied)`, если поставленную версию пора откатывать, иначе `None`.
+
+    * маркер старта — этой версии и без `ok`;
+    * попыток старта ПОСЛЕ установки не меньше `ROLLBACK_MIN_ATTEMPTS`: счётчик маркера
+      минус его значение в момент установки (`startup_attempts_at_install`; маркер этой
+      версии мог остаться от смоука до неё); сервер начал счёт заново — сам счётчик;
+    * последняя попытка (нет метки — время записи маркера) позже установки и с неё прошло
+      не меньше `ROLLBACK_GRACE_SEC`;
+    * процесс этой версии не жив (`_live_process_of`): живой процесс держит файл, откат
+      откладывается до его завершения.
     """
     record = pending_record(state)
     if record is None:
@@ -666,29 +760,49 @@ def maybe_rollback(state, *, now=None, trigger: str = "") -> Optional[dict]:
         return None
     if marker["ok"]:
         return None
-    # Попытки засчитываются, только если ВСЕ они после установки: первая попытка раньше
-    # `applied_at` — это ещё и запуски до неё (смоук того же exe), отличить нельзя.
-    if not _after_install(record, marker.get("first_attempt_at")):
+    baseline = _int(record.get("startup_attempts_at_install"))
+    attempts = _int(marker["attempts"])
+    new_attempts = attempts - baseline if attempts >= baseline else attempts
+    if new_attempts < ROLLBACK_MIN_ATTEMPTS:
         return None
-    if marker["attempts"] < ROLLBACK_MIN_ATTEMPTS:
+    last = parse_iso(marker.get("last_attempt_at")) or parse_iso(marker.get("mtime"))
+    applied_at = parse_iso(record.get("applied_at"))
+    if last is None or applied_at is None or last <= applied_at:
         return None
-    moment = _aware(now)
-    # Пауза после последней попытки — всегда. Нет метки или мусор — отсчёт от
-    # последней записи маркера (сервер пишет его на каждой попытке), а не «паузы нет».
-    last = parse_iso(marker.get("last_attempt_at"))
-    if last is None:
-        stamps = [stamp for stamp in (parse_iso(marker.get("mtime")),
-                                      parse_iso(marker.get("first_attempt_at")))
-                  if stamp is not None]
-        last = max(stamps) if stamps else None
-    if last is None or (moment - last).total_seconds() < ROLLBACK_GRACE_SEC:
+    if (moment - last).total_seconds() < ROLLBACK_GRACE_SEC:
         return None
-    if _live_process_confirms(record, applied):
-        # Процесс этой версии жив и запущен после установки — рабочий старт был (запись
-        # `ok` в маркер просто не удалась). Откатывать работающий сервер нельзя;
-        # подтвердит `reconcile_pending`.
+    if _live_process_of(record, applied):
         return None
+    return record, applied
 
+
+def maybe_rollback(state, *, now=None, trigger: str = "") -> Optional[dict]:
+    """Откатить автоматически поставленную версию, если она не дошла до рабочего старта.
+
+    Лицензионный контекст не нужен (см. докстринг модуля). Откат — под замком машины
+    (тот же, что у установки): условия проверяются заново по свежему состоянию с диска.
+    Возвращает исход `rolled_back`/`waiting`/`skipped` либо `None`, если откатывать
+    нечего.
+    """
+    moment = _aware(now)
+    if _rollback_due(state, moment) is None:
+        return None
+    record = pending_record(state) or {}
+    with _MachineLock(_lock_path(state, record=record)) as lock:
+        if not lock.acquired:
+            return _payload(DECISION_WAITING, "busy_other_process",
+                            version=record.get("applied_version"),
+                            current=record.get("previous_version"), trigger=trigger)
+        _refresh_shared(state)
+        due = _rollback_due(state, moment)
+        if due is None:
+            return None
+        record, applied = due
+        return _rollback(state, record, applied, moment, trigger=trigger)
+
+
+def _rollback(state, record: dict, applied: str, moment, *, trigger: str) -> dict:
+    """Сам откат (под замком машины): `.bad`, источник, синхронизация поставки."""
     rel = state.releases
     at = _iso(moment)
     previous = str(record.get("previous_version") or "").strip()
@@ -773,8 +887,18 @@ def clear_bad_versions(state, *, version: Optional[str] = None) -> dict:
     Явное действие человека (CLI `clear-bad-versions`, кнопка окна «Обновления»): версия,
     помеченная плохой (откат после неудачного старта, ручной откат) или исчерпавшая
     `INSTALL_FAILURES_LIMIT`, снова может ставиться автоматически. `version` — снять
-    только её, иначе — все. Ничего не ставит само и сети не трогает.
+    только её, иначе — все. Ничего не ставит само и сети не трогает. Под замком машины:
+    иначе автоматика другого процесса могла бы записать свои ключи поверх.
     """
+    with _MachineLock(_lock_path(state)) as lock:
+        if not lock.acquired:
+            raise ChannelError(
+                "Автоматическое обновление сейчас выполняется другим процессом — "
+                "повторите через минуту", kind="local_io")
+        return _clear_bad_versions(state, version=version)
+
+
+def _clear_bad_versions(state, *, version: Optional[str]) -> dict:
     _refresh_shared(state)
     rel = state.releases
     wanted = str(version or "").strip()
@@ -1056,8 +1180,7 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
     if not policy["stage"]:
         return _remember(state, payload, at)
 
-    lock_path = releases.companion_workdir(ctx) / LOCK_FILENAME
-    with _MachineLock(lock_path) as lock:
+    with _MachineLock(_lock_path(state, ctx=ctx)) as lock:
         if not lock.acquired:
             return _remember(state, _payload(DECISION_WAITING, "busy_other_process",
                                              version=version, current=current,
@@ -1105,11 +1228,13 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
         return _remember(state, _apply(state, ctx, artifact, binary=binary,
                                        version=version, current=current,
                                        trigger=trigger, at=at, payload=payload,
-                                       swap_busy=relocated), at)
+                                       swap_busy=relocated,
+                                       server_running=server_running), at)
 
 
 def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
-           trigger: str, at: str, payload: dict, swap_busy: bool = False) -> dict:
+           trigger: str, at: str, payload: dict, swap_busy: bool = False,
+           server_running: bool = False) -> dict:
     """Установка подготовленного артефакта (под замком машины).
 
     `swap_busy` — только при самопереносе работающего сервера (`self_relocate_active`):
@@ -1126,6 +1251,12 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
     before_event = rel.get("last_auto_event")
     via = "installer" if artifact["kind"] == "installer" else "exe"
     backup = _backup_before_install(ctx, binary, current) if via == "installer" else None
+    # Счётчик маркера старта ЭТОЙ версии в момент установки: попытки сверх него — уже
+    # запуски установленного файла (маркер мог остаться от смоука того же exe).
+    marker = read_startup_marker()
+    attempts_before = (_int(marker["attempts"])
+                       if marker is not None and _same_version(marker["version"], version)
+                       else 0)
     rel["auto"] = {
         "applied_version": version,
         "previous_version": str(current or "") or None,
@@ -1137,6 +1268,12 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
         # `/SWAPBUSY` (или переименование пути «только exe») разрешён этой установке:
         # только тогда `bpmkit.exe.old` может быть прежней версией ОТ НЕЁ (откат).
         "swap_busy": bool(swap_busy),
+        # мьютекс сервера при запуске (только с самопереносом он бывает виден) — для
+        # разбора отказа установщика (`install_deferred`).
+        "server_running": bool(server_running),
+        "startup_attempts_at_install": attempts_before,
+        # каталог замка машины для автоотката (у него нет лицензионного контекста).
+        "workdir": str(releases.companion_workdir(ctx)),
         "confirmed_at": None,
     }
     _event(rel, "applied", src=current, dst=version, at=at, via=via, trigger=trigger or None,
