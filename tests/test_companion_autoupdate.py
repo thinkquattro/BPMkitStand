@@ -700,3 +700,29 @@ def test_exit_trigger_is_an_ordinary_pass_and_logged(env, monkeypatch):
     assert (payload["decision"], payload["trigger"]) == ("applied", "exit")
     assert state.releases["last_auto_event"]["trigger"] == "exit"
     assert state.releases["last_auto_decision"]["trigger"] == "exit"
+
+
+
+@pytest.mark.parametrize("manifest,expected", [
+    # основной путь: признак поставки в `_meta["pro.bpmkit"]` (верхний `features` ломает
+    # упаковку MCPB — её схема manifest строгая)
+    ({"_meta": {"pro.bpmkit": {"features": ["self_relocate"]}}}, True),
+    # запасной путь — верхнеуровневый `features`
+    ({"features": ["self_relocate"]}, True),
+    ({"_meta": {"pro.bpmkit": {"features": ["other"]}}, "features": ["self_relocate"]}, True),
+    # мусор и отсутствие — признака нет
+    ({"_meta": {"pro.bpmkit": {"features": "self_relocate"}}}, False),
+    ({"_meta": {"pro.bpmkit": {"features": {"self_relocate": True}}}}, False),
+    ({"_meta": {"pro.bpmkit": {}}}, False),
+    ({"_meta": {"pro.bpmkit": None}}, False),
+    ({"_meta": "мусор"}, False),
+    ({"features": "self_relocate"}, False),
+    ({"features": {"self_relocate": True}}, False),
+    ({"version": "1.3.19"}, False),
+])
+def test_self_relocate_feature_location_in_manifest(env, monkeypatch, manifest, expected):
+    _state, _ctx, binary, _marker = env
+    (binary.parent.parent / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _runtime(monkeypatch, relocated=True)
+
+    assert autoupdate.self_relocate_active(binary) is expected

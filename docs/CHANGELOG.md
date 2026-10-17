@@ -37,7 +37,7 @@
   готовит файл и отвечает `waiting / mcp_running` — живой процесс onefile-сборки после
   подмены своего exe ломается на ленивых импортах. Ставит — когда сервер не запущен
   (задача Планировщика, выход из хоста). **Самоперенос:** если поставка объявляет
-  `features: [self_relocate]` в `manifest.json`, а работающий процесс — `relocated: true`
+  `self_relocate` в `manifest.json` (`_meta["pro.bpmkit"]["features"]`), а работающий процесс — `relocated: true`
   в `mcp_runtime.json`, установщик получает ключ `/SWAPBUSY`, а путь «только exe» —
   `apply_staged(swap_busy=True)`: работающий бинарь переименовывается в `bpmkit.exe.old`,
   новый ложится на его имя (копия рядом с целью сверяется по sha256 до того, как тронут

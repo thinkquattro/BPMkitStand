@@ -20,9 +20,10 @@
    уже из ЧУЖОГО файла («Error -3 while decompressing», ложное «лицензия invalid»).
    Поэтому при видимом мьютексе сервера автоматика только готовит файл и отвечает
    `waiting / mcp_running`; ставит — когда сервер не запущен (задача Планировщика, выход
-   из хоста). Исключение — самоперенос: поставка объявляет `features: [self_relocate]` в
-   `manifest.json`, а работающий процесс — `relocated: true` в `mcp_runtime.json` (он
-   исполняется из копии в кэше версий, и `bpmkit.exe` никто не держит); тогда установщик
+   из хоста). Исключение — самоперенос: поставка объявляет `self_relocate` в
+   `manifest.json` (`_meta["pro.bpmkit"]["features"]`), а работающий процесс —
+   `relocated: true` в `mcp_runtime.json` (он исполняется из копии в кэше версий, и
+   `bpmkit.exe` никто не держит); тогда установщик
    получает `/SWAPBUSY` (путь «только exe» — `apply_staged(swap_busy=True)`). Без
    самопереноса `/SWAPBUSY` не передаётся никогда.
 
@@ -258,22 +259,44 @@ def rollout_for(rel: dict, version: Optional[str]) -> Optional[dict]:
     return dict(rollout)
 
 
-def _manifest_features(binary: Path) -> set:
-    """`features` из `manifest.json` поставки: рядом с бинарём или в корне установки.
+#: Пространство имён BPMkit в `_meta` манифеста поставки: верхнеуровневые ключи схема
+#: манифеста MCPB не допускает (упаковка падает), поэтому признаки поставки — здесь.
+MANIFEST_META_NAMESPACE = "pro.bpmkit"
 
-    Список строк или словарь «признак → истина»; всё прочее — пусто."""
+
+def _feature_list(value) -> Optional[set]:
+    """Список строк → множество признаков; всё, что не список, — `None` («признаков нет»)."""
+    if not isinstance(value, list):
+        return None
+    return {item.strip() for item in value if isinstance(item, str)}
+
+
+def _manifest_features(binary: Path) -> set:
+    """Признаки поставки из `manifest.json`: рядом с бинарём или в корне установки.
+
+    Основной путь — `_meta["pro.bpmkit"]["features"]` (список строк); запасной —
+    верхнеуровневый `features` (прежние сборки). Не список, нет ключа, не читается —
+    признаков нет: самоперенос — разрешение подменять работающий файл, и «не понял формат»
+    обязано означать «не разрешено».
+    """
     for candidate in (binary.parent / "manifest.json",
                       releases._install_root_for(binary) / "manifest.json"):
         try:
             data = json.loads(candidate.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
-        features = data.get("features") if isinstance(data, dict) else None
-        if isinstance(features, (list, tuple)):
-            return {str(item).strip() for item in features if isinstance(item, str)}
-        if isinstance(features, dict):
-            return {str(key).strip() for key, value in features.items() if value}
-        return set()
+        if not isinstance(data, dict):
+            return set()
+        meta = data.get("_meta")
+        ours = meta.get(MANIFEST_META_NAMESPACE) if isinstance(meta, dict) else None
+        found = set()
+        primary = _feature_list(ours.get("features")) if isinstance(ours, dict) else None
+        if primary:
+            found |= primary
+        fallback = _feature_list(data.get("features"))
+        if fallback:
+            found |= fallback
+        return found
     return set()
 
 
@@ -281,7 +304,8 @@ def self_relocate_active(binary_path) -> bool:
     """Работающий сервер исполняется из копии (самоперенос) — `bpmkit.exe` никто не держит.
 
     Оба признака обязательны: поставка умеет самоперенос (`manifest.json`:
-    `features` содержит `self_relocate`) И работающий процесс это сделал
+    `_meta["pro.bpmkit"]["features"]`, запасной путь — верхний `features`, содержит
+    `self_relocate`) И работающий процесс это сделал
     (`mcp_runtime.json`: `relocated: true`). Одного «умеет» мало — процесс, запущенный из
     исходников или до обновления, исполняется из самого `bpmkit.exe`.
     """
