@@ -102,3 +102,71 @@ def test_valid_handle_means_mutex_found(restore_platform, monkeypatch):
     monkeypatch.setattr(mcp_mutex, "_win_open_mutex_handle", lambda name: 777)
 
     assert mcp_mutex.server_mutex_exists() is True
+
+
+# ======================================================================================
+# 4. «Мьютекса нет» — только ERROR_FILE_NOT_FOUND; «не знаю» для автоматики — «есть»
+# ======================================================================================
+def test_access_denied_means_mutex_exists(restore_platform, monkeypatch):
+    """`ERROR_ACCESS_DENIED`: объект есть, открыть нельзя — это «сервер запущен»."""
+    def denied(name):
+        raise OSError(5, "Access is denied")
+
+    restore_platform("win32")
+    monkeypatch.setattr(mcp_mutex, "_win_open_mutex_handle", denied)
+
+    assert mcp_mutex.server_mutex_state() == mcp_mutex.MUTEX_PRESENT
+    assert mcp_mutex.server_mutex_exists() is True
+
+
+def test_unknown_failure_is_absent_for_buttons_and_present_for_automation(restore_platform,
+                                                                         monkeypatch):
+    def broken(name):
+        raise OSError(6, "The handle is invalid")
+
+    restore_platform("win32")
+    monkeypatch.setattr(mcp_mutex, "_win_open_mutex_handle", broken)
+
+    assert mcp_mutex.server_mutex_state() == mcp_mutex.MUTEX_UNKNOWN
+    assert mcp_mutex.server_mutex_exists() is False, "ручная кнопка — как прежде"
+    assert mcp_mutex.server_mutex_exists(strict=True) is True, "автоматика ждёт"
+
+
+def test_not_found_is_absent_even_for_automation(restore_platform, monkeypatch):
+    restore_platform("win32")
+    monkeypatch.setattr(mcp_mutex, "_win_open_mutex_handle", lambda name: 0)
+
+    assert mcp_mutex.server_mutex_state() == mcp_mutex.MUTEX_ABSENT
+    assert mcp_mutex.server_mutex_exists(strict=True) is False
+
+
+def test_non_windows_is_absent_even_for_automation(restore_platform, monkeypatch):
+    restore_platform("linux")
+
+    assert mcp_mutex.server_mutex_exists(strict=True) is False
+
+
+def test_pinned_server_mutex_strict(restore_platform, monkeypatch):
+    """`BPMkitMcpServerPinned` (сервер, держащий сам bpmkit.exe): «нет» — только
+    ERROR_FILE_NOT_FOUND; «есть» и «не знаю» — работает."""
+    seen = []
+
+    def fake_open(name):
+        seen.append(name)
+        return 0
+
+    restore_platform("win32")
+    monkeypatch.setattr(mcp_mutex, "_win_open_mutex_handle", fake_open)
+    assert mcp_mutex.pinned_server_running() is False
+    assert seen == ["BPMkitMcpServerPinned"]
+
+    def broken(name):
+        raise OSError(6, "The handle is invalid")
+
+    monkeypatch.setattr(mcp_mutex, "_win_open_mutex_handle", broken)
+    assert mcp_mutex.pinned_server_running() is True
+    monkeypatch.setattr(mcp_mutex, "_win_open_mutex_handle", lambda name: 5)
+    assert mcp_mutex.pinned_server_running() is True
+    restore_platform("linux")
+    assert mcp_mutex.pinned_server_running() is False
+

@@ -80,7 +80,18 @@ def test_read_runtime_marker_reads_valid_json(marker_path):
     assert releases.read_runtime_marker() == {
         "version": "1.1.90", "started_at": "2026-09-21T10:05:00Z",
         "pid": 4242, "frozen": True, "binary": "bpmkit.exe",
+        # сервер до самопереноса поля не пишет — значит «не перенесён»
+        "relocated": False, "relocated_from": "", "relocated_binary": "",
     }
+
+
+def test_read_runtime_marker_relocated_only_strict_true(marker_path):
+    """`relocated` — признак самопереноса: только строгое `true`."""
+    for raw, expected in ((True, True), ("true", False), (1, False)):
+        marker_path.write_text(json.dumps({
+            "version": "1.3.20", "started_at": "2026-10-17T10:00:00Z", "pid": 1,
+            "frozen": True, "binary": "bpmkit.exe", "relocated": raw}), encoding="utf-8")
+        assert releases.read_runtime_marker()["relocated"] is expected, raw
 
 
 def test_read_runtime_marker_broken_json_is_treated_as_absent(marker_path):

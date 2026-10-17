@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import sys
 from pathlib import Path
 
 import pytest
@@ -290,7 +291,7 @@ def test_apply_self_update_spawns_helper_with_correct_flags(env, monkeypatch):
 
     spawned = {}
 
-    def _fake_spawn_hidden(cmd, cwd, log_path):
+    def _fake_spawn_hidden(cmd, cwd, log_path, env=None):
         spawned["cmd"] = list(cmd)
         return 9999
 
@@ -346,3 +347,41 @@ def test_apply_self_update_rechecks_kind_before_launch(env, monkeypatch):
         hub_channel.apply_self_update(state, ctx)
     assert excinfo.value.kind == "artifact_kind_mismatch"
     assert called["spawn"] is False
+
+
+
+@pytest.mark.parametrize("frozen", [True, False])
+def test_apply_self_update_helper_detaches_from_frozen_parent_environment(env, monkeypatch,
+                                                                          frozen):
+    """Помощник самообновления переживает диспетчер (он ждёт его выхода): переменные
+    загрузчика PyInstaller frozen-диспетчера ему не передаются,
+    `PYINSTALLER_RESET_ENVIRONMENT=1` — передаётся (`independent_child_env`)."""
+    state, ctx = env
+    blob = _blob("0.14.2")
+    filename = "bpmkit-hub-0.14.2.exe"
+    client = FakeClient(_hub_meta("0.14.2", blob, filename=filename), blob,
+                        sidecar=_hub_sidecar(filename, blob))
+    hub_channel.stage_hub(client, state, ctx, version="0.14.2")
+    monkeypatch.setattr(hub_channel.sys, "executable", str(Path(ctx.binary_path)))
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", r"C:\BPMkit\BPMkit-hub.exe")
+    monkeypatch.setenv("_MEIPASS2", r"C:\Temp\_MEI2")
+    if frozen:
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+    else:
+        monkeypatch.delattr(sys, "frozen", raising=False)
+    captured = {}
+
+    def _fake_spawn_hidden(cmd, cwd, log_path, env=None):
+        captured["env"] = env
+        return 9998
+
+    monkeypatch.setattr(hub_channel, "spawn_hidden", _fake_spawn_hidden)
+
+    hub_channel.apply_self_update(state, ctx)
+
+    if frozen:
+        child = captured["env"]
+        assert child["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+        assert "_PYI_ARCHIVE_FILE" not in child and "_MEIPASS2" not in child
+    else:
+        assert captured["env"] is None

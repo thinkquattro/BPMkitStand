@@ -44,9 +44,11 @@
 **Никакого «тихо обновлено».** Подмена файла НЕ перезапускает работающий MCP-сервер (хост
 не поднимает его заново при перезапуске плагина), поэтому после успешного `apply_staged`
 обязательно выставляется `state.releases["restart_required"] = True` и человекочитаемое
-«перезапустите Claude Desktop». Автоматическим может быть только `stage` (по настройке
-`companion.auto_stage_release`); `apply_staged` вызывается исключительно явным действием
-человека из CLI/UI.
+«перезапустите Claude Desktop». Применение (`apply_staged`, `apply_installer`) вызывают
+только явное действие человека из CLI/UI и автоматическое обновление `autoupdate.py` —
+и последнее только в режиме обновлений `auto` (`companion.update_mode`), выбранном
+пользователем или оставленном им по умолчанию, и только для подписанного артефакта.
+В режиме `notify` автоматика доходит до `stage`, в `off` — не проверяет вовсе.
 
 **Куда пишем.** Рабочий каталог — `<bpmkit_config_dir>/companion` (`%APPDATA%\\BPMkit\\companion`
 на Windows), а НЕ `package_root`: поставка MCP лежит в `Program Files`, запись туда требует
@@ -75,13 +77,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
 
 from standkit.registry import bpmkit_config_dir
-from standkit.platform import ProcessError, is_alive, spawn_hidden
+from standkit.platform import ProcessError, independent_child_env, is_alive, spawn_hidden
 
 from . import fsutil, mcp_mutex, signature
 from .backend import CONTENT_PREFIX
@@ -113,6 +117,11 @@ __all__ = [
     "staged_installer_info",
     "installer_status",
     "INSTALLER_ELEVATION_WINERROR",
+    "SWAPBUSY_FLAG",
+    "OLD_SUFFIX",
+    "BAD_SUFFIX",
+    "parse_rollout",
+    "manifest_version",
 ]
 
 #: Подкаталог скачанного, но ещё не применённого бинаря.
@@ -205,6 +214,16 @@ def compare_versions(a, b) -> int:
     return (va > vb) - (va < vb)
 
 
+def _same_version_text(a, b) -> bool:
+    """Одна и та же версия: числовые — сверкой версий, прочие — текстом."""
+    left, right = str(a or "").strip(), str(b or "").strip()
+    if not left or not right:
+        return False
+    if is_numeric_version(left) and is_numeric_version(right):
+        return compare_versions(left, right) == 0
+    return left == right
+
+
 def is_numeric_version(value) -> bool:
     """Годится ли строка как сегмент `{version}` в URL сервера.
 
@@ -290,6 +309,23 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
+def manifest_version(binary) -> Optional[str]:
+    """Версия поставки на диске по `manifest.json` корня установки (его пишет установщик,
+    а подмена «только exe» и откат синхронизируют — `_sync_install_companions`).
+    Нет файла, не читается, без версии — `None`."""
+    text = str(binary or "").strip()
+    if not text:
+        return None
+    manifest = _install_root_for(Path(text)) / "manifest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return str(data.get("version") or "").strip() or None
+
+
 def _current_version(state, ctx) -> Optional[str]:
     """Версия, относительно которой считается «есть ли обновление».
 
@@ -297,10 +333,19 @@ def _current_version(state, ctx) -> Optional[str]:
     уже новый, а РАБОТАЮЩИЙ MCP (который и отвечает на `companion-context`) до перезапуска
     продолжает докладывать старую версию. Взять её — значит на каждом тике заново
     предлагать уже установленное обновление и качать его повторно.
+
+    Состояние, в свою очередь, знает только о подменах, сделанных каналом. Установщик
+    (запущенный автоматикой, кнопкой или человеком вручную) пишет версию в `manifest.json`
+    поставки, а не в состояние, — поэтому версия поставки на диске, если она НОВЕЕ
+    записанной, главнее: иначе уже установленная версия ставилась бы снова и снова.
     """
     current = (state.releases.get("current") or {}).get("version")
-    text = str(current or getattr(ctx, "mcp_version", "") or "").strip()
-    return text or None
+    text = str(current or getattr(ctx, "mcp_version", "") or "").strip() or None
+    on_disk = manifest_version(getattr(ctx, "binary_path", "") or "")
+    if on_disk and is_numeric_version(on_disk) and (
+            not text or not is_numeric_version(text) or compare_versions(on_disk, text) > 0):
+        return on_disk
+    return text
 
 
 def _fetch_meta(client, target: str) -> dict:
@@ -388,9 +433,15 @@ def read_runtime_marker() -> Optional[dict]:
     «какая версия реально работаетһ сейчас нечем).
 
     Формат — контракт серверной ветки: `{"version": str, "started_at":
-    ISO-8601 UTC с суффиксом "Z", "pid": int, "frozen": bool, "binary": str}`. Запись без
+    ISO-8601 UTC с суффиксом "Z", "pid": int, "frozen": bool, "binary": str,
+    "relocated": bool, "relocated_from": str, "relocated_binary": str}`. Запись без
     `version`/`started_at` считается отсутствующей: остальные поля справочные, а без этих
-    двух сверить нечего.
+    двух сверить нечего. `relocated` — процесс исполняется из копии в кэше версий
+    (самоперенос), а не из самого `bpmkit.exe`; только строгое `true`, отсутствие поля
+    (сервер до самопереноса) — `False`. У копии `binary` — путь УСТАНОВЛЕННОГО exe (от него
+    считают каталог установки кукбук и канал скиллов), путь самой копии — в
+    `relocated_binary`, установленного exe — в `relocated_from`; у обычного процесса эти два
+    поля пустые.
     """
     path = _runtime_marker_path()
     try:
@@ -410,6 +461,9 @@ def read_runtime_marker() -> Optional[dict]:
         "pid": data.get("pid"),
         "frozen": bool(data.get("frozen")),
         "binary": str(data.get("binary") or ""),
+        "relocated": data.get("relocated") is True,
+        "relocated_from": str(data.get("relocated_from") or ""),
+        "relocated_binary": str(data.get("relocated_binary") or ""),
     }
 
 
@@ -488,6 +542,12 @@ def _update_release_notes(state, client, current_version: Optional[str]) -> None
     """
     rel = state.releases
     params = {"current": current_version} if current_version else None
+    # Раскатка — единственное поле этого запроса, которое решает, а не информирует:
+    # по нему автоматическое обновление ставит или ждёт. Поэтому, в отличие от нотсов,
+    # прошлое значение НЕ переживает неудачный запрос: «не узнали» — это `None`, а не
+    # вчерашнее «пауза снята».
+    rel["rollout"] = None
+    rel["rollout_version"] = None
     try:
         payload, _headers = client.get_json(_VERSION_INFO_PATH, params=params,
                                             authorized=False)
@@ -495,6 +555,8 @@ def _update_release_notes(state, client, current_version: Optional[str]) -> None
         return
     if not isinstance(payload, dict):
         return
+    rel["rollout"] = parse_rollout(payload.get("rollout"))
+    rel["rollout_version"] = str(payload.get("latest") or "").strip() or None
     notes = payload.get("release_notes")
     issues = payload.get("known_issues")
     rel["release_notes_version"] = str(payload.get("latest") or "").strip() or None
@@ -508,6 +570,36 @@ def _update_release_notes(state, client, current_version: Optional[str]) -> None
     # бэкендом, который поля не пришлёт вовсе). `bool(1)`/`bool("false")` здесь дали
     # бы `True` на мусоре — ровно то, чего контракт запрещает.
     rel["requires_installer"] = payload.get("requires_installer") is True
+
+
+def _optional_iso(value) -> Optional[str]:
+    """Метка времени ISO-8601 из ответа издателя или `None` (мусор, пусто, не строка)."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 64:
+        return None
+    from datetime import datetime
+
+    text = value.strip()
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return text
+
+
+def parse_rollout(raw) -> dict:
+    """Поле `rollout` ответа `GET /v1/version/latest` → `{paused, published_at, stable_after}`.
+
+    Контракт бэкенда: поле есть всегда, мусор и отсутствие означают «паузы нет, сроков
+    нет». Пауза — только строгое `True` (та же строгость типа, что у
+    `requires_installer`): `"true"`/`1` от сломанного издателя паузой не считаются, и
+    наоборот — не выдумываем паузу там, где её не ставили.
+    """
+    block = raw if isinstance(raw, dict) else {}
+    return {
+        "paused": block.get("paused") is True,
+        "published_at": _optional_iso(block.get("published_at")),
+        "stable_after": _optional_iso(block.get("stable_after")),
+    }
 
 
 def _flagged_version_requires_installer(rel: dict, version: str) -> bool:
@@ -1240,12 +1332,28 @@ def _ensure_artifact_applicable(src: Path, dest: Path) -> None:
         )
 
 
-def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
-    """Подменить бинарь MCP подготовленным. Только по ЯВНОЙ команде человека.
+def apply_staged(state, ctx, *, target: Optional[str] = None,
+                 swap_busy: bool = False) -> dict:
+    """Подменить бинарь MCP подготовленным. Зовут явная команда человека (CLI/UI) и
+    автоматическое обновление в режиме `auto` (`autoupdate.py`) — больше никто.
 
     Сигнатура намеренно бедна: у функции нет и не должно появиться параметров вида
     `force`/`skip_signature`/`allow_unsigned`. Применение неподписанного бинаря не должно
     быть выразимо в публичном API — это проверяется отдельным регресс-тестом.
+
+    `swap_busy=True` — путь «только exe» автоматического обновления при САМОПЕРЕНОСЕ
+    работающего сервера (`autoupdate.self_relocate_active`: процесс исполняется из копии в
+    кэше версий): занятый СЕРВЕРОМ файл не повод отказать. `bpmkit.exe` переименовывается
+    в `bpmkit.exe.old` (Windows разрешает переименовать исполняемый файл запущенного
+    процесса, но не переписать его), новый кладётся на освободившееся имя и начинает
+    работать при перезапуске хоста. Без самопереноса флаг не передаётся: живой процесс
+    onefile-сборки, у которого подменили его собственный exe, ломается на первом же
+    ленивом импорте. Подпись, применимость и бэкап — те же самые и в том
+    же порядке: флаг меняет только то, ЧТО делается с занятым файлом, а не то, ЧТО
+    разрешено поставить. Не удалось переименовать — отказ `mcp_running`, как без флага.
+    Переименование — ТОЛЬКО при видимом мьютексе сервера: самоперенос говорит о
+    сервере, а не о любом процессе. Мьютекса нет, а файл занят (антивирус, чужой процесс,
+    сервер без мьютекса) — отказ `local_io`, как без флага.
 
     Подпись проверяется ЗАНОВО, по сайдкару из состояния. Проверка при подготовке не
     заменяет эту: между `stage` и `apply_staged` проходит произвольное время, в течение
@@ -1330,13 +1438,16 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
     # ошибка неясной природы. Fail-open ДЕТЕКТА (см. docstring mcp_mutex) — `False` здесь
     # значит «мьютекса не видно», а не «сервер точно не работает»; последнее слово всё
     # равно за пробой ниже и за самой подменой.
+    busy = False
     if mcp_mutex.server_mutex_exists():
-        raise ChannelError(
-            "Обнаружен запущенный MCP-сервер BPMkit (по именованному системному объекту) "
-            "— закройте Claude Desktop и повторите. Установленная версия не тронута, "
-            "подготовленное обновление сохранено.",
-            kind="mcp_running",
-        )
+        if not swap_busy:
+            raise ChannelError(
+                "Обнаружен запущенный MCP-сервер BPMkit (по именованному системному объекту) "
+                "— закройте Claude Desktop и повторите. Установленная версия не тронута, "
+                "подготовленное обновление сохранено.",
+                kind="mcp_running",
+            )
+        busy = True
 
     # --- fail-closed: подпись проверяется повторно, непосредственно перед подменой -------
     sidecar = record.get("sidecar")
@@ -1369,15 +1480,18 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
     # Ловит занятый файл ЛЮБОЙ природы (старый сервер без мьютекса, чужой процесс) — тем
     # же текстом, каким закончилась бы настоящая подмена (см. except OSError ниже по
     # `replace_with_retry`), но раньше: ни бэкап, ни установленная версия ещё не тронуты.
-    try:
-        fsutil.probe_writable(dest)
-    except OSError as exc:
-        raise ChannelError(
-            f"Не удалось заменить файл MCP ({dest}): {exc}. Скорее всего, MCP-сервер сейчас "
-            f"запущен и держит файл — закройте Claude Desktop и повторите. Установленная "
-            f"версия не тронута, подготовленное обновление сохранено.",
-            kind="local_io",
-        ) from None
+    # Занятость, о которой мьютекс не сказал, — отказ и при `swap_busy`: самоперенос
+    # разрешает переименовать файл, который держит СЕРВЕР, а не кто угодно.
+    if not busy:
+        try:
+            fsutil.probe_writable(dest)
+        except OSError as exc:
+            raise ChannelError(
+                f"Не удалось заменить файл MCP ({dest}): {exc}. Скорее всего, MCP-сервер "
+                f"сейчас запущен и держит файл — закройте Claude Desktop и повторите. "
+                f"Установленная версия не тронута, подготовленное обновление сохранено.",
+                kind="local_io",
+            ) from None
 
     # --- бэкап ДО подмены ---------------------------------------------------------------
     stamp = _safe_component(utc_now_iso())
@@ -1393,15 +1507,19 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
     backup_sha = fsutil.sha256_file(backup_path) if backup_path else None
 
     # --- подмена -------------------------------------------------------------------------
-    try:
-        fsutil.replace_with_retry(src, dest)
-    except OSError as exc:
-        raise ChannelError(
-            f"Не удалось заменить файл MCP ({dest}): {exc}. Скорее всего, MCP-сервер сейчас "
-            f"запущен и держит файл — закройте Claude Desktop и повторите. Установленная "
-            f"версия не тронута, подготовленное обновление сохранено.",
-            kind="local_io",
-        ) from None
+    old_path: Optional[Path] = None
+    if busy:
+        old_path = _swap_busy_binary(src, dest, _norm_hex(record.get("sha256")))
+    else:
+        try:
+            fsutil.replace_with_retry(src, dest)
+        except OSError as exc:
+            raise ChannelError(
+                f"Не удалось заменить файл MCP ({dest}): {exc}. Скорее всего, MCP-сервер "
+                f"сейчас запущен и держит файл — закройте Claude Desktop и повторите. "
+                f"Установленная версия не тронута, подготовленное обновление сохранено.",
+                kind="local_io",
+            ) from None
 
     applied_at = utc_now_iso()
     # Эталон суммы и версия в manifest.json — вслед за бинарём.
@@ -1424,6 +1542,7 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
         "path": str(dest),
         "applied_at": applied_at,
         "install_sync": install_sync,
+        "swapped_busy": bool(old_path),
     }
     rel["staged"] = None
     rel["restart_required"] = True
@@ -1442,7 +1561,84 @@ def apply_staged(state, ctx, *, target: Optional[str] = None) -> dict:
         "message": RESTART_MESSAGE,
         "reason": "applied",
         "install_sync": install_sync,
+        # Путь `swap_busy`: прежний работающий бинарь лежит рядом под этим именем до
+        # перезапуска хоста (его уберёт сам сервер BPMkit после рабочего старта).
+        "old_path": str(old_path) if old_path else None,
     }
+
+
+#: Суффикс, под которым лежит работающий бинарь, переименованный путём `swap_busy`.
+#: Контракт с сервером BPMkit (уборка после рабочего старта) и с установщиком
+#: (`/SWAPBUSY` делает то же самое) — имя одно на всех.
+OLD_SUFFIX = ".old"
+
+#: Суффикс бинаря новой версии, откаченного автоматикой (`autoupdate.maybe_rollback`).
+BAD_SUFFIX = ".bad"
+
+#: Сколько версий помнить в `releases.bad_versions` (их автоматика не ставит): откаченные
+#: автоматикой и откаченные человеком (`rollback`). Больше и не нужно — старые версии
+#: автоматика не ставит всё равно (она ставит только новее установленной).
+BAD_VERSIONS_KEEP = 20
+
+#: Суффикс временной копии нового бинаря рядом с целью (тот же том, что у цели:
+#: `os.replace` атомарен только в пределах одного тома).
+_NEW_SUFFIX = ".new"
+
+
+def _swap_busy_binary(src: Path, dest: Path, expected_sha: str) -> Path:
+    """Положить `src` на место занятого `dest`: `dest` → `dest.old`, копия `src` → `dest`.
+
+    Порядок закрывает два способа сломать установку:
+
+    1. копия нового файла кладётся РЯДОМ с целью (`dest.new`) и сверяется по sha256 с
+       подписанной записью ДО того, как тронут работающий файл — между проверкой подписи и
+       подменой файл в стейджинге мог измениться, а неполная копия на другом томе не
+       должна стать бинарём MCP;
+    2. переименованный работающий файл возвращается на место, если новый положить не
+       удалось, — клиент не остаётся без `bpmkit.exe` ни при каком исходе.
+
+    Прежний `dest.old` (остался от прошлого обновления, сервер его ещё не убрал)
+    удаляется; занят — значит ещё работает процесс позапрошлой версии, и ставить
+    поверх него третью нельзя: отказ `mcp_running`, повторим позже.
+    """
+    old = dest.with_name(dest.name + OLD_SUFFIX)
+    new = dest.with_name(dest.name + _NEW_SUFFIX)
+    busy_text = (f"Не удалось подготовить замену занятого файла MCP ({dest}): {{exc}}. "
+                 f"Установленная версия не тронута, подготовленное обновление сохранено — "
+                 f"повторим позже.")
+    try:
+        if old.exists():
+            old.unlink()
+    except OSError as exc:
+        raise ChannelError(busy_text.format(exc=exc), kind="mcp_running") from None
+    try:
+        shutil.copy2(src, new)
+        if expected_sha and fsutil.sha256_file(new) != expected_sha:
+            _unlink_quietly(new)
+            raise ChannelError(
+                f"Копия подготовленного обновления рядом с {dest} не совпала с проверенным "
+                f"файлом — обновление не применено, установленная версия не тронута.",
+                kind="integrity_mismatch",
+            )
+    except OSError as exc:
+        _unlink_quietly(new)
+        raise ChannelError(busy_text.format(exc=exc), kind="local_io") from None
+    try:
+        os.replace(dest, old)
+    except OSError as exc:
+        _unlink_quietly(new)
+        raise ChannelError(busy_text.format(exc=exc), kind="mcp_running") from None
+    try:
+        fsutil.replace_with_retry(new, dest)
+    except OSError as exc:
+        try:
+            os.replace(old, dest)
+        except OSError:
+            pass
+        _unlink_quietly(new)
+        raise ChannelError(busy_text.format(exc=exc), kind="local_io") from None
+    _unlink_quietly(src)
+    return old
 
 
 # ======================================================================================
@@ -1712,6 +1908,9 @@ INSTALLER_RUNNING_WINDOW_SEC = 1800
 #: показывает — только эту ошибку.
 INSTALLER_ELEVATION_WINERROR = 740
 
+#: Ключ установщика «занятый bpmkit.exe не повод отказать» (см. `apply_installer`).
+SWAPBUSY_FLAG = "/SWAPBUSY"
+
 
 def installer_status(state, *, now_iso: Optional[str] = None) -> dict:
     """Карточка канала установщика для `/api/companion/status`: что подготовлено
@@ -1778,12 +1977,18 @@ def staged_installer_info(state) -> Optional[dict]:
     return {key: value for key, value in record.items() if key != "sidecar"}
 
 
-def apply_installer(state, ctx, *, target: Optional[str] = None) -> dict:
+def apply_installer(state, ctx, *, target: Optional[str] = None,
+                    swap_busy: bool = False) -> dict:
     """ЗАПУСТИТЬ подготовленный установщик — НЕ подменить им
-    файл. Решение владельца 19.09.2026: тихая установка, но кнопку нажимает
-    человек (SECURITY.md §4.1 не нарушается — «Решение» п.5): этот
-    вызов — явное действие пользователя из CLI/UI, после предпросмотра версий,
-    точно так же, как `apply_staged` вызывается только явной командой.
+    файл. Решение владельца 19.09.2026: тихая установка; запускают её кнопка
+    человека (после предпросмотра версий) и — в режиме обновлений `auto` —
+    автоматическое обновление (`autoupdate.py`, SECURITY.md §4.2), больше никто.
+
+    `swap_busy=True` добавляет установщику ключ `/SWAPBUSY`: работающий `bpmkit.exe` он
+    переименует в `bpmkit.exe.old` и положит новый рядом (новая версия включится при
+    перезапуске хоста), вместо отказа «закройте Claude». Ключ передаёт только
+    автоматическое обновление и только при самопереносе работающего сервера
+    (`autoupdate.self_relocate_active`); ручная кнопка ведёт себя как прежде.
 
     Порядок проверок, все ДО запуска процесса (тот же fail-closed принцип, что
     у `apply_staged`):
@@ -1860,10 +2065,16 @@ def apply_installer(state, ctx, *, target: Optional[str] = None) -> dict:
     # установки не перезапустился.
     setup_log = companion_workdir(ctx) / "installer_setup.log"
     try:
-        pid = spawn_hidden(
-            [str(src), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
-             f"/LOG={setup_log}"],
-            cwd=src.parent, log_path=log_path)
+        argv = [str(src), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                f"/LOG={setup_log}"]
+        if swap_busy:
+            argv.append(SWAPBUSY_FLAG)
+        # Установщик переживает вызывающего (CLI BPMkit выходит сразу после запуска) и
+        # сам зовёт `bpmkit.exe setup …`: переменные загрузчика PyInstaller frozen-родителя
+        # ему не передаются (`independent_child_env`), иначе тот `bpmkit.exe` взял бы
+        # каталог распаковки уже вышедшего процесса.
+        pid = spawn_hidden(argv, cwd=src.parent, log_path=log_path,
+                           env=independent_child_env())
     except ProcessError as exc:
         cause = exc.__cause__
         if getattr(cause, "winerror", None) == INSTALLER_ELEVATION_WINERROR:
@@ -1891,6 +2102,7 @@ def apply_installer(state, ctx, *, target: Optional[str] = None) -> dict:
         "key_id": verified.get("key_id"),
         "log": str(setup_log),
         "stdout_log": str(log_path),
+        "swap_busy": bool(swap_busy),
     }
     state.mark("releases", "ok",
                f"Установщик {record.get('version') or ''} запущен (pid={pid}) — "
@@ -2002,6 +2214,23 @@ def rollback(state, ctx, *, version: Optional[str] = None) -> dict:
     }
     del history[:index + 1]
     rel["restart_required"] = True
+    # Человек откатил версию — автоматическое обновление её больше не ставит (иначе в
+    # режиме `auto` она вернулась бы при первой же проверке). Снять запрет — команда
+    # `clear-bad-versions` CLI или кнопка окна «Обновления»; ручная установка доступна.
+    if rolled_from and is_numeric_version(rolled_from):
+        bad = [str(item) for item in (rel.get("bad_versions") or [])
+               if compare_versions(item, rolled_from) != 0]
+        bad.append(rolled_from)
+        rel["bad_versions"] = bad[-BAD_VERSIONS_KEEP:]
+    # Откатили версию, поставленную автоматикой: её запись больше не ждёт
+    # подтверждения (иначе автоматика вечно отвечала бы «ждём перезапуска» и не ставила
+    # следующие версии), событие — для окна «Обновления».
+    auto = rel.get("auto")
+    if isinstance(auto, dict) and rolled_from and _same_version_text(
+            auto.get("applied_version"), rolled_from):
+        rel["auto"] = None
+        rel["last_auto_event"] = {"kind": "manual_rollback", "from": rolled_from,
+                                  "to": restored or None, "at": utc_now_iso()}
     message = (f"Возвращена версия {restored or 'предыдущая'}. Перезапустите Claude Desktop, "
                f"чтобы MCP-сервер запустился из вернувшегося файла.")
     state.mark("releases", "ok", message)

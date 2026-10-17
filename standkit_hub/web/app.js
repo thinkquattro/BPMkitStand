@@ -2917,6 +2917,8 @@
     check_skills: "/api/companion/check-skills",
     stage_skills: "/api/companion/stage-skills",
     apply_skills: "/api/companion/apply-skills",
+    // снять запрет автоматической установки с плохих версий (без сети).
+    clear_bad_versions: "/api/companion/clear-bad-versions",
   };
 
   // Подпись занятой кнопки: «Обновляем…» честнее универсального «Подождите» —
@@ -2949,11 +2951,13 @@
     check_skills: "Проверка выполнена",
     stage_skills: "Скиллы/плагин скачаны и проверены",
     apply_skills: "Скиллы применены",
+    clear_bad_versions: "Эти версии снова могут устанавливаться автоматически",
   };
 
   // Почему действие сейчас недоступно. Кнопка не прячется — она выключается и
   // объясняется: спрятанная кнопка читается как «функции нет вовсе».
   const COMPANION_ACTION_REASONS = {
+    clear_bad_versions: "Запрещённых для автоматической установки версий нет",
     apply_update: "Устанавливать нечего: новая версия ещё не скачана",
     rollback: "Откатываться не на что: канал ещё не устанавливал обновлений на этой машине",
     apply_installer: "Устанавливать нечего: установщик новой версии ещё не скачан — нажмите «Проверить обновления»",
@@ -3028,10 +3032,180 @@
     return lic.edition === "companion" && LICENSE_CHANNEL_STATUSES.indexOf(lic.status) >= 0;
   }
 
+  // --- режим обновлений MCP (companion.update_mode) и раскатка ---
+  //
+  // Переключатель в окне и поле «Настройки → Обновления» — одно значение конфига.
+  // Кольцо раскатки показывается, но не меняется (его задают установка и CLI BPMkit).
+  // Пауза раскатки — решение издателя «эту версию пока не ставить»: автоматика её
+  // не ставит, ручная установка предупреждает (confirmPausedInstall).
+  const UPDATE_MODE_SAVED = {
+    auto: "Обновления будут устанавливаться автоматически",
+    notify: "Обновления будут только скачиваться — установка по вашей кнопке",
+    off: "Проверка новых версий MCP выключена",
+  };
+  const UPDATE_RING_TITLES = { early: "раннее", stable: "стабильное" };
+  let updateModeSaving = false;
+
+  function companionUpdateMode(status) {
+    const mode = ((status && status.settings) || {}).update_mode;
+    return mode === "auto" || mode === "notify" || mode === "off" ? mode : "notify";
+  }
+
+  /** Раскатка версии `version` приостановлена издателем. Сведения о раскатке — про
+   * версию `rollout.version`; о другой версии они ничего не говорят. */
+  function rolloutPausedFor(status, version) {
+    const rollout = releasesBlock(status).rollout;
+    if (!rollout || rollout.paused !== true) return false;
+    if (!version || !rollout.version) return true;
+    return compareVersions(version, rollout.version) === 0;
+  }
+
+  /** Ручная установка версии на паузе — только после явного «да» человека. */
+  async function confirmPausedInstall(status, version) {
+    if (!rolloutPausedFor(status, version)) return true;
+    return styledConfirm(
+      "Раскатка приостановлена",
+      `Издатель приостановил раскатку версии ${version || "обновления"} — возможно, в ней ` +
+        "найдена проблема. Автоматически она не ставится. Установить всё равно?",
+      "Установить всё равно"
+    );
+  }
+
+  /** Последнее событие автоматики одной строкой (или пусто). */
+  function describeAutoEvent(event) {
+    if (!event || !event.kind) return "";
+    const when = event.at ? ` ${describeMoment(event.at)}` : "";
+    const from = event.from || "прежней";
+    const to = event.to || "новой";
+    if (event.kind === "applied") return `Автоматически установлена версия ${to} (была ${from})${when}`;
+    if (event.kind === "rolled_back") return `Версия ${from} не запустилась и откачена до ${to}${when}`;
+    if (event.kind === "install_failed") return `Автоматическая установка версии ${to} не удалась${when}`;
+    if (event.kind === "rollback_failed") return `Версия ${from} не запустилась, откатить её не удалось — переустановите BPMkit`;
+    if (event.kind === "install_unverified") return `Автоматическую установку версии ${to} не удалось подтвердить${when} — проверьте установку BPMkit`;
+    if (event.kind === "install_deferred") return `Установка версии ${to} отложена${when}: MCP-сервер был запущен`;
+    if (event.kind === "manual_rollback") return `Версия ${from} откачена вручную${when} — автоматически не ставится`;
+    return "";
+  }
+
+  // Почему автоматика сейчас не ставит найденную версию — по последнему исходу
+  // (`last_auto_decision`). Пусто — объяснять нечего (поставлено, нет обновления,
+  // режим не `auto`, пауза — у паузы своя строка).
+  const AUTO_REASON_TEXT = {
+    mcp_running: (v) => `Версия ${v} скачана и проверена; установится, когда MCP-сервер не запущен (после выхода из приложения)`,
+    ring: (v) => `Версия ${v} скачана; установится, когда наступит срок стабильного кольца`,
+    rollout_unknown: (v) => `Версия ${v} скачана; ждём от издателя сведений о раскатке`,
+    pending_restart: (v) => `Версия ${v} скачана; установится после перезапуска приложения с уже поставленной версией`,
+    busy: () => "Установка отложена: файл MCP занят — повторим позже",
+    busy_other_process: () => "Установка отложена: обновление уже идёт в другом процессе",
+    installer_running: () => "Установка отложена: установщик ещё работает",
+    machine_scope: () => "BPMkit установлен для всех пользователей: обновления скачиваются заранее и ставятся по кнопке",
+    settings_unreadable: () => "Настройки канала не прочитаны: обновления скачиваются заранее и ставятся по кнопке",
+    bad_version: (v) => `Версия ${v} ранее не запустилась или откачена — автоматически не ставится`,
+    install_failed: (v) => `Автоматическая установка версии ${v} не удалась несколько раз — поставьте её кнопкой`,
+    version_unknown: () => "Номер новой версии не известен — автоматическая установка пропущена",
+    requires_installer: (v) => `Версия ${v} ставится только установщиком, а он не опубликован`,
+    artifact_version_mismatch: (v) => `Скачанный файл не совпал с версией ${v} — автоматическая установка пропущена`,
+  };
+
+  function describeAutoDecision(decision) {
+    if (!decision || !decision.reason) return "";
+    if (decision.decision === "applied" || decision.decision === "rolled_back") return "";
+    const text = AUTO_REASON_TEXT[decision.reason];
+    return text ? text(decision.version || "обновления") : "";
+  }
+
+  /** Автоматика ставит только по кнопке: установка «для всех пользователей» или
+   * нечитаемые настройки канала (режим `auto` ведёт себя как `notify`). */
+  function autoInstallsByButton(status) {
+    if (status && status.settings_problem) return true;
+    const decision = releasesBlock(status).last_auto_decision;
+    return !!(decision && (decision.reason === "machine_scope" || decision.reason === "settings_unreadable"));
+  }
+
+  function renderUpdateModeRow(status) {
+    const mode = companionUpdateMode(status);
+    const select = byId("upd-mode-select");
+    if (select && !updateModeSaving && document.activeElement !== select) select.value = mode;
+    const settings = (status && status.settings) || {};
+    const ring = byId("upd-ring");
+    if (ring) {
+      ring.textContent = `кольцо: ${UPDATE_RING_TITLES[settings.update_ring] || UPDATE_RING_TITLES.stable}`;
+    }
+    const rel = releasesBlock(status);
+    const paused = byId("upd-paused-note");
+    if (paused) {
+      const rollout = rel.rollout;
+      const show = !!(rollout && rollout.paused === true && rel.update_available);
+      paused.hidden = !show;
+      paused.textContent = show
+        ? `Издатель приостановил раскатку версии ${rollout.version || rel.known_latest || ""}: автоматическая установка отложена`
+        : "";
+    }
+    const eventEl = byId("upd-auto-event");
+    if (eventEl) {
+      const text = describeAutoEvent(rel.last_auto_event);
+      eventEl.hidden = !text;
+      eventEl.textContent = text;
+    }
+    const reasonEl = byId("upd-auto-reason");
+    if (reasonEl) {
+      let text = mode === "auto" ? describeAutoDecision(rel.last_auto_decision) : "";
+      if (status && status.settings_problem) text = AUTO_REASON_TEXT.settings_unreadable();
+      reasonEl.hidden = !text;
+      reasonEl.textContent = text;
+    }
+    const pendingEl = byId("upd-auto-pending");
+    if (pendingEl) {
+      const pending = rel.auto_pending_version;
+      const since = rel.auto_pending_since ? ` ${describeMoment(rel.auto_pending_since)}` : "";
+      pendingEl.hidden = !pending;
+      pendingEl.textContent = pending
+        ? `Версия ${pending} установлена${since} и ждёт первого рабочего запуска — перезапустите приложение`
+        : "";
+    }
+    const badEl = byId("upd-bad-versions");
+    if (badEl) {
+      // Только то, что автоматика действительно не ставит: плохие версии и исчерпавшие
+      // лимит неудачных запусков (список считает сервер). Одна-две неудачи — не запрет.
+      const all = Array.isArray(rel.auto_blocked_versions)
+        ? rel.auto_blocked_versions
+        : (Array.isArray(rel.bad_versions) ? rel.bad_versions : []);
+      badEl.hidden = all.length === 0;
+      const textEl = byId("upd-bad-versions-text");
+      if (textEl) textEl.textContent = all.length ? `Автоматически не ставятся: ${all.join(", ")}` : "";
+    }
+  }
+
+  async function saveUpdateMode(mode) {
+    if (!UPDATE_MODE_SAVED[mode]) return;
+    const errorEl = byId("updates-error");
+    if (errorEl) errorEl.textContent = "";
+    updateModeSaving = true;
+    try {
+      await apiSend("POST", "/api/settings", { companion: { update_mode: mode } });
+      toast(UPDATE_MODE_SAVED[mode]);
+    } catch (e) {
+      if (errorEl) errorEl.textContent = describeApiError(e);
+    } finally {
+      updateModeSaving = false;
+      await refreshCompanionStatus({ quiet: true });
+      if (updatesDialogIsOpen()) applyUpdatesEditionView();
+    }
+  }
+
   /** Подвал окна «Обновления». Свободный вид exe-сборки (frozen) НЕ
-   * обещает сверку с PyPI — сервер её для exe и не делает. */
+   * обещает сверку с PyPI — сервер её для exe и не делает. Платный — по режиму
+   * обновлений (без статуса канала — текст режима `notify`, как прежде). */
   function updatesFooterText(paid, selfVersion) {
-    if (paid) return "Скачивание — заранее, установка — только по вашей кнопке";
+    if (paid) {
+      // `typeof` — функция живёт и в песочнице тестов, где состояния окна нет.
+      const status = typeof lastCompanionStatus === "undefined" ? null : lastCompanionStatus;
+      const mode = ((status && status.settings) || {}).update_mode;
+      if (mode === "auto" && autoInstallsByButton(status)) return "Скачивание — заранее, установка — по вашей кнопке";
+      if (mode === "auto") return "Обновления MCP ставятся автоматически; новая версия включится после перезапуска приложения";
+      if (mode === "off") return "Проверка новых версий MCP выключена";
+      return "Скачивание — заранее, установка — только по вашей кнопке";
+    }
     if (selfVersion && selfVersion.mode === "frozen") return "Диспетчер обновляется установщиком BPMkit";
     return "Проверяется по PyPI, без лицензии";
   }
@@ -3459,6 +3633,8 @@
       errorEl.textContent = COMPANION_ACTION_REASONS.apply_installer;
       return;
     }
+    // пауза раскатки — предупреждение до обычного подтверждения установки.
+    if (!(await confirmPausedInstall(status, staged.version))) return;
     const confirmed = await styledConfirm(
       "Установить обновление",
       `${installerPreviewText(status, staged)} ${INSTALL_CLOSE_APPS_NOTE}`,
@@ -4297,6 +4473,7 @@
     renderMcpRow(status);
     renderHubRow(status);
     renderSkillsRow(status);
+    renderUpdateModeRow(status);
     renderUpdatesBadge(status);
     updateCompanionActions(status);
     maybeNotifyUpdates(status);
@@ -4394,6 +4571,10 @@
   async function runCompanionAction(action, btn) {
     const path = COMPANION_ACTION_PATHS[action];
     if (!path) return;
+    if (action === "apply_update") {
+      const stagedVersion = releasesBlock(lastCompanionStatus).staged_version;
+      if (!(await confirmPausedInstall(lastCompanionStatus, stagedVersion))) return;
+    }
     const errorEl = byId("updates-error");
     errorEl.textContent = "";
     byId("updates-check-status").textContent = "";
@@ -4429,6 +4610,10 @@
   }
 
   function setupUpdatesDialog() {
+    const modeSelect = byId("upd-mode-select");
+    if (modeSelect) {
+      modeSelect.addEventListener("change", () => saveUpdateMode(modeSelect.value));
+    }
     document.querySelectorAll("[data-companion-action]").forEach((btn) => {
       // «Проверить [обновления]» в подвале несёт data-companion-action
       // ТОЛЬКО ради контракта «каждая кнопка канала — известное действие»
@@ -5502,7 +5687,7 @@
   // (companion.patterns.interval_sec), и подобрать его плоскими именами можно
   // было бы только соглашением вида «подчёркивание = уровень вложенности» —
   // молчаливым правилом, о которое спотыкается первый же ключ с подчёркиванием
-  // в имени (их тут два: interval_sec, auto_stage_release).
+  // в имени (их тут два: interval_sec, update_mode).
   //
   // Поэтому секция собирается и разбирается ЯВНОЙ парой функций ниже. Цена —
   // одна таблица соответствия; выигрыш — форма остаётся честной: имя поля не
@@ -5522,9 +5707,11 @@
     ["companion_enabled", ["enabled"], 0],
     ["companion_mcp_cli", ["mcp_cli"], 0],
     ["companion_patterns_interval_hours", ["patterns", "interval_sec"], 3600],
-    ["companion_releases_enabled", ["releases", "enabled"], 0],
+    // режим обновлений MCP (auto/notify/off) вместо прежних флажков «проверять по
+    // расписанию» (releases.enabled — теперь зеркало режима, его ведёт сервер) и
+    // «скачивать заранее» (auto_stage_release — только для чтения старых конфигов).
+    ["companion_update_mode", ["update_mode"], 0],
     ["companion_releases_interval_hours", ["releases", "interval_sec"], 3600],
-    ["companion_auto_stage_release", ["auto_stage_release"], 0],
   ];
 
   function companionSettingValue(companion, path) {
@@ -5585,6 +5772,9 @@
         value = Math.round(amount * unit);
       } else {
         value = String(input.value || "").trim();
+        // Режим не выбран (настройки канала не прочитаны или в файле незнакомое
+        // значение — сервер его не отдаёт): не отправляем, файл сохранит как было.
+        if (field === "companion_update_mode" && !value) return;
       }
       const target = path.length === 1 ? companion : (companion[path[0]] = companion[path[0]] || {});
       target[path[path.length - 1]] = value;

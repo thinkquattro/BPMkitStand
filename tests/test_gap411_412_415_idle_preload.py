@@ -385,6 +385,10 @@ LAZY_IMPORT_ALLOWLIST = {
         "на уровне модуля замкнул бы кольцо при старте хаба",
     "standkit_companion/runner.py:settings -> standkit_hub.config":
         "то же кольцо canal ↔ hub (фолбэк на дефолтные настройки при битом конфиге)",
+    "standkit_companion/runner.py:_update_mode -> standkit_hub.config":
+        "то же кольцо канал ↔ хаб; к вызову модуль уже загружен settings()",
+    "standkit_companion/autoupdate.py:_mode_of -> standkit_hub.config":
+        "то же кольцо канал ↔ хаб; к вызову модуль уже загружен settings() раннера",
     "standkit_companion/__main__.py:_config_path -> standkit_hub.config":
         "точка входа канала: пакет хаба может отсутствовать в этой редакции",
     "standkit_agent/server.py:make_handler._handle_logs -> standkit.logs":

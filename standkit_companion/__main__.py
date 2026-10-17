@@ -35,6 +35,7 @@ import threading
 from typing import Optional
 
 from . import __version__
+from .autoupdate import TRIGGERS
 from .errors import CompanionError, ContextUnavailable
 from .releases import RESTART_MESSAGE
 from .runner import build_runner, status_snapshot
@@ -249,6 +250,39 @@ def _cmd_revocations(args) -> int:
     return 0
 
 
+def _cmd_auto_update(args) -> int:
+    """Автоматическое обновление одним проходом — то же, что делает задача Планировщика.
+
+    Исход печатается всегда (это не исключение, а решение политики); код возврата `1` —
+    когда исход отмечен `ok: false` (не скачалось, занято, нет лицензии).
+    """
+    payload = build_runner(_config_path(args)).run_action("auto_update",
+                                                          trigger=args.trigger)
+    if args.json:
+        _out(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        version = payload.get("version")
+        _out(f"Автообновление: {payload.get('decision')} ({payload.get('reason')})"
+             + (f", версия {version}" if version else ""))
+        if payload.get("detail"):
+            _out(f"  {payload['detail']}")
+    return 0 if payload.get("ok") else 1
+
+
+def _cmd_clear_bad_versions(args) -> int:
+    """Снять запрет автоматики с плохих версий (все или `--version`). Ручная установка
+    этих версий и без того доступна; команда возвращает их автоматике."""
+    result = build_runner(_config_path(args)).run_action("clear_bad_versions",
+                                                         version=args.version)
+    if args.json:
+        _out(json.dumps(result, ensure_ascii=False, indent=2))
+    elif result.get("cleared"):
+        _out("Снят запрет автоматической установки: " + ", ".join(result["cleared"]))
+    else:
+        _out("Запрещённых для автоматики версий нет")
+    return 0
+
+
 def _cmd_run(args) -> int:
     """Поднять планировщик. `--once` — один проход циклов, у которых наступил срок."""
     runner = build_runner(_config_path(args))
@@ -289,6 +323,8 @@ _COMMANDS = {
     "apply-update": _cmd_apply_update,
     "rollback": _cmd_rollback,
     "revocations": _cmd_revocations,
+    "auto-update": _cmd_auto_update,
+    "clear-bad-versions": _cmd_clear_bad_versions,
     "run": _cmd_run,
 }
 
@@ -332,6 +368,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("revocations", parents=[common],
                    help="обновить локальную копию списка отзыва лицензий")
+
+    auto = sub.add_parser("auto-update", parents=[common],
+                          help="автоматическое обновление одним проходом (по режиму "
+                               "companion.update_mode)")
+    auto.add_argument("--trigger", default="manual", choices=TRIGGERS,
+                      help="кто запускает (для журнала): logon, schedule, manual, "
+                           "hub, exit")
+    auto.add_argument("--json", action="store_true",
+                      help="машинный вывод вместо человеческого")
+
+    clear = sub.add_parser("clear-bad-versions", parents=[common],
+                           help="снять запрет автоматической установки с версий, "
+                                "помеченных плохими (откат) или исчерпавших попытки")
+    clear.add_argument("--version", default=None,
+                       help="только эта версия (по умолчанию — все)")
+    clear.add_argument("--json", action="store_true",
+                       help="машинный вывод вместо человеческого")
 
     run = sub.add_parser("run", parents=[common], help="поднять планировщик канала")
     run.add_argument("--once", action="store_true",

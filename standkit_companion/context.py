@@ -63,7 +63,11 @@ from standkit.cli_resolve import (
     resolve_command_string,
     search_roots,
 )
-from standkit.platform import run_console, run_console_tree  # noqa: F401 - run_console: подмена в тестах
+from standkit.platform import (  # noqa: F401 - run_console: подмена в тестах
+    independent_child_env,
+    run_console,
+    run_console_tree,
+)
 
 from .errors import KIND_TITLES, ChannelError, ContextUnavailable
 
@@ -223,13 +227,10 @@ def set_inprocess_provider(provider: Optional[Callable[[], dict]]):
 
 def _child_env() -> Optional[dict]:
     """Окружение для запуска CLI: `None` (наследовать как есть), а у frozen-вызывающего —
-    копия с `PYINSTALLER_RESET_ENVIRONMENT=1`, чтобы бинарь BPMkit стартовал как
-    самостоятельное приложение, а не по переменным загрузчика вызывающего exe."""
-    if not getattr(sys, "frozen", False):
-        return None
-    env = dict(os.environ)
-    env[_PYI_RESET_ENV] = "1"
-    return env
+    копия без переменных загрузчика (`_PYI_*`, `_MEIPASS2`) и с
+    `PYINSTALLER_RESET_ENVIRONMENT=1`, чтобы бинарь BPMkit стартовал как самостоятельное
+    приложение. Общий хелпер — `standkit.platform.independent_child_env`."""
+    return independent_child_env()
 
 
 def _default_run(argv: list) -> tuple:

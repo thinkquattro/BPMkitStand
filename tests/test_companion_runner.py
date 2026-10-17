@@ -14,8 +14,8 @@
   стороны издателя неотличим от перебора ключа), а `poke()` блокировку снимает;
 * порядок пробуждения — отзыв первым: при отозванной лицензии остальные циклы всё равно
   получат 401, и честнее показать причину, а не два невнятных отказа;
-* `apply_staged` планировщиком не вызывается НИКОГДА (`SECURITY.md` §4.1) — подмена
-  исполняемого файла только по команде человека;
+* `apply_staged`/`apply_installer` планировщик сам не вызывает: установка без человека
+  идёт только через `autoupdate` и только в режиме `auto` (`SECURITY.md` §4.2);
 * конверт лицензии не попадает в `status()` (ответ статуса уходит в браузер и в логи);
 * джиттер ±10% считается заново на каждый срок (парк клиентов не должен приходить к
   издателю одной секундой), интервал перечитывается из конфига без перезапуска.
@@ -163,6 +163,10 @@ def settings_all_on(**overrides) -> CompanionSettings:
         "releases": CompanionCycle(enabled=True, interval_sec=86400),
         "revocations": CompanionCycle(enabled=True, interval_sec=1800),
         "auto_stage_release": False,
+        # Режим по умолчанию у тестов этого файла — `notify` (проверка и подготовка, без
+        # установки): предмет большинства из них — расписание и разбор исходов, а не
+        # автоматическая установка; режим `auto` тесты задают явно.
+        "update_mode": "notify",
     }
     values.update(overrides)
     return CompanionSettings(**values)
@@ -456,63 +460,337 @@ def test_cycle_order_in_one_wakeup(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------------------
-# 6-7. Релизы: стейджинг по настройке, применение — никогда
+# 6-7. Релизы: поведение по режиму обновлений; установка — только через autoupdate в auto
 # --------------------------------------------------------------------------------------
-def test_auto_stage_release_off_does_not_download(tmp_path, monkeypatch):
-    """`auto_stage_release=False` — только проверка, файл не качается.
+def test_update_mode_off_releases_cycle_does_not_tick(tmp_path, monkeypatch):
+    """`update_mode=off` — проверки новых версий нет: ни check, ни stage.
 
-    Дефолт именно такой: скачивание десятков мегабайт без спроса — не то, что пользователь
-    ожидает от «проверять обновления».
+    Флажок цикла релизов в настройках, собранных конструктором, при этом включён —
+    режим главнее (`effective_update_mode`): «выключить обновления» обязано выключать.
     """
     log: list = []
     stubs = patch_cycles(monkeypatch, log, releases_check=Recorder(
         "releases", log, result={"available": True, "target": "1.2.3"}))
-    runner_obj = make_runner(tmp_path, settings_all_on(auto_stage_release=False))
-
-    runner_obj.run_cycle("releases")
-
-    assert stubs["releases_check"].calls == 1
-    assert stubs["releases_stage"].calls == 0, "без настройки канал не качает бинарь"
-
-
-def test_auto_stage_release_on_downloads_but_does_not_apply(tmp_path, monkeypatch):
-    """`auto_stage_release=True` — качает и проверяет, но останавливается перед подменой."""
-    log: list = []
-    stubs = patch_cycles(monkeypatch, log, releases_check=Recorder(
-        "releases", log, result={"available": True, "target": "1.2.3"}))
-    runner_obj = make_runner(tmp_path, settings_all_on(auto_stage_release=True))
-
-    outcome = runner_obj.run_cycle("releases")
-
-    assert stubs["releases_stage"].calls == 1, "с настройкой канал обязан подготовить обновление"
-    assert outcome["result"]["staged"] is not None
-    assert log == ["releases", "stage"], "стейджинг идёт ПОСЛЕ проверки, а не вместо неё"
-
-
-@pytest.mark.parametrize("auto_stage", [False, True])
-def test_scheduler_never_applies_update(tmp_path, monkeypatch, auto_stage):
-    """ЗАПРЕТ: Планировщик не вызывает `apply_staged` ни при каких настройках.
-
-    `SECURITY.md` §4.1 «никакого тихого действия»: подмена исполняемого файла MCP —
-    всегда явное решение человека. Тест подменяет `apply_staged` на бросающую функцию,
-    поэтому ЛЮБОЕ обращение к ней провалит прогон, а не будет замечено «по счётчику».
-    """
-    log: list = []
-    patch_cycles(monkeypatch, log, releases_check=Recorder(
-        "releases", log, result={"available": True, "target": "1.2.3"}))
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError(
-            "планировщик вызвал apply_staged — тихая подмена исполняемого файла MCP "
-            "запрещена SECURITY.md §4.1")
-
-    monkeypatch.setattr(releases, "apply_staged", forbidden)
-    runner_obj = make_runner(tmp_path, settings_all_on(auto_stage_release=auto_stage))
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="off"))
 
     report = runner_obj.run_due()
 
-    assert report["results"]["releases"]["status"] == "ok"
-    assert "apply" not in log
+    assert report["results"]["releases"]["status"] == "disabled"
+    assert stubs["releases_check"].calls == 0
+    assert stubs["releases_stage"].calls == 0
+
+
+def test_update_mode_notify_downloads_but_does_not_apply(tmp_path, monkeypatch):
+    """`notify` — качает и проверяет в фоне, но останавливается перед установкой."""
+    log: list = []
+    stubs = patch_cycles(monkeypatch, log, releases_check=Recorder(
+        "releases", log, result={"available": True, "target": "1.2.3"}))
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="notify"))
+
+    outcome = runner_obj.run_cycle("releases")
+
+    assert stubs["releases_stage"].calls == 1, "в notify канал обязан подготовить обновление"
+    assert outcome["result"]["staged"] is not None
+    assert outcome["result"]["auto"] is None, "в notify автоматика не участвует"
+    assert log == ["releases", "stage"], "стейджинг идёт ПОСЛЕ проверки, а не вместо неё"
+
+
+def test_legacy_auto_stage_flag_no_longer_decides_staging(tmp_path, monkeypatch):
+    """Прежний `auto_stage_release` только читается: подготовку решает режим."""
+    log: list = []
+    stubs = patch_cycles(monkeypatch, log, releases_check=Recorder(
+        "releases", log, result={"available": True, "target": "1.2.3"}))
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="notify",
+                                                       auto_stage_release=False))
+
+    runner_obj.run_cycle("releases")
+
+    assert stubs["releases_stage"].calls == 1
+
+
+def _guard_apply(monkeypatch, calls: list):
+    """Подменить `apply_staged`/`apply_installer` гардом: вызов разрешён ТОЛЬКО из
+    `standkit_companion/autoupdate.py` (по стеку вызова), иначе — провал прогона.
+
+    Проверяется не «по счётчику», а самим фактом вызова: любое новое прямое обращение
+    планировщика к установке уронит тест сразу, в каком бы режиме оно ни случилось.
+    """
+    import inspect
+
+    def guarded(name):
+        def _call(*args, **kwargs):
+            frames = [Path(info.filename).name for info in inspect.stack()[1:]]
+            if "autoupdate.py" not in frames:
+                raise AssertionError(
+                    f"{name} вызван мимо autoupdate — установка без человека разрешена "
+                    f"только через автоматическое обновление в режиме auto")
+            calls.append((name, kwargs))
+            return {"launched": True, "applied": True, "pid": 4242, "backup": None}
+        return _call
+
+    monkeypatch.setattr(releases, "apply_staged", guarded("apply_staged"))
+    monkeypatch.setattr(releases, "apply_installer", guarded("apply_installer"))
+
+
+@pytest.mark.parametrize("mode", ["notify", "off"])
+def test_scheduler_never_applies_update_outside_auto_mode(tmp_path, monkeypatch, mode):
+    """ЗАПРЕТ: вне режима `auto` планировщик не ставит ничего — ни бинарь, ни установщик.
+
+    `SECURITY.md` §4.2: установка без человека — только в режиме `auto`. Гард из
+    `_guard_apply` дополнительно требует, чтобы и в `auto` вызов шёл через autoupdate.
+    """
+    log: list = []
+    patch_cycles(monkeypatch, log, releases_check=Recorder(
+        "releases", log, result={"available": True, "target": "1.2.3", "latest": "1.2.3"}))
+    calls: list = []
+    _guard_apply(monkeypatch, calls)
+    monkeypatch.setattr(releases, "stage_installer", Recorder(
+        "stage_installer", log, result={"version": "1.2.3", "filename": "x"}))
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode=mode))
+
+    runner_obj.run_due()
+
+    assert calls == [], f"в режиме {mode} планировщик вызвал установку: {calls}"
+
+
+def test_scheduler_applies_only_through_autoupdate_in_auto_mode(tmp_path, monkeypatch):
+    """В режиме `auto` установка идёт, и идёт ТОЛЬКО через `autoupdate.execute`
+    (установщик целевой версии; сервер не запущен — без `/SWAPBUSY`)."""
+    from standkit_companion import autoupdate
+
+    log: list = []
+    patch_cycles(monkeypatch, log, releases_check=Recorder(
+        "releases", log, result={"available": True, "target": "1.2.3", "latest": "1.2.3",
+                                 "current": "1.2.2"}))
+    calls: list = []
+    _guard_apply(monkeypatch, calls)
+    monkeypatch.setattr(releases, "stage_installer", Recorder(
+        "stage_installer", log, result={"version": "1.2.3",
+                                        "filename": "bpmkit-setup-1.2.3.exe"}))
+    monkeypatch.setattr(autoupdate, "install_dir_writable", lambda binary: True)
+    # Мьютекс машины прогона (живой BPMkit у разработчика) тесту не виден.
+    monkeypatch.setattr(autoupdate.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto",
+                                                       update_ring="early"))
+    runner_obj._state.releases["rollout"] = {"paused": False, "published_at": None,
+                                             "stable_after": None}
+    runner_obj._state.releases["rollout_version"] = "1.2.3"
+
+    outcome = runner_obj.run_cycle("releases")
+
+    assert outcome["status"] == "ok"
+    auto = outcome["result"]["auto"]
+    assert auto["decision"] == "applied", auto
+    assert calls == [("apply_installer", {"target": "1.2.3", "swap_busy": False})]
+
+
+def test_auto_mode_waits_while_mcp_server_runs(tmp_path, monkeypatch):
+    """Работающий MCP-сервер без самопереноса — `waiting / mcp_running`, установки нет."""
+    from standkit_companion import autoupdate
+
+    log: list = []
+    patch_cycles(monkeypatch, log, releases_check=Recorder(
+        "releases", log, result={"available": True, "target": "1.2.3", "latest": "1.2.3"}))
+    calls: list = []
+    _guard_apply(monkeypatch, calls)
+    monkeypatch.setattr(releases, "stage_installer", Recorder(
+        "stage_installer", log, result={"version": "1.2.3",
+                                        "filename": "bpmkit-setup-1.2.3.exe"}))
+    monkeypatch.setattr(autoupdate, "install_dir_writable", lambda binary: True)
+    monkeypatch.setattr(autoupdate.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+    monkeypatch.setattr(releases, "read_runtime_marker", lambda: None)
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto",
+                                                       update_ring="early"))
+    runner_obj._state.releases["rollout"] = {"paused": False}
+    runner_obj._state.releases["rollout_version"] = "1.2.3"
+
+    outcome = runner_obj.run_cycle("releases")
+
+    auto = outcome["result"]["auto"]
+    assert (auto["decision"], auto["reason"]) == ("waiting", "mcp_running")
+    assert calls == []
+    assert outcome["result"]["staged"] is None, "в auto мимо autoupdate ничего не готовится"
+
+
+def test_auto_mode_stage_failure_does_not_fail_the_check(tmp_path, monkeypatch):
+    """Неудачная подготовка в `auto` — исход автоматики, а не ошибка цикла проверки."""
+    from standkit_companion import autoupdate
+
+    log: list = []
+    patch_cycles(monkeypatch, log, releases_check=Recorder(
+        "releases", log, result={"available": True, "target": "1.2.3", "latest": "1.2.3"}))
+    monkeypatch.setattr(releases, "stage_installer", Recorder(
+        "stage_installer", log, raises=[ChannelError("обрыв", kind="offline")]))
+    monkeypatch.setattr(autoupdate, "install_dir_writable", lambda binary: True)
+    monkeypatch.setattr(autoupdate.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto",
+                                                       update_ring="early"))
+    runner_obj._state.releases["rollout"] = {"paused": False}
+    runner_obj._state.releases["rollout_version"] = "1.2.3"
+
+    outcome = runner_obj.run_cycle("releases")
+
+    assert outcome["status"] == "ok"
+    assert outcome["halted"] is False
+    assert outcome["result"]["auto"]["decision"] == "waiting"
+    assert outcome["result"]["auto"]["reason"] == "offline"
+
+
+def test_run_action_auto_update_returns_payload_and_keeps_old_calls(tmp_path, monkeypatch):
+    """`run_action("auto_update", trigger=…)` — исход-словарь; прежние вызовы
+    `run_action(action, version=…)` работают как раньше."""
+    log: list = []
+    stubs = patch_cycles(monkeypatch, log)  # проверка: обновления нет
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto"))
+
+    payload = runner_obj.run_action("auto_update", trigger="schedule")
+
+    assert payload["decision"] == "skipped"
+    assert payload["reason"] == "no_update"
+    assert payload["trigger"] == "schedule"
+    assert set(payload) >= {"ok", "decision", "reason", "version", "current", "artifact"}
+
+    runner_obj.run_action("stage_update", version="0.307.0")
+    assert stubs["releases_stage"].calls == 1
+
+
+def test_run_action_auto_update_off_mode_makes_no_network_calls(tmp_path, monkeypatch):
+    log: list = []
+    stubs = patch_cycles(monkeypatch, log)
+    resolved: list = []
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="off"),
+                             context_resolver=lambda s: resolved.append(1) or FakeContext(tmp_path))
+
+    payload = runner_obj.run_action("auto_update", trigger="logon")
+
+    assert (payload["decision"], payload["reason"]) == ("skipped", "mode_off")
+    assert resolved == [] and stubs["releases_check"].calls == 0
+
+
+def test_run_action_auto_update_context_failure_is_a_payload(tmp_path, monkeypatch):
+    """Нет лицензии / нет CLI — исход для задачи Планировщика, не исключение."""
+    patch_cycles(monkeypatch, [])
+
+    def no_license(settings_arg):
+        raise ChannelError("ключа нет", kind="no_license")
+
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto"),
+                             context_resolver=no_license)
+
+    payload = runner_obj.run_action("auto_update")
+
+    assert payload["ok"] is False
+    assert payload["reason"] == "no_license"
+    assert payload["trigger"] == "manual"
+
+
+def test_actions_include_auto_update():
+    assert "auto_update" in runner.ACTIONS
+
+
+def test_hub_cycle_sees_bad_version_written_by_other_process(tmp_path, monkeypatch):
+    """Два процесса: CLI пометил версию плохой на диске, у диспетчера в памяти — старая
+    копия. Цикл релизов в `auto` решает по диску (не ставит) и не затирает запись CLI."""
+    from standkit_companion import autoupdate
+
+    log: list = []
+    patch_cycles(monkeypatch, log, releases_check=Recorder(
+        "releases", log, result={"available": True, "target": "1.2.3", "latest": "1.2.3",
+                                 "current": "1.2.2"}))
+    applied: list = []
+    monkeypatch.setattr(releases, "apply_installer",
+                        lambda st, c, *, target=None, swap_busy=False:
+                        applied.append(target) or {"launched": True, "pid": 1})
+    monkeypatch.setattr(releases, "stage_installer", Recorder(
+        "stage_installer", log, result={"version": "1.2.3",
+                                        "filename": "bpmkit-setup-1.2.3.exe"}))
+    monkeypatch.setattr(autoupdate, "install_dir_writable", lambda b: True)
+    monkeypatch.setattr(autoupdate.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto",
+                                                       update_ring="early"))
+    runner_obj._state.releases["rollout"] = {"paused": False}
+    runner_obj._state.releases["rollout_version"] = "1.2.3"
+    runner_obj._state.save()
+
+    other = CompanionState.load(tmp_path / "companion-state.json")
+    other.releases["bad_versions"] = ["1.2.3"]
+    other.save()
+
+    outcome = runner_obj.run_cycle("releases")
+
+    auto = outcome["result"]["auto"]
+    assert (auto["decision"], auto["reason"]) == ("skipped", "bad_version")
+    assert applied == []
+    disk = json.loads((tmp_path / "companion-state.json").read_text(encoding="utf-8"))
+    assert disk["releases"]["bad_versions"] == ["1.2.3"], "запись другого процесса цела"
+
+
+def test_clear_bad_versions_action_and_status(tmp_path, monkeypatch):
+    patch_cycles(monkeypatch, [])
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto"))
+    runner_obj._state.releases["bad_versions"] = ["1.2.3"]
+    runner_obj._state.save()
+    assert runner_obj.status()["actions"]["clear_bad_versions"] is True
+
+    result = runner_obj.run_action("clear_bad_versions")
+
+    assert result["cleared"] == ["1.2.3"]
+    status = runner_obj.status()
+    assert status["actions"]["clear_bad_versions"] is False
+    assert status["state"]["releases"]["bad_versions"] == []
+    assert "clear_bad_versions" in runner.ACTIONS
+
+
+def test_status_reports_unreadable_settings(tmp_path, monkeypatch):
+    """Битый конфиг: статус называет причину, автоматика ведёт себя как `notify`."""
+    patch_cycles(monkeypatch, [])
+    config = tmp_path / "standkit-hub.json"
+    config.write_text("{битый", encoding="utf-8")
+    runner_obj = runner.build_runner(config, state_path=tmp_path / "companion-state.json")
+
+    status = runner_obj.status()
+
+    assert status["settings_problem"] == "settings_unreadable"
+    assert status["settings"]["update_mode"] == "notify", "не прочитали — не auto"
+
+
+def test_status_lists_only_versions_automation_really_skips(tmp_path, monkeypatch):
+    """«Автоматически не ставятся» — плохие версии и исчерпавшие лимит неудач; одна-две
+    неудачи установщика — ещё не запрет."""
+    from standkit_companion import autoupdate
+
+    patch_cycles(monkeypatch, [])
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto"))
+    runner_obj._state.releases["bad_versions"] = ["1.2.1"]
+    runner_obj._state.releases["auto_failures"] = {
+        "1.2.2": 1, "1.2.3": autoupdate.INSTALL_FAILURES_LIMIT}
+    runner_obj._state.save()
+
+    status = runner_obj.status()
+
+    assert status["state"]["releases"]["auto_blocked_versions"] == ["1.2.1", "1.2.3"]
+    runner_obj._state.releases["bad_versions"] = []
+    runner_obj._state.releases["auto_failures"] = {"1.2.2": 1}
+    runner_obj._state.save()
+    assert runner_obj.status()["actions"]["clear_bad_versions"] is False
+
+
+def test_cli_clear_bad_versions(tmp_path, capsys):
+    from standkit_companion import __main__ as cli
+
+    config = tmp_path / "standkit-hub.json"
+    config.write_text(json.dumps({"companion": {"update_mode": "auto"}}), encoding="utf-8")
+    state_file = tmp_path / "companion-state.json"
+    state = CompanionState.load(state_file)
+    state.releases["bad_versions"] = ["1.2.3", "1.2.4"]
+    state.save()
+
+    rc = cli.main(["clear-bad-versions", "--version", "1.2.3", "--json",
+                   "--config", str(config)])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["cleared"] == ["1.2.3"]
+    assert CompanionState.load(state_file).releases["bad_versions"] == ["1.2.4"]
 
 
 # --------------------------------------------------------------------------------------
@@ -880,6 +1158,37 @@ def test_cli_reports_missing_cli_as_environment_error(tmp_path, capsys, monkeypa
     assert rc == 2
     assert "ОШИБКА: Лицензионный контекст недоступен" in err
     assert "companion.mcp_cli" in err, "подсказка обязана называть то, что человек чинит"
+
+
+def test_cli_auto_update_prints_decision_and_never_raises(tmp_path, capsys, monkeypatch):
+    """`auto-update` — исход политики печатается всегда; нет CLI BPMkit — исход с
+    `ok: false` и код 1, а не исключение (так его зовёт задача Планировщика)."""
+    from standkit_companion import __main__ as cli
+    from standkit_companion import context as context_module
+
+    def no_cli(settings, **kwargs):
+        raise ContextUnavailable("рядом нет CLI BPMkit", kind="context_unavailable")
+
+    monkeypatch.setattr(context_module, "resolve", no_cli)
+    config = tmp_path / "standkit-hub.json"
+    config.write_text(json.dumps({"companion": {"update_mode": "auto"}}), encoding="utf-8")
+
+    rc = cli.main(["auto-update", "--json", "--trigger", "schedule", "--config", str(config)])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1 and payload["trigger"] == "schedule"
+
+    rc = cli.main(["auto-update", "--json", "--trigger", "exit", "--config", str(config)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert (payload["ok"], payload["reason"], payload["trigger"]) == (
+        False, "context_unavailable", "exit")
+
+    config.write_text(json.dumps({"companion": {"update_mode": "off"}}), encoding="utf-8")
+    rc = cli.main(["auto-update", "--config", str(config)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "skipped (mode_off)" in out
 
 
 def test_cli_run_once_makes_single_pass(tmp_path, capsys, monkeypatch):

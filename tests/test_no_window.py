@@ -309,3 +309,55 @@ def test_popen_exceptions_are_still_relevant(rel):
     """
     text = (_package_root() / rel).read_text(encoding="utf-8")
     assert "subprocess.Popen(" in text, f"исключение {rel} больше не нужно — убрать из _POPEN_EXCEPTIONS"
+
+
+# --------------------------------------------------------------------------------------
+# Потомок, переживающий frozen-родителя: окружение без переменных загрузчика PyInstaller
+# --------------------------------------------------------------------------------------
+_PYI_ENV = {"_PYI_ARCHIVE_FILE": r"C:\BPMkit\server\bpmkit.exe",
+            "_PYI_APPLICATION_HOME_DIR": r"C:\Temp\_MEI12345",
+            "_PYI_PARENT_PROCESS_LEVEL": "1",
+            "_MEIPASS2": r"C:\Temp\_MEI12345"}
+
+
+def test_independent_child_env_strips_loader_vars_when_frozen(monkeypatch):
+    """Установщик, запущенный из `bpmkit.exe` (frozen CLI), зовёт тот же `bpmkit.exe`:
+    унаследованные `_PYI_*`/`_MEIPASS2` заставили бы новый процесс считать себя потомком
+    уже вышедшего CLI и взять его удалённый `_MEI`. Штатный рубильник PyInstaller —
+    `PYINSTALLER_RESET_ENVIRONMENT=1`, переменные загрузчика — вон."""
+    for key, value in _PYI_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("BPMKIT_KEEP_ME", "1")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    env = platform_module.independent_child_env()
+
+    assert env is not None
+    assert not [key for key in env if key.startswith("_PYI_") or key == "_MEIPASS2"]
+    assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert env["BPMKIT_KEEP_ME"] == "1", "прочее окружение наследуется"
+
+
+def test_independent_child_env_untouched_when_not_frozen(monkeypatch):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    assert platform_module.independent_child_env() is None
+
+
+def test_spawn_hidden_passes_env_to_popen(tmp_path, monkeypatch):
+    captured = {}
+
+    class _Proc:
+        pid = 77
+
+    def _fake_popen(cmd, **kwargs):
+        captured.update(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(platform_module.subprocess, "Popen", _fake_popen)
+
+    platform_module.spawn_hidden(["x"], cwd=tmp_path, log_path=tmp_path / "l.log", env={"A": "1"})
+    assert captured["env"] == {"A": "1"}
+
+    captured.clear()
+    platform_module.spawn_hidden(["x"], cwd=tmp_path, log_path=tmp_path / "l.log")
+    assert "env" not in captured, "без env — наследование как прежде"
