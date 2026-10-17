@@ -85,7 +85,7 @@ from pathlib import Path
 from typing import Optional
 
 from standkit.registry import bpmkit_config_dir
-from standkit.platform import ProcessError, is_alive, spawn_hidden
+from standkit.platform import ProcessError, independent_child_env, is_alive, spawn_hidden
 
 from . import fsutil, mcp_mutex, signature
 from .backend import CONTENT_PREFIX
@@ -2018,7 +2018,12 @@ def apply_installer(state, ctx, *, target: Optional[str] = None,
                 f"/LOG={setup_log}"]
         if swap_busy:
             argv.append(SWAPBUSY_FLAG)
-        pid = spawn_hidden(argv, cwd=src.parent, log_path=log_path)
+        # Установщик переживает вызывающего (CLI BPMkit выходит сразу после запуска) и
+        # сам зовёт `bpmkit.exe setup …`: переменные загрузчика PyInstaller frozen-родителя
+        # ему не передаются (`independent_child_env`), иначе тот `bpmkit.exe` взял бы
+        # каталог распаковки уже вышедшего процесса.
+        pid = spawn_hidden(argv, cwd=src.parent, log_path=log_path,
+                           env=independent_child_env())
     except ProcessError as exc:
         cause = exc.__cause__
         if getattr(cause, "winerror", None) == INSTALLER_ELEVATION_WINERROR:

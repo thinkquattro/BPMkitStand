@@ -299,3 +299,43 @@ def test_apply_installer_passes_swapbusy_only_when_asked(env, monkeypatch, swap_
     assert (releases.SWAPBUSY_FLAG in launched["args"]) is swap_busy
     assert "/VERYSILENT" in launched["args"], "тихая установка — в обоих случаях"
     assert state.releases["installer_launched"]["swap_busy"] is swap_busy
+
+
+@pytest.mark.parametrize("frozen", [True, False])
+def test_apply_installer_detaches_from_frozen_parent_environment(env, monkeypatch, frozen):
+    """CLI BPMkit (frozen) запускает установщик и сразу выходит, а установщик зовёт тот же
+    `bpmkit.exe setup …`: переменные загрузчика PyInstaller родителя ему не передаются,
+    `PYINSTALLER_RESET_ENVIRONMENT=1` — передаётся."""
+    import sys
+
+    state, ctx = env
+    blob = _blob("3.0.3")
+    filename = "bpmkit-setup-3.0.3.exe"
+    client = FakeClient(_installer_meta("3.0.3", blob, filename=filename), blob,
+                        sidecar=_installer_sidecar(filename, blob))
+    releases.stage_installer(client, state, ctx, version="3.0.3")
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", r"C:\BPMkit\server\bpmkit.exe")
+    monkeypatch.setenv("_MEIPASS2", r"C:\Temp\_MEI1")
+    if frozen:
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+    else:
+        monkeypatch.delattr(sys, "frozen", raising=False)
+    launched = {}
+
+    class _FakeProcess:
+        pid = 4444
+
+    def _fake_popen(args, **kwargs):
+        launched["env"] = kwargs.get("env")
+        return _FakeProcess()
+
+    monkeypatch.setattr("subprocess.Popen", _fake_popen)
+
+    releases.apply_installer(state, ctx, swap_busy=True)
+
+    if frozen:
+        child = launched["env"]
+        assert child["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+        assert "_PYI_ARCHIVE_FILE" not in child and "_MEIPASS2" not in child
+    else:
+        assert launched["env"] is None, "из исходников — окружение как есть"

@@ -34,7 +34,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 # Сколько ждать мягкого завершения процесса, прежде чем эскалировать до
 # жёсткого убийства. Значение с запасом: BPMSoft.WebHost на завершении
@@ -143,10 +143,36 @@ def run_console_tree(cmd: Sequence[str], *, timeout: float, **kwargs) -> subproc
     return subprocess.CompletedProcess(list(cmd), proc.returncode, out, err)
 
 
-def spawn_hidden(cmd: Sequence[str], cwd: Path, log_path: Path) -> int:
+#: Штатный рубильник PyInstaller ≥ 6.9: потомок стартует как самостоятельное
+#: приложение, а не как «подпроцесс» замороженного родителя.
+PYI_RESET_ENV = "PYINSTALLER_RESET_ENVIRONMENT"
+
+
+def independent_child_env() -> Optional[dict]:
+    """Окружение для потомка, который ПЕРЕЖИВЁТ замороженного (PyInstaller) родителя.
+
+    ``None`` — вызывающий не frozen, наследовать как есть. У frozen-вызывающего — копия
+    ``os.environ`` без переменных загрузчика (``_PYI_*``, ``_MEIPASS2``) и с
+    ``PYINSTALLER_RESET_ENVIRONMENT=1``. Иначе потомок того же exe (например, установщик,
+    запущенный из ``bpmkit.exe``, зовёт тот же ``bpmkit.exe setup …``) сочтёт себя
+    подпроцессом уже вышедшего родителя и возьмёт его удалённый каталог распаковки.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    env = {key: value for key, value in os.environ.items()
+           if not key.upper().startswith("_PYI_") and key.upper() != "_MEIPASS2"}
+    env[PYI_RESET_ENV] = "1"
+    return env
+
+
+def spawn_hidden(cmd: Sequence[str], cwd: Path, log_path: Path,
+                 env: Optional[Mapping[str, str]] = None) -> int:
     """
     Запускает процесс в фоне, без видимого консольного окна (Windows) /
     в новой сессии (Linux), с перенаправлением stdout+stderr в log_path.
+
+    ``env`` — окружение потомка; ``None`` — наследовать (как прежде). Для потомка,
+    переживающего frozen-родителя, — ``independent_child_env()``.
 
     Возвращает pid запущенного процесса. Не блокирует вызывающий поток.
     """
@@ -163,6 +189,8 @@ def spawn_hidden(cmd: Sequence[str], cwd: Path, log_path: Path) -> int:
         "stderr": subprocess.STDOUT,
         "stdin": subprocess.DEVNULL,
     }
+    if env is not None:
+        popen_kwargs["env"] = dict(env)
 
     if sys.platform == "win32":
         # Скрытое окно + отдельная группа процессов, чтобы CTRL-C консоли

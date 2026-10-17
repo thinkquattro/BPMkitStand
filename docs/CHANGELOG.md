@@ -52,6 +52,13 @@
   выбором режима. `POST /api/settings` отвергает неизвестный `update_mode` (400) и
   игнорирует `update_ring`.
 
+- **`standkit.platform.independent_child_env()` и `spawn_hidden(..., env=…)`:** потомок,
+  переживающий замороженного (PyInstaller) родителя, получает окружение без переменных
+  загрузчика (`_PYI_*`, `_MEIPASS2`) и с `PYINSTALLER_RESET_ENVIRONMENT=1`. Так запускается
+  установщик (`apply_installer`): CLI BPMkit выходит сразу после запуска, а установщик зовёт тот
+  же `bpmkit.exe setup …`, который иначе взял бы каталог распаковки вышедшего процесса. Запрос
+  контекста у CLI (`standkit_companion.context`) использует тот же хелпер.
+
 ### Изменено
 
 - **`SECURITY.md` §4.2:** правило «применение — всегда явное действие человека» заменено
