@@ -183,7 +183,7 @@ def _run(state, ctx, *, check=None, settings=None, trigger="schedule"):
                               trigger=trigger, now=NOW, check=check or _check())
 
 
-def test_execute_applies_installer_with_swapbusy_and_records_before_launch(env, monkeypatch):
+def test_execute_applies_installer_and_records_before_launch(env, monkeypatch):
     state, ctx, binary, _marker = env
     calls = _Calls()
     _stub_channel(monkeypatch, calls)
@@ -194,7 +194,8 @@ def test_execute_applies_installer_with_swapbusy_and_records_before_launch(env, 
     assert (payload["version"], payload["current"]) == ("1.3.20", "1.3.19")
     assert payload["artifact"]["kind"] == "installer"
     name, target, swap_busy, auto_at_launch = calls.log[-1]
-    assert (name, target, swap_busy) == ("apply_installer", "1.3.20", True)
+    assert (name, target, swap_busy) == ("apply_installer", "1.3.20", False), (
+        "сервер не запущен — /SWAPBUSY не нужен")
     assert auto_at_launch["applied_version"] == "1.3.20", (
         "запись «поставлено автоматически» обязана лечь ДО запуска установщика")
     auto = state.releases["auto"]
@@ -205,7 +206,7 @@ def test_execute_applies_installer_with_swapbusy_and_records_before_launch(env, 
     assert state.releases["last_auto_decision"]["decision"] == "applied"
 
 
-def test_execute_falls_back_to_exe_path_with_swap(env, monkeypatch):
+def test_execute_falls_back_to_exe_path(env, monkeypatch):
     state, ctx, _binary, _marker = env
     calls = _Calls()
     _stub_channel(monkeypatch, calls, installer=False)
@@ -214,7 +215,7 @@ def test_execute_falls_back_to_exe_path_with_swap(env, monkeypatch):
 
     assert payload["decision"] == "applied"
     assert payload["artifact"]["kind"] == "exe"
-    assert ("apply_staged", True) in calls.log
+    assert ("apply_staged", False) in calls.log
     assert state.releases["auto"]["via"] == "exe"
     assert state.releases["auto"]["backup"] == "b.exe"
 
@@ -386,7 +387,7 @@ def test_execute_stage_network_error_is_waiting(env, monkeypatch):
 
 def test_execute_end_to_end_with_real_installer_channel(env, monkeypatch):
     """Настоящие `stage_installer`/`apply_installer` поверх подставного бэкенда: подпись
-    проверяется, установщик запускается тихо и с ключом /SWAPBUSY."""
+    проверяется, установщик запускается тихо (сервер не запущен — без /SWAPBUSY)."""
     state, ctx, _binary, _marker = env
     blob = _blob("1.3.20")
     filename = "bpmkit-setup-1.3.20.exe"
@@ -408,7 +409,7 @@ def test_execute_end_to_end_with_real_installer_channel(env, monkeypatch):
 
     assert payload["decision"] == "applied", payload
     assert launched["args"][0].endswith(filename)
-    assert releases.SWAPBUSY_FLAG in launched["args"]
+    assert releases.SWAPBUSY_FLAG not in launched["args"], "сервер не запущен — без ключа"
     assert "/VERYSILENT" in launched["args"]
 
 
@@ -576,3 +577,126 @@ def test_reconcile_ignores_runtime_marker_started_before_install(env, monkeypatc
 
     assert autoupdate.reconcile_pending(state, now=NOW) is None
     assert autoupdate.pending_record(state) is not None
+
+
+
+# --------------------------------------------------------------------------------------
+# Окно простоя: при работающем сервере — ждать; подмена — только при самопереносе
+# --------------------------------------------------------------------------------------
+@pytest.mark.parametrize("overrides,expected", [
+    ({"server_running": True}, ("waiting", "mcp_running", True, False)),
+    ({"server_running": True, "self_relocate": True}, ("applied", "policy_ok", True, True)),
+    ({"server_running": False, "self_relocate": False}, ("applied", "policy_ok", True, True)),
+    ({"server_running": True, "pending_restart": True}, ("staged", "pending_restart", True, False)),
+])
+def test_decide_idle_window(overrides, expected):
+    """Работающий MCP-сервер: живой процесс после подмены своего exe ломается (ленивые
+    импорты PyInstaller читают новый файл) — подмена только при самопереносе."""
+    assert _decide(**overrides) == expected
+
+
+def _relocating_install(binary, *, features=("self_relocate",), where="root"):
+    manifest = (binary.parent.parent if where == "root" else binary.parent) / "manifest.json"
+    manifest.write_text(json.dumps({"version": "1.3.19", "features": list(features)}),
+                        encoding="utf-8")
+
+
+def _runtime(monkeypatch, *, relocated):
+    monkeypatch.setattr(releases, "read_runtime_marker", lambda: {
+        "version": "1.3.19", "started_at": "2026-10-20T09:00:00Z", "pid": 1, "frozen": True,
+        "binary": "x", "relocated": relocated})
+
+
+@pytest.mark.parametrize("where", ["root", "server"])
+def test_self_relocate_needs_feature_and_runtime_flag(env, monkeypatch, where):
+    _state, _ctx, binary, _marker = env
+    _relocating_install(binary, where=where)
+    _runtime(monkeypatch, relocated=True)
+    assert autoupdate.self_relocate_active(binary) is True
+
+    _runtime(monkeypatch, relocated=False)
+    assert autoupdate.self_relocate_active(binary) is False, "процесс не перенесён"
+
+    _relocating_install(binary, features=("other",), where=where)
+    _runtime(monkeypatch, relocated=True)
+    assert autoupdate.self_relocate_active(binary) is False, "поставка не умеет самоперенос"
+
+
+def test_self_relocate_without_manifest_or_marker_is_false(env, monkeypatch):
+    _state, _ctx, binary, _marker = env  # manifest.json фикстуры — без features
+    _runtime(monkeypatch, relocated=True)
+    assert autoupdate.self_relocate_active(binary) is False
+    _relocating_install(binary)
+    monkeypatch.setattr(releases, "read_runtime_marker", lambda: None)
+    assert autoupdate.self_relocate_active(binary) is False
+
+
+def test_execute_waits_while_server_runs_and_does_not_swap(env, monkeypatch):
+    state, ctx, _binary, _marker = env
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    payload = _run(state, ctx)
+
+    assert (payload["decision"], payload["reason"]) == ("waiting", "mcp_running")
+    assert [c[0] for c in calls.log] == ["stage_installer"], "скачать заранее — можно"
+    assert state.releases.get("auto") is None
+
+
+def test_execute_swaps_only_with_self_relocation(env, monkeypatch):
+    state, ctx, binary, _marker = env
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+    _relocating_install(binary)
+    _runtime(monkeypatch, relocated=True)
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    payload = _run(state, ctx)
+
+    assert payload["decision"] == "applied"
+    name, target, swap_busy, _auto = calls.log[-1]
+    assert (name, swap_busy) == ("apply_installer", True), "/SWAPBUSY — только при самопереносе"
+
+
+def test_execute_idle_server_installs_without_swapbusy(env, monkeypatch):
+    """Сервер не запущен — установщик без /SWAPBUSY (подменять нечего)."""
+    state, ctx, _binary, _marker = env
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+
+    _run(state, ctx)
+
+    name, _target, swap_busy, _auto = calls.log[-1]
+    assert (name, swap_busy) == ("apply_installer", False)
+
+
+def test_execute_exe_path_swap_only_with_self_relocation(env, monkeypatch):
+    state, ctx, binary, _marker = env
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls, installer=False)
+    _run(state, ctx)
+    assert ("apply_staged", False) in calls.log
+
+    state.releases["auto"] = None
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+    _relocating_install(binary)
+    _runtime(monkeypatch, relocated=True)
+    calls2 = _Calls()
+    _stub_channel(monkeypatch, calls2, installer=False)
+    _run(state, ctx)
+    assert ("apply_staged", True) in calls2.log
+
+
+def test_exit_trigger_is_an_ordinary_pass_and_logged(env, monkeypatch):
+    """`exit` (сервер при выходе из хоста) — обычный проход политики; триггер — в событии."""
+    state, ctx, _binary, _marker = env
+    calls = _Calls()
+    _stub_channel(monkeypatch, calls)
+    assert "exit" in autoupdate.TRIGGERS
+
+    payload = _run(state, ctx, trigger="exit")
+
+    assert (payload["decision"], payload["trigger"]) == ("applied", "exit")
+    assert state.releases["last_auto_event"]["trigger"] == "exit"
+    assert state.releases["last_auto_decision"]["trigger"] == "exit"

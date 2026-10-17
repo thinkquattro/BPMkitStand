@@ -15,6 +15,16 @@
 3. **Сеть и занятость — не отказ, а «подождём».** Обрыв связи, занятый файл, уже идущий
    установщик, второй процесс автообновления — исход `waiting`, цикл проверки не
    останавливается и повторит попытку сам.
+4. **Работающий MCP-сервер — окно простоя.** Живой процесс onefile-сборки после подмены
+   своего `bpmkit.exe` ломается: модули, не импортированные до подмены, PyInstaller читает
+   уже из ЧУЖОГО файла («Error -3 while decompressing», ложное «лицензия invalid»).
+   Поэтому при видимом мьютексе сервера автоматика только готовит файл и отвечает
+   `waiting / mcp_running`; ставит — когда сервер не запущен (задача Планировщика, выход
+   из хоста). Исключение — самоперенос: поставка объявляет `features: [self_relocate]` в
+   `manifest.json`, а работающий процесс — `relocated: true` в `mcp_runtime.json` (он
+   исполняется из копии в кэше версий, и `bpmkit.exe` никто не держит); тогда установщик
+   получает `/SWAPBUSY` (путь «только exe» — `apply_staged(swap_busy=True)`). Без
+   самопереноса `/SWAPBUSY` не передаётся никогда.
 
 Исход любого вызова — один словарь `{ok, decision, reason, version, current, artifact}`:
 
@@ -58,7 +68,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from . import fsutil, releases
+from . import fsutil, mcp_mutex, releases
 from .errors import ChannelError, CompanionError
 from .state import utc_now_iso
 
@@ -69,6 +79,8 @@ __all__ = [
     "decide",
     "rollout_for",
     "install_dir_writable",
+    "self_relocate_active",
+    "SELF_RELOCATE_FEATURE",
     "startup_marker_path",
     "read_startup_marker",
     "pending_record",
@@ -88,8 +100,13 @@ DECISIONS = (DECISION_APPLIED, DECISION_STAGED, DECISION_WAITING, DECISION_SKIPP
              DECISION_ROLLED_BACK)
 
 #: Кто позвал: вход пользователя и повтор по расписанию (задача Планировщика),
-#: ручной запуск CLI, цикл релизов работающего диспетчера.
-TRIGGERS = ("logon", "schedule", "manual", "hub")
+#: ручной запуск CLI, цикл релизов работающего диспетчера, выход из хоста (сервер BPMkit,
+#: получив конец stdin, запускает `setup auto-update --trigger exit`; ожидание
+#: исчезновения мьютекса — забота самой подкоманды, здесь это обычный проход политики).
+TRIGGERS = ("logon", "schedule", "manual", "hub", "exit")
+
+#: Признак поставки «сервер умеет самоперенос» — элемент `features` в `manifest.json`.
+SELF_RELOCATE_FEATURE = "self_relocate"
 
 #: Маркер старта новой версии — контракт с сервером BPMkit (тот же каталог, что у
 #: `mcp_runtime.json`, см. `releases._runtime_marker_path`).
@@ -174,7 +191,8 @@ def _policy(decision: str, reason: str, *, stage: bool, apply: bool = False) -> 
 def decide(*, update_mode: str, available: bool, version: Optional[str],
            bad_versions=(), rollout: Optional[dict] = None, ring: str = "stable",
            now=None, install_writable: bool = True, pending_restart: bool = False,
-           channel_enabled: bool = True, install_failures: int = 0) -> dict:
+           channel_enabled: bool = True, install_failures: int = 0,
+           server_running: bool = False, self_relocate: bool = False) -> dict:
     """Что делать с найденным релизом: `{decision, reason, stage, apply}`.
 
     Без сети, без диска, без часов (кроме переданных) — весь выбор здесь, исполнитель
@@ -190,7 +208,9 @@ def decide(*, update_mode: str, available: bool, version: Optional[str],
     5. раскатка не известна или кольцо `stable` ещё не наступило — `waiting` с подготовкой
        заранее (ко сроку файл уже проверен);
     6. предыдущая автоматическая установка ещё не подтверждена рабочим стартом — `staged`;
-    7. иначе — ставить.
+    7. MCP-сервер запущен, а самопереноса нет — `waiting / mcp_running` с подготовкой
+       (поставим в окно простоя: выход из хоста, задача Планировщика);
+    8. иначе — ставить.
     """
     mode = str(update_mode or "").strip().lower()
     if not channel_enabled:
@@ -217,6 +237,8 @@ def decide(*, update_mode: str, available: bool, version: Optional[str],
             return _policy(DECISION_WAITING, "ring", stage=True)
     if pending_restart:
         return _policy(DECISION_STAGED, "pending_restart", stage=True)
+    if server_running and not self_relocate:
+        return _policy(DECISION_WAITING, "mcp_running", stage=True)
     return _policy(DECISION_APPLIED, "policy_ok", stage=True, apply=True)
 
 
@@ -234,6 +256,42 @@ def rollout_for(rel: dict, version: Optional[str]) -> Optional[dict]:
     if known and version and not _same_version(known, version):
         return None
     return dict(rollout)
+
+
+def _manifest_features(binary: Path) -> set:
+    """`features` из `manifest.json` поставки: рядом с бинарём или в корне установки.
+
+    Список строк или словарь «признак → истина»; всё прочее — пусто."""
+    for candidate in (binary.parent / "manifest.json",
+                      releases._install_root_for(binary) / "manifest.json"):
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        features = data.get("features") if isinstance(data, dict) else None
+        if isinstance(features, (list, tuple)):
+            return {str(item).strip() for item in features if isinstance(item, str)}
+        if isinstance(features, dict):
+            return {str(key).strip() for key, value in features.items() if value}
+        return set()
+    return set()
+
+
+def self_relocate_active(binary_path) -> bool:
+    """Работающий сервер исполняется из копии (самоперенос) — `bpmkit.exe` никто не держит.
+
+    Оба признака обязательны: поставка умеет самоперенос (`manifest.json`:
+    `features` содержит `self_relocate`) И работающий процесс это сделал
+    (`mcp_runtime.json`: `relocated: true`). Одного «умеет» мало — процесс, запущенный из
+    исходников или до обновления, исполняется из самого `bpmkit.exe`.
+    """
+    text = str(binary_path or "").strip()
+    if not text:
+        return False
+    if SELF_RELOCATE_FEATURE not in _manifest_features(Path(text)):
+        return False
+    runtime = releases.read_runtime_marker()
+    return bool(runtime) and runtime.get("relocated") is True
 
 
 def install_dir_writable(binary_path) -> bool:
@@ -446,7 +504,7 @@ def maybe_rollback(state, *, now=None, trigger: str = "") -> Optional[dict]:
     if source is None or not str(binary):
         rel["auto"] = None
         _event(rel, "rollback_failed", src=applied, dst=previous, at=at,
-               detail="нет ни bpmkit.exe.old, ни резервной копии")
+               detail="нет ни bpmkit.exe.old, ни резервной копии", trigger=trigger or None)
         state.mark("releases", "error",
                    f"Версия {applied} не дошла до рабочего старта, откатить её нечем — "
                    f"переустановите BPMkit. Автоматически эта версия больше не ставится.")
@@ -494,7 +552,7 @@ def maybe_rollback(state, *, now=None, trigger: str = "") -> Optional[dict]:
     }
     rel["restart_required"] = True
     rel["auto"] = None
-    _event(rel, "rolled_back", src=applied, dst=previous, at=at)
+    _event(rel, "rolled_back", src=applied, dst=previous, at=at, trigger=trigger or None)
     state.mark("releases", "ok",
                f"Версия {applied} не дошла до рабочего старта и откачена до "
                f"{previous or 'предыдущей'}. Перезапустите приложение, чтобы MCP-сервер "
@@ -694,6 +752,8 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
     current = check.get("current")
     binary = Path(str(getattr(ctx, "binary_path", "") or ""))
     failures = rel.get("auto_failures") or {}
+    server_running = mcp_mutex.server_mutex_exists()
+    relocated = server_running and self_relocate_active(binary)
     policy = decide(
         update_mode=_mode_of(settings),
         available=bool(check.get("available")),
@@ -706,6 +766,8 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
         pending_restart=pending_record(state) is not None,
         channel_enabled=bool(getattr(settings, "enabled", True)),
         install_failures=int(failures.get(version) or 0) if isinstance(failures, dict) else 0,
+        server_running=server_running,
+        self_relocate=relocated,
     )
     payload = _payload(policy["decision"], policy["reason"], version=version,
                        current=current, trigger=trigger)
@@ -739,12 +801,17 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
                                              artifact=artifact, trigger=trigger), at)
         return _remember(state, _apply(state, ctx, artifact, binary=binary,
                                        version=version, current=current,
-                                       trigger=trigger, at=at, payload=payload), at)
+                                       trigger=trigger, at=at, payload=payload,
+                                       swap_busy=relocated), at)
 
 
 def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
-           trigger: str, at: str, payload: dict) -> dict:
+           trigger: str, at: str, payload: dict, swap_busy: bool = False) -> dict:
     """Установка подготовленного артефакта (под замком машины).
+
+    `swap_busy` — только при самопереносе работающего сервера (`self_relocate_active`):
+    тогда установщику передаётся `/SWAPBUSY`, пути «только exe» — переименование занятого
+    файла. Сервер не запущен — подменять нечего, ключ не нужен.
 
     Запись «поставлено автоматически» делается ДО запуска установщика: установщик
     первым делом останавливает диспетчер, и запись, отложенная «на после запуска»,
@@ -766,7 +833,8 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
         "trigger": trigger or None,
         "confirmed_at": None,
     }
-    _event(rel, "applied", src=current, dst=version, at=at, via=via)
+    _event(rel, "applied", src=current, dst=version, at=at, via=via, trigger=trigger or None,
+           swap_busy=bool(swap_busy))
     try:
         state.save()
     except OSError:
@@ -774,9 +842,9 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
     try:
         if via == "installer":
             result = releases.apply_installer(state, ctx, target=artifact["version"],
-                                              swap_busy=True)
+                                              swap_busy=bool(swap_busy))
         else:
-            result = releases.apply_staged(state, ctx, swap_busy=True)
+            result = releases.apply_staged(state, ctx, swap_busy=bool(swap_busy))
             rel["auto"]["backup"] = result.get("backup")
     except Exception as exc:  # noqa: BLE001 - исход, а не исключение
         rel["auto"] = before_auto

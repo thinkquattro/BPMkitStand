@@ -555,7 +555,7 @@ def test_scheduler_never_applies_update_outside_auto_mode(tmp_path, monkeypatch,
 
 def test_scheduler_applies_only_through_autoupdate_in_auto_mode(tmp_path, monkeypatch):
     """В режиме `auto` установка идёт, и идёт ТОЛЬКО через `autoupdate.execute`
-    (установщик целевой версии, с `swap_busy=True` — ключ `/SWAPBUSY`)."""
+    (установщик целевой версии; сервер не запущен — без `/SWAPBUSY`)."""
     from standkit_companion import autoupdate
 
     log: list = []
@@ -568,6 +568,8 @@ def test_scheduler_applies_only_through_autoupdate_in_auto_mode(tmp_path, monkey
         "stage_installer", log, result={"version": "1.2.3",
                                         "filename": "bpmkit-setup-1.2.3.exe"}))
     monkeypatch.setattr(autoupdate, "install_dir_writable", lambda binary: True)
+    # Мьютекс машины прогона (живой BPMkit у разработчика) тесту не виден.
+    monkeypatch.setattr(autoupdate.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
     runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto",
                                                        update_ring="early"))
     runner_obj._state.releases["rollout"] = {"paused": False, "published_at": None,
@@ -579,7 +581,34 @@ def test_scheduler_applies_only_through_autoupdate_in_auto_mode(tmp_path, monkey
     assert outcome["status"] == "ok"
     auto = outcome["result"]["auto"]
     assert auto["decision"] == "applied", auto
-    assert calls == [("apply_installer", {"target": "1.2.3", "swap_busy": True})]
+    assert calls == [("apply_installer", {"target": "1.2.3", "swap_busy": False})]
+
+
+def test_auto_mode_waits_while_mcp_server_runs(tmp_path, monkeypatch):
+    """Работающий MCP-сервер без самопереноса — `waiting / mcp_running`, установки нет."""
+    from standkit_companion import autoupdate
+
+    log: list = []
+    patch_cycles(monkeypatch, log, releases_check=Recorder(
+        "releases", log, result={"available": True, "target": "1.2.3", "latest": "1.2.3"}))
+    calls: list = []
+    _guard_apply(monkeypatch, calls)
+    monkeypatch.setattr(releases, "stage_installer", Recorder(
+        "stage_installer", log, result={"version": "1.2.3",
+                                        "filename": "bpmkit-setup-1.2.3.exe"}))
+    monkeypatch.setattr(autoupdate, "install_dir_writable", lambda binary: True)
+    monkeypatch.setattr(autoupdate.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+    monkeypatch.setattr(releases, "read_runtime_marker", lambda: None)
+    runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto",
+                                                       update_ring="early"))
+    runner_obj._state.releases["rollout"] = {"paused": False}
+    runner_obj._state.releases["rollout_version"] = "1.2.3"
+
+    outcome = runner_obj.run_cycle("releases")
+
+    auto = outcome["result"]["auto"]
+    assert (auto["decision"], auto["reason"]) == ("waiting", "mcp_running")
+    assert calls == []
     assert outcome["result"]["staged"] is None, "в auto мимо autoupdate ничего не готовится"
 
 
@@ -593,6 +622,7 @@ def test_auto_mode_stage_failure_does_not_fail_the_check(tmp_path, monkeypatch):
     monkeypatch.setattr(releases, "stage_installer", Recorder(
         "stage_installer", log, raises=[ChannelError("обрыв", kind="offline")]))
     monkeypatch.setattr(autoupdate, "install_dir_writable", lambda binary: True)
+    monkeypatch.setattr(autoupdate.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
     runner_obj = make_runner(tmp_path, settings_all_on(update_mode="auto",
                                                        update_ring="early"))
     runner_obj._state.releases["rollout"] = {"paused": False}
@@ -1040,10 +1070,14 @@ def test_cli_auto_update_prints_decision_and_never_raises(tmp_path, capsys, monk
 
     rc = cli.main(["auto-update", "--json", "--trigger", "schedule", "--config", str(config)])
     payload = json.loads(capsys.readouterr().out)
+    assert rc == 1 and payload["trigger"] == "schedule"
+
+    rc = cli.main(["auto-update", "--json", "--trigger", "exit", "--config", str(config)])
+    payload = json.loads(capsys.readouterr().out)
 
     assert rc == 1
     assert (payload["ok"], payload["reason"], payload["trigger"]) == (
-        False, "context_unavailable", "schedule")
+        False, "context_unavailable", "exit")
 
     config.write_text(json.dumps({"companion": {"update_mode": "off"}}), encoding="utf-8")
     rc = cli.main(["auto-update", "--config", str(config)])
