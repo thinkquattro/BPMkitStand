@@ -798,8 +798,29 @@ class CompanionRunner:
                 # (не запускаем: в режиме `notify` запуск — только кнопкой человека).
                 installer = self._stage_installer_quietly(session, check)
         return {"check": check, "staged": staged, "installer": installer, "auto": auto,
+                "hub": self._check_hub_quietly(session),
                 "cookbook": self._sync_cookbook(session),
                 "candidates": self._sync_candidates(settings)}
+
+    def _check_hub_quietly(self, session) -> dict:
+        """проверка новой версии диспетчера попутно с проверкой MCP.
+
+        Раньше канал диспетчера проверялся ТОЛЬКО отдельным действием `check_hub`,
+        которого ни «Проверить обновления», ни плановый тик не вызывали: у клиента
+        диспетчер оставался версией первой установки, а окно писало «последняя».
+        Только проверка (без скачивания): exe -- `/meta` канала hub, pip -- PyPI.
+        Сбой не роняет проверку MCP -- он записывается в состояние канала hub."""
+        try:
+            if hub_channel.is_frozen_hub():
+                return hub_channel.check_hub(session.client, self._state, "latest")
+            return hub_channel.check_hub_pypi(self._state)
+        except Exception as exc:  # noqa: BLE001 - попутная проверка не роняет основную
+            try:
+                self._state.mark("hub", "error", str(exc))
+                self._state.save()
+            except Exception:  # noqa: BLE001
+                pass
+            return {"error": str(exc)}
 
     def _stage_installer_quietly(self, session, check: dict) -> Optional[dict]:
         """Попутная подготовка установщика без права уронить проверку.
@@ -1159,7 +1180,7 @@ class CompanionRunner:
                 # pip-режим проверяется через PyPI, БЕЗ лицензионного
                 # конверта — резолв контекста (запуск CLI) здесь только лишний
                 # процесс. exe-режим по-прежнему идёт общим путём ниже (сессия).
-                return hub_channel.check_hub_pypi()
+                return hub_channel.check_hub_pypi(self._state)
             session = self._session(settings)
             if action == "check_hub":
                 return hub_channel.check_hub(session.client, self._state, version or "latest")
@@ -1217,6 +1238,7 @@ class CompanionRunner:
                 result["staged"] = staged
                 result["installer"] = installer
                 result["cookbook"] = self._sync_cookbook(session)
+                result["hub"] = self._check_hub_quietly(session)
                 # «Проверить» в окне «Обновления» заодно сверяет индекс паттернов с
                 # сервером (и докачивает его при расхождении) и обновляет счётчик. Это
                 # делается в ФОНЕ (`patterns_stats(force=True)`): докачка индекса не

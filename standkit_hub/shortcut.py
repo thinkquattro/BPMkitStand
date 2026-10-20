@@ -94,7 +94,8 @@ def windows_pythonw_executable() -> str:
 _windows_pythonw_executable = windows_pythonw_executable
 
 
-def build_windows_shortcut_script(lnk_path: Path, target: str, icon_path: Path, working_dir: Path) -> str:
+def build_windows_shortcut_script(lnk_path: Path, target: str, icon_path: Path, working_dir: Path,
+                                  arguments: str = "-m standkit_hub") -> str:
     """
     Собирает PowerShell-скрипт создания ``.lnk`` через ``WScript.Shell``
     (без pywin32). Вынесено в отдельную чистую функцию специально ради
@@ -104,7 +105,7 @@ def build_windows_shortcut_script(lnk_path: Path, target: str, icon_path: Path, 
         "$WshShell = New-Object -ComObject WScript.Shell\n"
         f'$Shortcut = $WshShell.CreateShortcut("{lnk_path}")\n'
         f'$Shortcut.TargetPath = "{target}"\n'
-        '$Shortcut.Arguments = "-m standkit_hub"\n'
+        f'$Shortcut.Arguments = "{arguments}"\n'
         f'$Shortcut.IconLocation = "{icon_path}"\n'
         f'$Shortcut.WorkingDirectory = "{working_dir}"\n'
         "$Shortcut.Save()\n"
@@ -122,8 +123,13 @@ def _install_windows() -> ShortcutResult:
     except (FileNotFoundError, OSError) as exc:
         return ShortcutResult(ok=False, path=None, message=f"Не удалось извлечь иконку: {exc}")
 
-    target = _windows_pythonw_executable()
-    script = build_windows_shortcut_script(lnk_path, target, icon_path, Path.home())
+    # в exe-сборке sys.executable -- сам BPMkit-hub.exe, аргументы
+    # интерпретатора ему не нужны (раньше ярлык выходил «BPMkit-hub.exe -m standkit_hub»).
+    if getattr(sys, "frozen", False):
+        target, arguments = sys.executable, ""
+    else:
+        target, arguments = _windows_pythonw_executable(), "-m standkit_hub"
+    script = build_windows_shortcut_script(lnk_path, target, icon_path, Path.home(), arguments)
 
     try:
         # run_console, а не голый subprocess.run: установку ярлыка запускают в

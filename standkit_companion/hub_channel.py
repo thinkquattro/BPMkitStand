@@ -176,7 +176,7 @@ def check_hub(client, state, version: str = LATEST) -> dict:
     }
 
 
-def check_hub_pypi(*, timeout: float = _PYPI_TIMEOUT_S) -> dict:
+def check_hub_pypi(state=None, *, timeout: float = _PYPI_TIMEOUT_S) -> dict:
     """Best-effort проверка версии `standkit` на PyPI для PIP-режима.
 
     ЛУЧШЕЕ СТАРАНИЕ намеренно: недоступность PyPI, отсутствие сети, HTTP-ошибка
@@ -207,6 +207,16 @@ def check_hub_pypi(*, timeout: float = _PYPI_TIMEOUT_S) -> dict:
         }
     latest = entry.get("latest")
     available = bool(latest) and compare_versions(latest, _standkit_version) > 0
+    if state is not None:
+        # результат обязан попасть в состояние канала -- карточка
+        # `hub_status()` строит `update_available` из `known_latest`; без записи
+        # pip-диспетчер всегда показывал «последняя».
+        state.hub["mode"] = "pip"
+        state.hub["known_latest"] = latest or None
+        state.mark("hub", "ok",
+                   f"Доступна версия {latest} (установлена {_standkit_version})" if available
+                   else f"Установлена актуальная версия диспетчера ({_standkit_version})")
+        state.save()
     return {
         "mode": "pip",
         "available": available,
@@ -428,6 +438,11 @@ def hub_status(state) -> dict:
         "staged": staged,
         "self_update_launched": state.hub.get("self_update_launched"),
         "update_available": update_available,
+        # была ли проверка вообще и чем кончилась -- без этого окно
+        # рисовало «последняя» диспетчеру, который ни разу не проверялся.
+        "checked_at": state.hub.get("last_check_at"),
+        "status": state.hub.get("last_status"),
+        "detail": state.hub.get("last_detail") or "",
     }
 
 
