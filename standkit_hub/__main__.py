@@ -30,6 +30,7 @@ import errno as _errno
 import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -37,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from standkit import __version__ as _standkit_version
+from standkit import platform as _platform
 from standkit.platform import current_user_name, current_user_sid, is_elevated
 from standkit_hub import instance as _instance
 from standkit_hub.config import HubConfig
@@ -48,6 +50,7 @@ from standkit_hub.elevation import ReparseGuardError, read_handoff, refusal_text
 from standkit_hub.security import InsecureBindError, generate_session_token
 from standkit_hub.server import DEFAULT_HUB_PORT, HubAlreadyRunning, bind_hub_server
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
+from standkit_hub import installed_exe as _installed_exe
 
 # Лог диспетчера. Под pythonw.exe stderr не подключён никуда,
 # поэтому всё, что объясняет отказ или завершение, идёт в файл.
@@ -177,6 +180,7 @@ def _takeover_running_instance(
         our_version=_standkit_version,
         no_takeover=no_takeover,
         unauthorized_seen=_instance.unauthorized_seen(state_file),
+        our_frozen=bool(getattr(sys, "frozen", False)),
     ):
         return False, ""
 
@@ -305,6 +309,45 @@ def _remote_autostart(config: HubConfig) -> None:
     refusal = _remote_mode.autostart(config)
     if refusal:
         _log.warning(f"удалённый режим BPMkit не запущен автоматически: {refusal}")
+
+
+def _should_hand_over_to_installed_exe(args) -> bool:
+    """pip-запуск обычного диспетчера при установленном exe -> отдать exe.
+
+    Только для обычного старта (ярлык, ``python -m standkit_hub``): служебные
+    одноразовые режимы (UAC-перезапуск, elevated-op, самообновление, hub-stop)
+    принадлежат уже работающему pip-экземпляру и передаче не подлежат."""
+    if getattr(sys, "frozen", False):
+        return False
+    if os.environ.get(_installed_exe.ALLOW_PIP_ENV) == "1":
+        return False
+    service = (args.takeover, args.result_file, args.initiator_sid, args.elevated_op,
+               args.apply_self_update, args.hub_stop, args.session_token_file)
+    if any(service):
+        return False
+    return bool(_installed_exe.find_installed_hub_exe())
+
+
+def _hand_over_to_installed_exe(args) -> int:
+    exe = _installed_exe.find_installed_hub_exe()
+    if not exe:
+        return 1
+    cmd = [exe]
+    if args.no_browser:
+        cmd.append("--no-browser")
+    try:
+        _platform.spawn_hidden(cmd, Path(exe).parent,
+                               Path(tempfile.gettempdir()) / "bpmkit-hub-handover.log",
+                               env=_platform.independent_child_env())
+    except OSError as exc:
+        _log.warning("не удалось запустить диспетчер из установщика %s: %s", exe, exc)
+        print(f"[standkit-hub] не удалось запустить {exe}: {exc}")
+        return 1
+    msg = (f"BPMkit установлен установщиком -- запущен его диспетчер ({exe}). "
+           f"pip-пакет standkit больше не нужен: python -m pip uninstall standkit")
+    _log.warning(msg)
+    print(f"[standkit-hub] {msg}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -514,6 +557,9 @@ def main(argv: list[str] | None = None) -> int:
         result = install_desktop_shortcut() if args.install_shortcut else uninstall_desktop_shortcut()
         _log.warning(f"{result.message}")
         return 0 if result.ok else 1
+
+    if argv is None and _should_hand_over_to_installed_exe(args):
+        return _hand_over_to_installed_exe(args)
 
     our_sid = current_user_sid()
 
