@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from standkit import __version__ as _standkit_version
+from standkit_hub.installed_exe import is_frozen_hub_executable
 from standkit.platform import (
     ProcessError,
     current_session_id,
@@ -334,6 +335,7 @@ def should_takeover(
     our_version: Optional[str] = None,
     no_takeover: bool = False,
     unauthorized_seen: bool = False,
+    our_frozen: Optional[bool] = None,
 ) -> bool:
     """
     Нужно ли новому процессу отобрать порт у работающего.
@@ -374,6 +376,19 @@ def should_takeover(
         return True
     if running is None:
         return False
+    # pip-диспетчер (our_frozen=False) НИКОГДА не отбирает порт у exe из
+    # установщика -- иначе старый ярлык/забытый pip-пакет снова и снова подменял
+    # поставочный диспетчер своей (не обновляемой) версией. Обратное разрешено:
+    # exe вытесняет pip-экземпляр обычным версионным правилом ниже.
+    if our_frozen is False:
+        if is_frozen_hub_executable(running.executable):
+            return False
+    # Обратное правило: exe из установщика вытесняет pip-экземпляр ВСЕГДА, даже при
+    # равных версиях -- после покупки подписки окно должно открываться у поставочного
+    # диспетчера, а не у оставшегося с бесплатной pip-установки.
+    if our_frozen is True and running.executable:
+        if not is_frozen_hub_executable(running.executable) and not (our_sid and running.user_sid and our_sid != running.user_sid):
+            return True
     if our_sid and running.user_sid and our_sid != running.user_sid:
         return False
     # работающий хаб недавно отверг заход без сессии (см. mark_unauthorized) --

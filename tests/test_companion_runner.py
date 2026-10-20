@@ -224,6 +224,14 @@ def patch_cycles(monkeypatch, log, *, patterns_stub=None, releases_check=None,
     monkeypatch.setattr(revocations, "refresh", stubs["revocations_refresh"])
     monkeypatch.setattr(cookbook, "sync", stubs["cookbook_sync"])
     monkeypatch.setattr(candidates, "flush", stubs["candidates_flush"])
+    # проверка диспетчера едет попутчиком на «Проверить обновления» и плановом
+    # тике релизов -- заглушка без записи в `log` (как у кукбука), иначе тест ходил бы
+    # в настоящий PyPI/бэкенд.
+    stubs["hub_check"] = Recorder("hub", [], result={"available": False, "mode": "exe"})
+    stubs["hub_check_pypi"] = Recorder("hub_pypi", [], result={"available": False, "mode": "pip"})
+    from standkit_companion import hub_channel as _hub_channel
+    monkeypatch.setattr(_hub_channel, "check_hub", stubs["hub_check"])
+    monkeypatch.setattr(_hub_channel, "check_hub_pypi", stubs["hub_check_pypi"])
     return stubs
 
 

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 import json
 
@@ -492,6 +493,8 @@ def test_takeover_different_version_prints_and_logs_explanation(tmp_path, monkey
     monkeypatch.setattr(hub_main, "is_elevated", lambda: False)
     monkeypatch.setattr(_instance, "is_alive", lambda pid: True)
     monkeypatch.setattr(hub_main, "_standkit_version", "0.12.11")
+    # перехват у exe делает только exe (pip-экземпляр порт у exe не отбирает)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
 
     caplog.set_level(logging.WARNING, logger=hub_main._log.name)
     exc = HubAlreadyRunning("127.0.0.1", 8770)

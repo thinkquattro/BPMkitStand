@@ -4250,7 +4250,11 @@
     if (currentEl) currentEl.textContent = hubVersionLabel(current, frozen);
     if (hasNew) setChip("upd-hub-chip", "new", `доступна ${staged || latest}`, "");
     else if (hub.status === "error") setChip("upd-hub-chip", "err", "ошибка", String(hub.detail || "ошибка проверки"));
-    else if (current) setChip("upd-hub-chip", "ok", "последняя", "");
+    // «последняя» -- только по факту успешной проверки; без неё честно
+    // «не проверялась» (раньше любой диспетчер с номером версии был «последней»).
+    else if (hub.status === "skipped") setChip("upd-hub-chip", null, "не опубликован", String(hub.detail || ""));
+    else if (current && hub.checked_at && hub.status === "ok") setChip("upd-hub-chip", "ok", "последняя", "");
+    else if (current) setChip("upd-hub-chip", null, "не проверялась", "Нажмите «Проверить обновления»");
     else setChip("upd-hub-chip", null, "", "");
 
     const applyBtn = byId("upd-hub-apply-btn");
