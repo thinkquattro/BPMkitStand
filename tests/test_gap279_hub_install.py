@@ -175,7 +175,7 @@ def test_run_action_apply_installer_rejects_kind_mismatch(tmp_path, popen_calls)
 def test_apply_installer_elevation_required_is_typed(tmp_path, monkeypatch):
     runner, _ctx, _client = _make_runner(tmp_path)
 
-    def _refuse(cmd, cwd, log_path):
+    def _refuse(cmd, cwd, log_path, env=None):
         cause = OSError("The requested operation requires elevation")
         cause.winerror = releases.INSTALLER_ELEVATION_WINERROR
         raise ProcessError("не удалось запустить") from cause

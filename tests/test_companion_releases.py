@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import inspect
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -698,14 +699,20 @@ def test_public_api_has_no_switch_to_apply_unsigned_binary():
     выглядит в коде безобидно («иногда же надо»), а на деле снимает единственную защиту от
     установки чужого исполняемого файла. Пусть такая правка ломает тест сразу.
     """
-    params = inspect.signature(releases.apply_staged).parameters
-    assert list(params) == ["state", "ctx", "target"], (
-        f"у apply_staged появились новые параметры: {list(params)}")
-    for name in params:
-        low = name.lower()
-        assert not low.startswith(("skip", "force", "allow")), (
-            f"параметр {name!r} — это выключатель fail-closed политики")
-        assert "unsigned" not in low and "signature" not in low
+    # `swap_busy` — не выключатель проверки, а способ обойтись с ЗАНЯТЫМ файлом (путь
+    # «только exe» автоматического обновления): подпись и применимость он не трогает,
+    # это проверяют тесты `test_apply_staged_swap_busy_*` ниже.
+    for func, expected in ((releases.apply_staged, ["state", "ctx", "target", "swap_busy"]),
+                           (releases.apply_installer,
+                            ["state", "ctx", "target", "swap_busy"])):
+        params = inspect.signature(func).parameters
+        assert list(params) == expected, (
+            f"у {func.__name__} появились новые параметры: {list(params)}")
+        for name in params:
+            low = name.lower()
+            assert not low.startswith(("skip", "force", "allow")), (
+                f"параметр {name!r} — это выключатель fail-closed политики")
+            assert "unsigned" not in low and "signature" not in low
 
     # `allow_unsigned` есть ровно в одном месте — в `stage`, и только для тестов механизма.
     for name in releases.__all__:
@@ -968,3 +975,261 @@ def test_artifact_type_mismatch_is_not_retriable_and_visible(env):
     assert title
     assert retriable is False
     assert user_visible is True
+
+
+# ======================================================================================
+# Автоматическое обновление: путь «только exe» с занятым бинарём (swap_busy)
+# ======================================================================================
+def _stage_for_swap(env):
+    state, ctx = env
+    client, blob, _meta_dict = _client("0.307.0")
+    releases.stage(client, state, ctx)
+    return state, ctx, blob, Path(ctx.binary_path).read_bytes()
+
+
+def test_apply_staged_swap_busy_renames_running_binary_to_old(env, monkeypatch):
+    """Бинарь, занятый СЕРВЕРОМ (мьютекс виден), при `swap_busy=True` не повод
+    отказать: он переименовывается в `bpmkit.exe.old`, новый ложится на его имя."""
+    state, ctx, blob, old_bytes = _stage_for_swap(env)
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+
+    result = releases.apply_staged(state, ctx, swap_busy=True)
+
+    binary = Path(ctx.binary_path)
+    old = binary.with_name(binary.name + releases.OLD_SUFFIX)
+    assert result["applied"] is True
+    assert binary.read_bytes() == blob
+    assert old.read_bytes() == old_bytes, "работающая версия ждёт перезапуска хоста рядом"
+    assert result["old_path"] == str(old)
+    assert result["restart_required"] is True
+    assert state.releases["current"]["swapped_busy"] is True
+    assert result["backup"] and Path(result["backup"]).read_bytes() == old_bytes, (
+        "бэкап для отката делается и на этом пути")
+    assert not binary.with_name(binary.name + ".new").exists()
+
+
+def test_apply_staged_swap_busy_refuses_file_busy_without_server_mutex(env, monkeypatch):
+    """Мьютекса сервера нет, а проба записи упала (файл держит антивирус или чужой
+    процесс — о нём самоперенос ничего не говорит): отказ `local_io`, как без флага, и
+    никакого переименования."""
+    state, ctx, _blob_bytes, old_bytes = _stage_for_swap(env)
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: False)
+
+    def probe_says_busy(path):
+        raise PermissionError(32, "The process cannot access the file")
+
+    monkeypatch.setattr(fsutil, "probe_writable", probe_says_busy)
+
+    with pytest.raises(ChannelError) as excinfo:
+        releases.apply_staged(state, ctx, swap_busy=True)
+
+    binary = Path(ctx.binary_path)
+    assert excinfo.value.kind == "local_io"
+    assert binary.read_bytes() == old_bytes
+    assert not binary.with_name(binary.name + releases.OLD_SUFFIX).exists()
+    assert releases.staged_info(state) is not None, "подготовленное обновление сохранено"
+
+
+def test_current_version_prefers_newer_manifest_on_disk(env):
+    """Установщик пишет версию в `manifest.json` поставки, а не в состояние канала:
+    более новая версия на диске главнее записанной (иначе её ставили бы снова)."""
+    state, ctx = env
+    binary = Path(ctx.binary_path)
+    manifest = releases._install_root_for(binary) / "manifest.json"
+    state.releases["current"] = {"version": "0.306.0"}
+    manifest.write_text(json.dumps({"version": "0.307.0"}), encoding="utf-8")
+    assert releases._current_version(state, ctx) == "0.307.0"
+
+    manifest.write_text(json.dumps({"version": "0.305.0"}), encoding="utf-8")
+    assert releases._current_version(state, ctx) == "0.306.0", "старее — не главнее"
+
+    manifest.write_text("{битый", encoding="utf-8")
+    assert releases._current_version(state, ctx) == "0.306.0"
+
+
+def test_manual_rollback_marks_version_bad_for_automation(env):
+    """Человек откатил версию — автоматика её больше не ставит (снять — clear-bad-versions)."""
+    state, ctx = env
+    client, _blob_bytes, _meta_dict = _client("0.307.0")
+    releases.stage(client, state, ctx)
+    releases.apply_staged(state, ctx)
+
+    releases.rollback(state, ctx)
+
+    assert state.releases["bad_versions"] == ["0.307.0"]
+
+
+def test_manual_rollback_of_pending_auto_install_releases_the_wait(env):
+    """Ручной откат версии, ждущей подтверждения автоустановки, снимает ожидание: иначе
+    автоматика вечно отвечала бы «ждём перезапуска» и не ставила следующие версии."""
+    state, ctx = env
+    client, _blob_bytes, _meta_dict = _client("0.307.0")
+    releases.stage(client, state, ctx)
+    releases.apply_staged(state, ctx)
+    state.releases["auto"] = {"applied_version": "0.307.0", "previous_version": "0.306.0",
+                              "binary": ctx.binary_path, "via": "exe",
+                              "applied_at": "2026-10-20T11:00:00Z", "confirmed_at": None}
+
+    releases.rollback(state, ctx)
+
+    assert state.releases["auto"] is None
+    event = state.releases["last_auto_event"]
+    assert (event["kind"], event["from"]) == ("manual_rollback", "0.307.0")
+
+
+def test_manual_rollback_of_other_version_keeps_auto_record(env):
+    state, ctx = env
+    client, _blob_bytes, _meta_dict = _client("0.307.0")
+    releases.stage(client, state, ctx)
+    releases.apply_staged(state, ctx)
+    record = {"applied_version": "0.308.0", "confirmed_at": None, "via": "installer"}
+    state.releases["auto"] = dict(record)
+
+    releases.rollback(state, ctx)
+
+    assert state.releases["auto"] == record
+
+
+def test_apply_staged_swap_busy_still_verifies_signature(env, monkeypatch):
+    """`swap_busy` не выключатель проверки: подменённый в стейджинге файл не ставится."""
+    state, ctx, _blob_bytes, old_bytes = _stage_for_swap(env)
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+    staged = Path(state.releases["staged"]["path"])
+    staged.write_bytes(b"MZ" + b"podmena" * 100)
+
+    with pytest.raises(ChannelError):
+        releases.apply_staged(state, ctx, swap_busy=True)
+
+    binary = Path(ctx.binary_path)
+    assert binary.read_bytes() == old_bytes
+    assert not binary.with_name(binary.name + releases.OLD_SUFFIX).exists()
+
+
+def test_apply_staged_swap_busy_refuses_when_previous_old_is_held(env, monkeypatch):
+    """Прежний `.old` не удаляется (ещё работает процесс позапрошлой версии) — третью
+    версию поверх не ставим: `mcp_running`, установленная не тронута."""
+    state, ctx, _blob_bytes, old_bytes = _stage_for_swap(env)
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+    binary = Path(ctx.binary_path)
+    held = binary.with_name(binary.name + releases.OLD_SUFFIX)
+    held.mkdir()  # каталог не удаляется unlink'ом — тот же OSError, что у занятого файла
+
+    with pytest.raises(ChannelError) as excinfo:
+        releases.apply_staged(state, ctx, swap_busy=True)
+
+    assert excinfo.value.kind == "mcp_running"
+    assert binary.read_bytes() == old_bytes
+    assert releases.staged_info(state) is not None, "подготовленное обновление сохранено"
+
+
+def test_apply_staged_swap_busy_restores_binary_when_final_replace_fails(env, monkeypatch):
+    """Новый файл не лёг на место — работающий возвращается из `.old`: клиент не
+    остаётся без `bpmkit.exe` ни при каком исходе."""
+    state, ctx, _blob_bytes, old_bytes = _stage_for_swap(env)
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+
+    def refuse(src, dst, *a, **k):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(fsutil, "replace_with_retry", refuse)
+
+    with pytest.raises(ChannelError) as excinfo:
+        releases.apply_staged(state, ctx, swap_busy=True)
+
+    binary = Path(ctx.binary_path)
+    assert excinfo.value.kind == "local_io"
+    assert binary.read_bytes() == old_bytes
+    assert not binary.with_name(binary.name + releases.OLD_SUFFIX).exists()
+    assert not binary.with_name(binary.name + ".new").exists()
+    assert state.releases["restart_required"] is False
+
+
+def test_apply_staged_without_swap_busy_keeps_refusing_busy_binary(env, monkeypatch):
+    """Ручная кнопка ведёт себя как прежде: занятый бинарь — честный отказ."""
+    state, ctx, _blob_bytes, old_bytes = _stage_for_swap(env)
+    monkeypatch.setattr(releases.mcp_mutex, "server_mutex_exists", lambda *a, **k: True)
+
+    with pytest.raises(ChannelError) as excinfo:
+        releases.apply_staged(state, ctx)
+
+    assert excinfo.value.kind == "mcp_running"
+    assert Path(ctx.binary_path).read_bytes() == old_bytes
+
+
+# ======================================================================================
+# Раскатка: поле rollout ответа GET /v1/version/latest
+# ======================================================================================
+@pytest.mark.parametrize("raw,expected", [
+    (None, {"paused": False, "published_at": None, "stable_after": None}),
+    ("мусор", {"paused": False, "published_at": None, "stable_after": None}),
+    ({"paused": "true", "stable_after": "не дата"},
+     {"paused": False, "published_at": None, "stable_after": None}),
+    ({"paused": True, "published_at": "2026-10-16T10:00:00Z",
+      "stable_after": "2026-10-18T10:00:00Z"},
+     {"paused": True, "published_at": "2026-10-16T10:00:00Z",
+      "stable_after": "2026-10-18T10:00:00Z"}),
+])
+def test_parse_rollout_contract(raw, expected):
+    """Мусор и отсутствие — «паузы нет, сроков нет»; пауза — только строгое True."""
+    assert releases.parse_rollout(raw) == expected
+
+
+class _VersionInfoClient(FakeClient):
+    """FakeClient, который отвечает и на `GET /v1/version/latest`."""
+
+    def __init__(self, *args, version_info=None, version_error=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.version_info = version_info
+        self.version_error = version_error
+
+    def get_json(self, path, *, params=None, authorized=True, etag=None) -> tuple:
+        if path == "/v1/version/latest":
+            self.calls.append(("GET", path))
+            if self.version_error is not None:
+                raise self.version_error
+            return dict(self.version_info or {}), {}
+        return super().get_json(path, params=params, authorized=authorized, etag=etag)
+
+
+def test_check_stores_rollout_of_latest(env):
+    state, ctx = env
+    _client_obj, blob, meta = _client("0.307.0")
+    client = _VersionInfoClient(meta, blob, version_info={
+        "latest": "0.307.0", "release_notes": [],
+        "rollout": {"paused": True, "published_at": "2026-10-16T10:00:00Z",
+                    "stable_after": "2026-10-18T10:00:00Z"}})
+
+    releases.check(client, state, ctx)
+
+    assert state.releases["rollout_version"] == "0.307.0"
+    assert state.releases["rollout"]["paused"] is True
+    assert state.releases["rollout"]["stable_after"] == "2026-10-18T10:00:00Z"
+    summary = state.summary()["releases"]["rollout"]
+    assert summary["paused"] is True and summary["version"] == "0.307.0"
+
+
+def test_check_old_backend_without_rollout_means_no_pause(env):
+    state, ctx = env
+    _client_obj, blob, meta = _client("0.307.0")
+    client = _VersionInfoClient(meta, blob, version_info={"latest": "0.307.0"})
+
+    releases.check(client, state, ctx)
+
+    assert state.releases["rollout"] == {"paused": False, "published_at": None,
+                                         "stable_after": None}
+
+
+def test_check_forgets_previous_rollout_when_version_info_fails(env):
+    """Раскатка решает, а не информирует: неудачный запрос — «не знаю» (`None`), а не
+    вчерашнее «пауза снята»."""
+    state, ctx = env
+    state.releases["rollout"] = {"paused": False, "published_at": None, "stable_after": None}
+    state.releases["rollout_version"] = "0.307.0"
+    _client_obj, blob, meta = _client("0.307.0")
+    client = _VersionInfoClient(meta, blob,
+                                version_error=ChannelError("нет связи", kind="offline"))
+
+    releases.check(client, state, ctx)
+
+    assert state.releases["rollout"] is None
+    assert state.releases["rollout_version"] is None

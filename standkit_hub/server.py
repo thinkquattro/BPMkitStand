@@ -89,7 +89,8 @@ from standkit_hub.remote_mode import RemoteModeController, RemoteModeError
 from standkit_hub import elevation as _elevation
 from standkit_hub import instance as _instance
 from standkit_hub.client import FederatedClient, RemoteCallError
-from standkit_hub.config import HubConfig, normalize_idle_shutdown_min
+from standkit_hub.config import (UPDATE_MODES, HubConfig, normalize_idle_shutdown_min,
+                                 normalize_update_mode, sync_legacy_releases_toggle)
 from standkit_hub.hub_logging import logger as _hub_logger
 from standkit_hub.mutex import release_hub_mutex
 from standkit_hub.poller import StatusPoller, StatusSnapshot
@@ -811,6 +812,9 @@ COMPANION_ACTION_ROUTES = {
     "/api/companion/check-skills": "check_skills",
     "/api/companion/stage-skills": "stage_skills",
     "/api/companion/apply-skills": "apply_skills",
+    # снять запрет автоматической установки с плохих версий (откат, исчерпанные
+    # попытки) — локально, без сети; ручная установка этих версий доступна и так.
+    "/api/companion/clear-bad-versions": "clear_bad_versions",
 }
 
 #: Действия, которые умеют адресоваться к конкретной версии (тело
@@ -819,7 +823,8 @@ COMPANION_ACTION_ROUTES = {
 COMPANION_VERSION_ACTIONS = frozenset({"stage_update", "rollback",
                                        "stage_installer", "apply_installer",
                                        "check_hub", "stage_hub",
-                                       "check_skills", "stage_skills"})
+                                       "check_skills", "stage_skills",
+                                       "clear_bad_versions"})
 
 #: ``CompanionError.kind`` → HTTP-код. Смысл группировки, а не «все ошибки 500»:
 #:
@@ -881,11 +886,19 @@ COMPANION_DISABLED_MESSAGE = "Канал обновлений выключен �
 #: * ``revocations`` — цикл отзыва больше не настраивается вовсе: он всегда
 #:   включён и тикает с частотой паттернов (см. ``CompanionRunner._enabled``);
 #: * ``require_pattern_signature`` — строгий режим, который сегодня просто
-#:   выключил бы канал (подписи markdown у издателя ещё нет).
+#:   выключил бы канал (подписи markdown у издателя ещё нет);
+#: * ``auto_stage_release`` — прежний флажок «скачивать заранее»: подготовку
+#:   теперь решает режим обновлений ``update_mode``, а поле только читается.
 #:
 #: Скрытие двустороннее: ``GET /api/settings`` их не отдаёт, ``POST`` — не
 #: принимает (присланные молча игнорируются, а не затирают файл).
-_UI_HIDDEN_COMPANION_FIELDS = ("backend_url", "revocations", "require_pattern_signature")
+_UI_HIDDEN_COMPANION_FIELDS = ("backend_url", "revocations", "require_pattern_signature",
+                               "auto_stage_release")
+
+#: Поля секции ``companion``, которые UI показывает, но НЕ меняет: кольцо раскатки
+#: задают установка (параметр мастера) и CLI BPMkit, окно «Обновления» его только
+#: показывает. ``POST /api/settings`` их молча игнорирует.
+_UI_READONLY_COMPANION_FIELDS = ("update_ring",)
 
 
 def strip_ui_hidden_companion(section: object) -> dict:
@@ -894,6 +907,30 @@ def strip_ui_hidden_companion(section: object) -> dict:
         return {}
     return {key: value for key, value in section.items()
             if key not in _UI_HIDDEN_COMPANION_FIELDS}
+
+
+def strip_ui_readonly_companion(section: object) -> dict:
+    """Присланная формой секция без полей «только для чтения» (см.
+    ``_UI_READONLY_COMPANION_FIELDS``) — применяется к ``POST``, не к ``GET``."""
+    if not isinstance(section, dict):
+        return {}
+    return {key: value for key, value in section.items()
+            if key not in _UI_READONLY_COMPANION_FIELDS}
+
+
+def companion_update_mode_error(section: object) -> str:
+    """Текст ошибки, если присланный ``update_mode`` не из ``UPDATE_MODES``, иначе пусто.
+
+    Режим обновлений — единственное поле секции, которое ОТКАЗЫВАЕТ, а не
+    нормализуется молча: опечатка в нём меняет, будет ли машина ставить
+    обновления без человека, и «сохранено» с подменённым значением хуже ошибки.
+    """
+    if not isinstance(section, dict) or "update_mode" not in section:
+        return ""
+    if normalize_update_mode(section.get("update_mode")):
+        return ""
+    return ("поле companion.update_mode: ожидается одно из "
+            + ", ".join(UPDATE_MODES))
 
 
 def companion_patterns_summary(status: object) -> Optional[dict]:
@@ -1038,7 +1075,10 @@ def merge_companion_section(current: dict, incoming: object) -> dict:
             merged[key] = cycle
         else:
             merged[key] = value
-    return merged
+    # Режим обновлений главнее прежнего флажка ``releases.enabled`` (он его зеркало):
+    # флажок, присланный без режима, переводится в режим, иначе ``from_dict`` молча
+    # вернул бы его к значению режима.
+    return sync_legacy_releases_toggle(merged, incoming)
 
 
 def _companion_cycle_names() -> tuple:
@@ -2254,6 +2294,10 @@ def make_handler(
             # ``defaults`` — справочное поле ответа GET (см. _api_settings_get),
             # не часть конфига. Если форма вернула его назад — молча выбрасываем.
             data.pop("defaults", None)
+            mode_error = companion_update_mode_error(body.get("companion"))
+            if mode_error:
+                self._send_json(400, {"error": mode_error})
+                return
             if "companion" in body:
                 # Вложенная секция канала: плоский update выше заменил бы её
                 # целиком, потеряв всё, чего форма не прислала (см.
@@ -2264,7 +2308,8 @@ def make_handler(
                 # права его переписать, даже прислав ключ случайно.
                 data["companion"] = merge_companion_section(
                     current.companion.to_dict(),
-                    strip_ui_hidden_companion(body.get("companion")))
+                    strip_ui_readonly_companion(
+                        strip_ui_hidden_companion(body.get("companion"))))
             new_config = HubConfig.from_dict(data)
             new_config.save(config_path)
             # Сброс кэша сразу после собственной записи — не полагаемся на
