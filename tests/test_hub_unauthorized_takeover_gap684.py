@@ -118,3 +118,112 @@ def test_root_without_session_marks_and_authed_root_clears(running_hub):
     assert _instance.unauthorized_seen(state_file)
     _get(base_url + f"/?t={token}")
     assert not _instance.unauthorized_seen(state_file)
+
+
+# ====================================================================================
+# хаб, поднятый в фоне и ни разу не открытый со своим токеном
+# ====================================================================================
+
+_OLD = time.time() - 3600          # хаб поднят час назад
+_GRACE = _instance.SESSION_UNCONFIRMED_GRACE_SEC
+
+
+class TestGap821UnconfirmedSession:
+    def test_background_hub_without_confirmed_session_is_unconfirmed(self, tmp_path):
+        sf = tmp_path / "standkit-hub.json"
+        assert _instance.session_unconfirmed(sf, _state(started_at=_OLD)) is True
+
+    def test_confirmed_session_is_not_unconfirmed(self, tmp_path):
+        sf = tmp_path / "standkit-hub.json"
+        _instance.mark_session_confirmed(sf)
+        assert _instance.session_unconfirmed(sf, _state(started_at=_OLD)) is False
+
+    def test_marker_older_than_hub_start_is_a_leftover(self, tmp_path):
+        """Остаток маркера от прошлого процесса (удаление при старте best-effort) не в счёт."""
+        sf = tmp_path / "standkit-hub.json"
+        _instance.mark_session_confirmed(sf)
+        path = _instance.session_ok_marker_path(sf)
+        os.utime(path, (_OLD - 100, _OLD - 100))
+        assert _instance.session_unconfirmed(sf, _state(started_at=_OLD)) is True
+
+    def test_fresh_hub_is_not_taken_over_during_double_click(self, tmp_path):
+        """Двойной клик по ярлыку: первая вкладка ещё грузится, хаб жить обязан."""
+        sf = tmp_path / "standkit-hub.json"
+        young = _state(started_at=time.time() - _GRACE / 3)
+        assert _instance.session_unconfirmed(sf, young) is False
+
+    def test_unknown_start_time_is_never_unconfirmed(self, tmp_path):
+        sf = tmp_path / "standkit-hub.json"
+        assert _instance.session_unconfirmed(sf, _state(started_at=0.0)) is False
+        assert _instance.session_unconfirmed(sf, None) is False
+
+    def test_shortcut_takes_over_background_hub_of_same_version(self):
+        assert should_takeover(_state(), we_elevated=False, our_version="1.0",
+                               session_unconfirmed=True) is True
+
+    def test_no_takeover_flag_keeps_old_behaviour(self):
+        assert should_takeover(_state(), we_elevated=False, our_version="1.0",
+                               session_unconfirmed=True, no_takeover=True) is False
+
+    def test_other_account_hub_is_never_taken_over(self):
+        running = _state(user_sid="S-1-5-21-AAA")
+        assert should_takeover(running, we_elevated=False, our_sid="S-1-5-21-BBB",
+                               our_version="1.0", session_unconfirmed=True) is False
+
+    def test_marker_contains_no_token_like_data(self, tmp_path):
+        sf = tmp_path / "standkit-hub.json"
+        _instance.mark_session_confirmed(sf)
+        text = _instance.session_ok_marker_path(sf).read_text(encoding="utf-8")
+        assert set(__import__("json").loads(text)) == {"at"}
+
+    def test_clear_without_marker_is_silent(self, tmp_path):
+        _instance.clear_session_confirmed(tmp_path / "standkit-hub.json")
+
+    def test_hub_writes_marker_on_first_authed_root_only(self, running_hub):
+        base_url, token, state_file = running_hub
+        _get(base_url + "/")                              # без сессии -- не подтверждение
+        assert not _instance.session_ok_marker_path(state_file).exists()
+        _get(base_url + f"/?t={token}")                   # со своим токеном -- подтверждение
+        marker = _instance.session_ok_marker_path(state_file)
+        assert marker.exists()
+        first = marker.stat().st_mtime_ns
+        _get(base_url + f"/?t={token}")
+        assert marker.stat().st_mtime_ns == first         # повторно файл не переписывается
+
+    def test_takeover_function_stops_unconfirmed_background_hub(self, monkeypatch, tmp_path):
+        """Сквозной выбор в __main__._takeover_running_instance: перехват без маркера 401."""
+        from standkit_hub import __main__ as hub_main
+        from standkit_hub.server import HubAlreadyRunning
+
+        run_dir = tmp_path
+        sf = _instance.state_path(run_dir)
+        running = _state(started_at=_OLD, version=hub_main._standkit_version, user_sid=None)
+        monkeypatch.setattr(_instance, "read_state", lambda path: running)
+        stopped = []
+        monkeypatch.setattr(_instance, "stop_running_instance",
+                            lambda st, *, run_dir, requester_pid=None: (stopped.append(st.pid), (True, ""))[1])
+        monkeypatch.setattr(_instance, "wait_port_released", lambda host, port: True)
+        monkeypatch.setattr(hub_main, "is_elevated", lambda: False)
+
+        ok, reason = hub_main._takeover_running_instance(
+            HubAlreadyRunning("127.0.0.1", 8770, running.version), sf, run_dir,
+            explicit=False, our_sid=None)
+
+        assert (ok, reason) == (True, "")
+        assert stopped == [running.pid]
+
+    def test_takeover_function_leaves_confirmed_hub_alone(self, monkeypatch, tmp_path):
+        from standkit_hub import __main__ as hub_main
+        from standkit_hub.server import HubAlreadyRunning
+
+        sf = _instance.state_path(tmp_path)
+        _instance.mark_session_confirmed(sf)
+        running = _state(started_at=_OLD, version=hub_main._standkit_version)
+        monkeypatch.setattr(_instance, "read_state", lambda path: running)
+        monkeypatch.setattr(hub_main, "is_elevated", lambda: False)
+
+        ok, _reason = hub_main._takeover_running_instance(
+            HubAlreadyRunning("127.0.0.1", 8770, running.version), sf, tmp_path,
+            explicit=False, our_sid=None)
+
+        assert ok is False

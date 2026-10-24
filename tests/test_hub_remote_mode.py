@@ -29,6 +29,16 @@ from standkit_hub.remote_mode import (
 from tests.test_hub_server import _close_hub_servers, _request, _start_hub  # noqa: F401
 
 CLI = ["C:/BPMkit/server/BPMkit.exe"]
+
+
+@pytest.fixture(autouse=True)
+def _never_run_real_cli(monkeypatch):
+    """Статус токена спрашивает CLI BPMkit. Набор не запускает настоящий процесс:
+    по умолчанию «токена нет» (rc=1); тесты хранилища подставляют свой двойник."""
+    rm.invalidate_token_cache()
+    monkeypatch.setattr(rm, "default_cli_runner", lambda argv, env=None, timeout=None: (1, "", ""))
+    yield
+    rm.invalidate_token_cache()
 HEALTH = {"ok": True, "version": "1.2.16", "profile": "default", "tools": 40,
           "transport": "streamable-http", "auth": "bearer"}
 
@@ -442,3 +452,237 @@ def test_ui_has_remote_pane_and_wiring():
     assert '"remote_token_ref"' in js
     assert 'id="mcpremote-query-warn"' in html and "updateRemoteQueryWarning" in js
     assert "после закрытия диспетчера" in html
+
+
+# ====================================================================================
+# токен проверяется и задаётся в ТОМ хранилище, что читает serve-http
+# ====================================================================================
+
+
+class _FakeBpmkitCli:
+    """Подставной ``BPMkit.exe setup remote-token``: хранилище секретов BPMkit -- словарь.
+
+    Повторяет контракт CLI: ``--status`` rc 0/1, ``--generate`` не перезаписывает без
+    ``--force``, ``--from-env`` берёт значение из ПЕРЕМЕННОЙ ОКРУЖЕНИЯ и требует >= 16 символов."""
+
+    def __init__(self, prefix=CLI):
+        self.prefix = list(prefix)
+        self.store: dict = {}
+        self.calls: list = []
+        self.envs: list = []
+        self.returncode_override = None
+
+    def __call__(self, argv, env=None, timeout=None):
+        self.calls.append(list(argv))
+        self.envs.append(dict(env) if env else None)
+        if self.returncode_override is not None:
+            return self.returncode_override, "", "usage: error"
+        tail = list(argv)[len(self.prefix):]
+        assert tail[:2] == ["setup", "remote-token"], tail
+        ref = tail[tail.index("--ref") + 1]
+        force = "--force" in tail
+        if "--status" in tail:
+            return (0 if ref in self.store else 1), json.dumps({"ok": ref in self.store}), ""
+        if ref in self.store and not force:
+            return 1, json.dumps({"ok": False, "error": "токен уже задан. Перезапись -- только осознанно, флагом --force"}), ""
+        if "--generate" in tail:
+            self.store[ref] = "generated-%d" % len(self.calls)
+            return 0, json.dumps({"ok": True, "ref": ref}), ""
+        if "--from-env" in tail:
+            name = tail[tail.index("--from-env") + 1]
+            value = (env or {}).get(name, "")
+            if len(value) < 16:
+                return 1, json.dumps({"ok": False, "error": "значение переменной короче 16 символов"}), ""
+            self.store[ref] = value
+            return 0, json.dumps({"ok": True, "ref": ref}), ""
+        raise AssertionError(tail)
+
+
+@pytest.fixture(autouse=False)
+def fresh_token_cache():
+    rm.invalidate_token_cache()
+    yield
+    rm.invalidate_token_cache()
+
+
+def _ctl(tmp_path, cli, world=None, **cfg_over):
+    w = world or _World()
+    return w, RemoteModeController(
+        _cfg(tmp_path, **cfg_over), cli_resolver=lambda: w.cli, spawn=w.spawn,
+        alive=lambda pid: pid in w.alive_pids, stopper=w.stop, probe=lambda h, p: w.health,
+        sleep=lambda s: None, image_of=lambda pid: w.image, startup_wait=0.5, cli_runner=cli)
+
+
+class TestGap612TokenInBpmkitStore:
+    def test_status_asks_bpmkit_store_not_standkit_store(self, tmp_path, monkeypatch, fresh_token_cache):
+        """Круг, найденный приёмкой 13.10: секрет в хранилище standkit хаб считал токеном."""
+        monkeypatch.setattr(rm, "_default_has_secret", lambda ref: True)     # есть ТОЛЬКО у standkit
+        cli = _FakeBpmkitCli()
+        _w, c = _ctl(tmp_path, cli)
+
+        assert c.status()["token_present"] is False
+
+    def test_token_created_by_hubs_own_command_is_seen(self, tmp_path, monkeypatch, fresh_token_cache):
+        monkeypatch.setattr(rm, "_default_has_secret", lambda ref: False)    # standkit пуст
+        cli = _FakeBpmkitCli()
+        cli.store[DEFAULT_REMOTE_TOKEN_REF] = "x" * 32                       # `setup remote-token --generate`
+        _w, c = _ctl(tmp_path, cli)
+
+        assert c.status()["token_present"] is True
+
+    def test_status_is_cached_but_start_is_fresh(self, tmp_path, fresh_token_cache):
+        cli = _FakeBpmkitCli()
+        cli.store[DEFAULT_REMOTE_TOKEN_REF] = "x" * 32
+        w, c = _ctl(tmp_path, cli)
+
+        c.status()
+        c.status()
+        assert len(cli.calls) == 1                      # опрос UI не плодит процессы BPMkit.exe
+        c.start()
+        assert len(cli.calls) == 2                      # а перед запуском проверка свежая
+
+    def test_generate_then_start_end_to_end(self, tmp_path, fresh_token_cache):
+        cli = _FakeBpmkitCli()
+        w, c = _ctl(tmp_path, cli)
+        with pytest.raises(RemoteModeError, match="Сгенерировать токен"):
+            c.start()
+        assert w.spawned == []
+
+        ok, message = c.generate_token()
+        assert ok is True and "создан" in message
+        assert c.status()["token_present"] is True       # кэш сброшен созданием токена
+
+        result = c.start()
+        argv = w.spawned[0][0]
+        assert argv[:len(CLI) + 1] == CLI + ["serve-http"]
+        assert argv[argv.index("--token-ref") + 1] == DEFAULT_REMOTE_TOKEN_REF
+        assert result.healthy is True
+        # значение токена не показано и в argv запуска его нет
+        assert cli.store[DEFAULT_REMOTE_TOKEN_REF] not in " ".join(argv)
+
+    def test_generate_does_not_show_token(self, tmp_path, fresh_token_cache):
+        cli = _FakeBpmkitCli()
+        _w, c = _ctl(tmp_path, cli)
+        c.generate_token()
+
+        assert "--show" not in cli.calls[-1]
+
+    def test_generate_does_not_overwrite_existing_token_without_force(self, tmp_path, fresh_token_cache):
+        cli = _FakeBpmkitCli()
+        cli.store[DEFAULT_REMOTE_TOKEN_REF] = "old-token-value-0000"
+        _w, c = _ctl(tmp_path, cli)
+
+        ok, message = c.generate_token()
+        assert ok is False and "уже задан" in message
+        assert cli.store[DEFAULT_REMOTE_TOKEN_REF] == "old-token-value-0000"
+        ok, _message = c.generate_token(force=True)
+        assert ok is True and cli.store[DEFAULT_REMOTE_TOKEN_REF] != "old-token-value-0000"
+
+    def test_set_token_goes_to_bpmkit_store_via_environment_not_argv(self, tmp_path, fresh_token_cache):
+        value = "ValueTypedByHuman-0123456789"
+        cli = _FakeBpmkitCli()
+        _w, c = _ctl(tmp_path, cli, remote_token_ref="my:ref")
+
+        ok, message = c.set_token(value)
+
+        assert ok is True
+        assert cli.store["my:ref"] == value
+        argv, env = cli.calls[-1], cli.envs[-1]
+        assert value not in " ".join(argv)                  # в argv значения нет
+        assert env == {rm.TOKEN_ENV_VAR: value}             # оно уходит переменной окружения
+        assert "--force" in argv                            # человек сознательно меняет токен
+        assert value not in message
+
+    def test_set_token_reports_cli_refusal(self, tmp_path, fresh_token_cache):
+        cli = _FakeBpmkitCli()
+        _w, c = _ctl(tmp_path, cli)
+
+        ok, message = c.set_token("short")
+
+        assert ok is False and "короче 16" in message
+        assert DEFAULT_REMOTE_TOKEN_REF not in cli.store
+
+    def test_without_cli_nothing_is_present_and_messages_name_the_cli(self, tmp_path, fresh_token_cache):
+        cli = _FakeBpmkitCli()
+        _w, c = _ctl(tmp_path, cli, world=_World(cli=None))
+
+        assert c.status()["token_present"] is False
+        assert "BPMkit.exe" in c.generate_token()[1]
+        assert "BPMkit.exe" in c.set_token("v" * 20)[1]
+        assert cli.calls == []
+
+    def test_old_cli_without_status_command_falls_back_to_standkit_store(
+            self, tmp_path, monkeypatch, fresh_token_cache):
+        monkeypatch.setattr(rm, "_default_has_secret", lambda ref: True)
+        cli = _FakeBpmkitCli()
+        cli.returncode_override = 2                         # argparse: неизвестная подкоманда
+        _w, c = _ctl(tmp_path, cli)
+
+        assert c.status()["token_present"] is True
+
+    def test_missing_cli_is_reported_before_missing_token(self, tmp_path, fresh_token_cache):
+        cli = _FakeBpmkitCli()
+        _w, c = _ctl(tmp_path, cli, world=_World(cli=None))
+
+        with pytest.raises(RemoteModeError, match="BPMkit.exe"):
+            c.start()
+
+    def test_module_never_passes_token_value_in_argv(self):
+        src = Path(rm.__file__).read_text(encoding="utf-8")
+        assert '"--show"' not in src                        # значение хаб не просит показать
+
+
+class TestGap612TokenApi:
+    @pytest.fixture()
+    def hub(self, tmp_path, monkeypatch, fresh_token_cache):
+        cli = _FakeBpmkitCli()
+        monkeypatch.setattr(rm, "default_cli_runner", cli)
+        monkeypatch.setattr(rm.license_api, "find_cli", lambda settings, **kw: list(CLI))
+        monkeypatch.setattr(rm, "_default_has_secret", lambda ref: False)
+        base_url, token, config_path, *_ = _start_hub(tmp_path)
+        return base_url, token, cli
+
+    def test_secret_status_of_remote_ref_comes_from_bpmkit_store(self, hub):
+        base_url, token, cli = hub
+        ref = DEFAULT_REMOTE_TOKEN_REF
+        status, body, _ = _request(base_url, "/api/secret/" + ref.replace(":", "%3A"), token=token)
+        assert status == 200 and body["has_secret"] is False
+        cli.store[ref] = "z" * 32
+        rm.invalidate_token_cache()
+        status, body, _ = _request(base_url, "/api/secret/" + ref.replace(":", "%3A"), token=token)
+        assert body["has_secret"] is True
+
+    def test_set_button_writes_remote_token_to_bpmkit_store(self, hub):
+        base_url, token, cli = hub
+        value = "HumanChosenToken-0123456789"
+        status, body, _ = _request(base_url, "/api/secret/" + DEFAULT_REMOTE_TOKEN_REF.replace(":", "%3A"),
+                                   token=token, method="POST", origin=base_url, body={"value": value})
+        assert status == 200 and body["ok"] is True
+        assert cli.store[DEFAULT_REMOTE_TOKEN_REF] == value
+        assert value not in json.dumps(body)
+
+    def test_set_button_shows_cli_refusal(self, hub):
+        base_url, token, cli = hub
+        status, body, _ = _request(base_url, "/api/secret/" + DEFAULT_REMOTE_TOKEN_REF.replace(":", "%3A"),
+                                   token=token, method="POST", origin=base_url, body={"value": "tiny"})
+        assert status == 400 and "короче 16" in body["error"]
+
+    def test_generate_endpoint_requires_mutation_auth_and_hides_value(self, hub):
+        base_url, token, cli = hub
+        status, _b, _ = _request(base_url, "/api/remote/token/generate", token=token, method="POST", body={})
+        assert status in (401, 403)
+        status, body, _ = _request(base_url, "/api/remote/token/generate", token=token, method="POST",
+                                   origin=base_url, body={})
+        assert status == 200 and body["token_present"] is True
+        assert cli.store[DEFAULT_REMOTE_TOKEN_REF] not in json.dumps(body)
+        status, body, _ = _request(base_url, "/api/remote/token/generate", token=token, method="POST",
+                                   origin=base_url, body={})
+        assert status == 400 and "уже задан" in body["error"]
+        status, body, _ = _request(base_url, "/api/remote/token/generate", token=token, method="POST",
+                                   origin=base_url, body={"force": True})
+        assert status == 200
+
+    def test_ui_has_generate_token_button(self):
+        web = Path(server_module.__file__).parent / "web"
+        assert 'id="mcpremote-generate-token-btn"' in (web / "index.html").read_text(encoding="utf-8")
+        assert "/api/remote/token/generate" in (web / "app.js").read_text(encoding="utf-8")

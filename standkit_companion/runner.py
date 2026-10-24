@@ -1259,7 +1259,7 @@ class CompanionRunner:
     # -- статус ---------------------------------------------------------------------------
     def _state_summary(self) -> dict:
         """Сводка состояния + версии, которые автоматика не ставит (для окна «Обновления»)."""
-        summary = self._state.summary()
+        summary = self._state.summary(disk_version=self._disk_version())
         block = summary.get("releases")
         if isinstance(block, dict):
             try:
@@ -1267,6 +1267,27 @@ class CompanionRunner:
             except (AttributeError, TypeError):
                 block["auto_blocked_versions"] = []
         return summary
+
+    def _disk_version(self) -> Optional[str]:
+        """Версия поставки по `manifest.json` рядом с найденным CLI либо `None`.
+
+        Дёшево и без запуска процесса: берётся тот же путь, что и в `_context_status` (последний
+        известный из контекста либо автодетект), читается один небольшой файл. Не бросает --
+        статус не вправе падать из-за диска."""
+        try:
+            cli = list(self._context_cli)
+            if not cli:
+                cli = [str(item) for item in (context.find_cli(self.settings()) or [])]
+            for item in cli:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                version = releases.manifest_version(text)
+                if version and releases.is_numeric_version(version):
+                    return version
+        except Exception:  # noqa: BLE001
+            return None
+        return None
 
     def status(self) -> dict:
         """Карточка канала для `/api/companion/status`, UI и CLI.

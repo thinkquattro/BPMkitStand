@@ -1487,6 +1487,11 @@ def make_handler(
                 return
             if authed:
                 _instance.clear_unauthorized(state_file)
+                # первый заход со своим токеном -- сессия подтверждена; повторно файл
+                # не пишем (на каждую загрузку страницы лишний ввод-вывод не нужен).
+                if not getattr(self.server, "_session_ok_marked", False):
+                    self.server._session_ok_marked = True
+                    _instance.mark_session_confirmed(state_file)
             else:
                 _instance.mark_unauthorized(state_file)
 
@@ -2353,7 +2358,24 @@ def make_handler(
             if not _security.validate_secret_ref(ref):
                 self._send_json(400, {"error": "invalid secret ref"})
                 return
+            remote = self._remote_token_controller(ref)
+            if remote is not None:
+                # токен удалённого режима читает serve-http из хранилища BPMkit --
+                # статус спрашиваем у него (через CLI), а не у хранилища standkit.
+                self._send_json(200, {"ref": ref, "has_secret": remote.token_present()})
+                return
             self._send_json(200, {"ref": ref, "has_secret": has_secret(ref)})
+
+        def _remote_token_controller(self, ref: str) -> "Optional[RemoteModeController]":
+            """Контроллер удалённого режима, если ``ref`` -- ссылка на его токен (иначе ``None``)."""
+            try:
+                config = _load_config(config_path)
+            except Exception:  # noqa: BLE001 - секреты не зависят от читаемости конфига
+                return None
+            configured = str(getattr(config, "remote_token_ref", "") or "").strip()
+            if configured and configured == ref:
+                return RemoteModeController(config)
+            return None
 
         def _api_secret_post(self, ref: str) -> None:
             if not _security.validate_secret_ref(ref):
@@ -2365,6 +2387,16 @@ def make_handler(
             value = body.get("value")
             if not isinstance(value, str) or not value:
                 self._send_json(400, {"error": "поле 'value' обязательно и должно быть непустой строкой"})
+                return
+            remote = self._remote_token_controller(ref)
+            if remote is not None:
+                # «Задать…» у токена удалённого режима пишет в хранилище BPMkit
+                # (его читает serve-http) через CLI; значение уходит переменной окружения.
+                ok, message = remote.set_token(value)
+                if not ok:
+                    self._send_json(400, {"error": message})
+                    return
+                self._send_json(200, {"ok": True, "ref": ref})
                 return
             try:
                 set_secret(ref, value)
@@ -2428,6 +2460,23 @@ def make_handler(
                 return
             payload = controller.status()
             payload.update({"ok": True, "log_path": result.log_path})
+            self._send_json(200, payload)
+
+        def _api_remote_token_generate(self) -> None:
+            """``POST /api/remote/token/generate`` -- создать токен (``setup remote-token --generate``).
+
+            Значение не возвращается: ни в ответе, ни в журнале. ``force`` в теле -- осознанная
+            ротация существующего токена."""
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            controller = self._remote_controller()
+            ok, message = controller.generate_token(force=bool(body.get("force")))
+            if not ok:
+                self._send_json(400, {"error": message})
+                return
+            payload = controller.status()
+            payload.update({"ok": True, "message": message})
             self._send_json(200, payload)
 
         def _api_remote_stop(self) -> None:
@@ -3551,6 +3600,11 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_remote_stop()
+                return
+            if path == "/api/remote/token/generate":
+                if not self._authorize_mutation():
+                    return
+                self._api_remote_token_generate()
                 return
 
             if path == _STAND_REGISTER_PATH:

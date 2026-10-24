@@ -181,6 +181,7 @@ def _takeover_running_instance(
         no_takeover=no_takeover,
         unauthorized_seen=_instance.unauthorized_seen(state_file),
         our_frozen=bool(getattr(sys, "frozen", False)),
+        session_unconfirmed=_instance.session_unconfirmed(state_file, state),
     ):
         return False, ""
 
@@ -208,6 +209,14 @@ def _takeover_running_instance(
             "перезапускаю его и открываю ссылку со свежим токеном"
         )
         print("[standkit-hub] предыдущая вкладка не подтвердила сессию -- диспетчер перезапускается")
+    elif not explicit and not version_mismatch and _instance.session_unconfirmed(state_file, state):
+        # хаб поднят в фоне и ни разу не принял вход со своим токеном -- у человека
+        # нет рабочей ссылки; перезапуск даёт свежий токен, вкладка откроется авторизованной.
+        _log.warning(
+            f"работающий диспетчер (pid {state.pid}) ни разу не подтвердил сессию браузера -- "
+            "перезапускаю его и открываю ссылку со свежим токеном"
+        )
+        print("[standkit-hub] у работающего диспетчера нет подтверждённой сессии -- он перезапускается")
     elif version_mismatch:
         # клиент поставил новый диспетчер поверх работающего старого
         # (pip install -U, установщик BPMkit) — объясняем, что именно
@@ -302,6 +311,30 @@ def _cmd_hub_stop(state_file: Path, run_dir: Path) -> int:
         return 1
     print(f"[standkit-hub] диспетчер (pid={state.pid}) остановлен")
     return 0
+
+
+def _finish_one_shot(rc: int, *, hard: bool) -> int:
+    """Завершение ОДНОРАЗОВОГО CLI-режима (``--hub-stop``): процесс обязан уйти сразу.
+
+    VM-эксперимент 16.10: каждый вызов ``BPMkit-hub.exe --hub-stop`` оставлял живую пару процессов
+    (загрузчик onefile + python), которая держала exe диспетчера -- переименование в ``.old`` при
+    обновлении упиралось в занятый файл. Режим «выполнить и выйти» не вправе ждать ни фоновые
+    потоки, ни финализацию интерпретатора: результат уже напечатан, остановленный диспетчер
+    остановлен. ``hard=True`` (запуск как программа, ``argv is None``) -- сбросить потоки вывода
+    и журнал и выйти через ``os._exit``; вызов из тестов и из кода (``main([...])``) возвращает
+    код как обычно."""
+    if not hard:
+        return rc
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001 - поток мог быть закрыт или быть заглушкой
+            pass
+    try:
+        logging.shutdown()
+    except Exception:  # noqa: BLE001
+        pass
+    os._exit(int(rc))
 
 
 def _remote_autostart(config: HubConfig) -> None:
@@ -605,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
     state_file = _instance.state_path(run_dir)
 
     if args.hub_stop:
-        return _cmd_hub_stop(state_file, run_dir)
+        return _finish_one_shot(_cmd_hub_stop(state_file, run_dir), hard=argv is None)
 
     # Сессия от предыдущего экземпляра (перезапуск с правами администратора):
     # файл одноразовый и протухающий, поэтому «не прочитали» — штатный исход,
@@ -763,6 +796,7 @@ def main(argv: list[str] | None = None) -> int:
     # раньше. Повторный `clear_state` в `_serve.finally` безвреден.
     httpd.instance_state_file = state_file
     _instance.clear_unauthorized(state_file)  # новый процесс -- новый токен
+    _instance.clear_session_confirmed(state_file)  # и сессия ещё не подтверждена
 
     # Удалённый режим BPMkit (serve-http) поднимается вместе с диспетчером, если
     # включён remote_autostart. В фоновом потоке: ожидание /healthz не задерживает запуск

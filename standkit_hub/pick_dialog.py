@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import base64
 import shutil
 import sys
 from typing import Callable, Optional
@@ -60,6 +61,91 @@ NO_DIALOG = "no_dialog"
 DEFAULT_FILTER = "Все файлы (*.*)|*.*"
 
 
+#: C#-обёртка окна выбора папки проводника Windows (Vista+): COM ``IFileOpenDialog`` с
+#: ``FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST`` (0x20 | 0x40 | 0x800) --
+#: то самое обычное окно проводника с адресной строкой, а не старое дерево
+#: ``FolderBrowserDialog``. Начальная папка -- ``SHCreateItemFromParsingName`` +
+#: ``SetFolder``. ``Pick`` возвращает путь, ``null`` при отмене (ERROR_CANCELLED) и бросает
+#: исключение при отказе COM -- тогда скрипт падает на прежний ``FolderBrowserDialog``.
+#: ``Ui.SetThreadUILanguage`` выставляет язык интерфейса ПОТОКА по языку ОС: общие диалоги
+#: берут его от потока, и процесс PowerShell, поднятый из pythonw/MSIX без русского UI-языка,
+#: иначе показывал бы английские кнопки на русской Windows (задачи п.2).
+#: В скрипт уходит base64 (не сам текст): в исходнике есть двойные кавычки и переводы строк,
+#: а команда передаётся ОДНИМ аргументом ``powershell -Command``.
+_CSHARP_SOURCE = """
+using System;
+using System.Runtime.InteropServices;
+namespace SK {
+  [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IShellItem {
+    void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+    void GetParent(out IShellItem ppsi);
+    void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+    void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+    void Compare(IShellItem psi, uint hint, out int piOrder);
+  }
+  [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IFileDialog {
+    [PreserveSig] int Show(IntPtr hwndOwner);
+    void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+    void SetFileTypeIndex(uint iFileType);
+    void GetFileTypeIndex(out uint piFileType);
+    void Advise(IntPtr pfde, out uint pdwCookie);
+    void Unadvise(uint dwCookie);
+    void SetOptions(uint fos);
+    void GetOptions(out uint pfos);
+    void SetDefaultFolder(IShellItem psi);
+    void SetFolder(IShellItem psi);
+    void GetFolder(out IShellItem ppsi);
+    void GetCurrentSelection(out IShellItem ppsi);
+    void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+    void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+    void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+    void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+    void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+    void GetResult(out IShellItem ppsi);
+  }
+  [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")]
+  class FileOpenDialogCoClass { }
+  public static class Ui {
+    [DllImport("kernel32.dll")]
+    public static extern ushort SetThreadUILanguage(ushort lang);
+  }
+  public static class FolderPicker {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    static extern void SHCreateItemFromParsingName(string path, IntPtr pbc, ref Guid riid, out IShellItem item);
+    public static string Pick(IntPtr owner, string title, string initial) {
+      IFileDialog dlg = (IFileDialog)new FileOpenDialogCoClass();
+      uint opts;
+      dlg.GetOptions(out opts);
+      dlg.SetOptions(opts | 0x20u | 0x40u | 0x800u);
+      if (!string.IsNullOrEmpty(title)) { dlg.SetTitle(title); }
+      if (!string.IsNullOrEmpty(initial)) {
+        try {
+          Guid iid = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");
+          IShellItem start;
+          SHCreateItemFromParsingName(initial, IntPtr.Zero, ref iid, out start);
+          dlg.SetFolder(start);
+        } catch (Exception) { }
+      }
+      int hr = dlg.Show(owner);
+      if (hr == unchecked((int)0x800704C7)) { return null; }
+      if (hr != 0) { Marshal.ThrowExceptionForHR(hr); }
+      IShellItem item;
+      dlg.GetResult(out item);
+      string path;
+      item.GetDisplayName(0x80058000u, out path);
+      return path;
+    }
+  }
+}
+"""
+
+
+def _csharp_base64() -> str:
+    return base64.b64encode(_CSHARP_SOURCE.encode("utf-8")).decode("ascii")
+
+
 def _one_line(value: object, limit: int = 300) -> str:
     """Однострочный безопасный текст для подстановки в команду диалога.
 
@@ -81,12 +167,24 @@ def _ps_quote(value: str) -> str:
 
 
 def _powershell_script(kind: str, title: str, initial: str, file_filter: str) -> str:
-    """Скрипт диалога для Windows (см. докстринг модуля про `-STA`/`TopMost`)."""
+    """Скрипт диалога для Windows (см. докстринг модуля про `-STA`/`TopMost`).
+
+    Каталог -- окно проводника Vista+ (COM ``IFileOpenDialog`` через ``Add-Type``), при отказе
+    COM -- прежний ``FolderBrowserDialog``. Файл -- ``OpenFileDialog`` (он и так проводник
+    Vista+). В обоих случаях язык потока выставляется по ОС (``Ui.SetThreadUILanguage``)."""
     lines = [
         # Вывод пути — строго UTF-8: путь с кириллицей иначе приезжает в кодировке
         # консоли и превращается в «??????».
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
         "Add-Type -AssemblyName System.Windows.Forms",
+        # C#-обёртка проводника и язык потока. Сбой компиляции не фатален: каталог уйдёт на
+        # запасной FolderBrowserDialog, файл -- в штатный OpenFileDialog.
+        "$native = $false",
+        "try { Add-Type -TypeDefinition "
+        f"([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{_csharp_base64()}'))); "
+        "$native = $true } catch { }",
+        "if ($native) { try { [void][SK.Ui]::SetThreadUILanguage("
+        "[uint16]([System.Globalization.CultureInfo]::InstalledUICulture.LCID -band 0xFFFF)) } catch { } }",
         # Скрытая форма-владелец: единственный способ заставить модальный диалог
         # всплыть ПОВЕРХ браузера, из которого его позвали.
         "$owner = New-Object System.Windows.Forms.Form",
@@ -98,16 +196,22 @@ def _powershell_script(kind: str, title: str, initial: str, file_filter: str) ->
         "$owner.Opacity = 0",
         "$owner.Show()",
         "$owner.Activate()",
+        "$picked = $null",
     ]
     if kind == "dir":
         lines += [
-            "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog",
-            f"$dlg.Description = {_ps_quote(title)}",
-            "$dlg.ShowNewFolderButton = $true",
+            "$shown = $false",
+            "if ($native) { try { "
+            f"$picked = [SK.FolderPicker]::Pick($owner.Handle, {_ps_quote(title)}, {_ps_quote(initial)}); "
+            "$shown = $true } catch { } }",
+            "if (-not $shown) { "
+            "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            f"$dlg.Description = {_ps_quote(title)}; "
+            "$dlg.ShowNewFolderButton = $true; "
+            + (f"$dlg.SelectedPath = {_ps_quote(initial)}; " if initial else "")
+            + "if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) "
+            "{ $picked = $dlg.SelectedPath } }",
         ]
-        if initial:
-            lines.append(f"$dlg.SelectedPath = {_ps_quote(initial)}")
-        picked = "$dlg.SelectedPath"
     else:
         lines += [
             "$dlg = New-Object System.Windows.Forms.OpenFileDialog",
@@ -118,12 +222,13 @@ def _powershell_script(kind: str, title: str, initial: str, file_filter: str) ->
         ]
         if initial:
             lines.append(f"$dlg.InitialDirectory = {_ps_quote(initial)}")
-        picked = "$dlg.FileName"
+        lines.append(
+            "if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) "
+            "{ $picked = $dlg.FileName }")
     lines += [
-        "$result = $dlg.ShowDialog($owner)",
         "$owner.Close()",
         "$owner.Dispose()",
-        f"if ($result -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::Out.WriteLine({picked}) }}",
+        "if ($picked) { [Console]::Out.WriteLine($picked) }",
     ]
     return "; ".join(lines)
 

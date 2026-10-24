@@ -282,3 +282,66 @@ def test_hub_stop_reports_failure_to_stop(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "HUB_SESSION=6" in out
     assert "не удалось" in out
+
+
+# ======================================================================================
+# --hub-stop обязан завершиться сам, не оставляя процессов (пара onefile держала exe)
+# ======================================================================================
+
+
+class _Exited(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+class TestGap923HubStopExits:
+    def test_finish_one_shot_returns_code_when_not_hard(self):
+        assert _hub_main._finish_one_shot(1, hard=False) == 1
+
+    def test_finish_one_shot_hard_flushes_and_exits_with_code(self, monkeypatch, capsys):
+        codes = []
+
+        def _fake_exit(code):
+            codes.append(code)
+            raise _Exited(code)
+
+        monkeypatch.setattr(_hub_main.os, "_exit", _fake_exit)
+        shutdown_calls = []
+        monkeypatch.setattr(_hub_main.logging, "shutdown", lambda: shutdown_calls.append(1))
+
+        with pytest.raises(_Exited):
+            _hub_main._finish_one_shot(0, hard=True)
+
+        assert codes == [0] and shutdown_calls == [1]
+
+    def _config(self, tmp_path):
+        from standkit_hub.config import HubConfig
+
+        config = HubConfig(run_dir=str(tmp_path / "run"), log_dir=str(tmp_path / "logs"))
+        path = tmp_path / "standkit-hub.json"
+        config.save(path)
+        return path
+
+    def test_main_as_program_exits_hard_after_hub_stop(self, monkeypatch, tmp_path, capsys):
+        """Запуск как программа (argv=None): после --hub-stop процесс уходит через os._exit."""
+        config = self._config(tmp_path)
+        codes = []
+        monkeypatch.setattr(_hub_main.os, "_exit", lambda code: (codes.append(code), (_ for _ in ()).throw(_Exited(code))))
+        monkeypatch.setattr(_hub_main.sys, "argv", ["BPMkit-hub.exe", "--hub-stop", "--config", str(config)])
+
+        with pytest.raises(_Exited):
+            _hub_main.main()
+
+        assert codes == [1]            # диспетчера в профиле нет -- честный отказ, но процесс ушёл
+        assert "не запущен" in capsys.readouterr().out
+
+    def test_main_called_from_code_returns_instead_of_exiting(self, monkeypatch, tmp_path):
+        config = self._config(tmp_path)
+
+        def _no_exit(code):
+            raise AssertionError("os._exit из вызова main([...]) недопустим: это убило бы pytest")
+
+        monkeypatch.setattr(_hub_main.os, "_exit", _no_exit)
+
+        assert _hub_main.main(["--hub-stop", "--config", str(config)]) == 1
