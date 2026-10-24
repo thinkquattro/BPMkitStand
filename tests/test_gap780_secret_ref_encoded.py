@@ -23,6 +23,10 @@ from tests.test_hub_server import _request, _start_hub
 
 REF = "bpmsoft-mcp:remote:token"
 ENCODED = "bpmsoft-mcp%3Aremote%3Atoken"
+# Токен удалённого режима хранится в BPMkit и идёт через его CLI -- проверки кодирования
+# GET/POST ведём на обычном ref с теми же двоеточиями.
+PLAIN_REF = "standkit:db:password"
+PLAIN_ENCODED = "standkit%3Adb%3Apassword"
 
 
 def test_get_secret_with_encoded_colon_is_200(tmp_path, monkeypatch):
@@ -34,10 +38,10 @@ def test_get_secret_with_encoded_colon_is_200(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(server_module, "has_secret", _has)
-    status, body, _ = _request(base_url, f"/api/secret/{ENCODED}", token=token)
+    status, body, _ = _request(base_url, f"/api/secret/{PLAIN_ENCODED}", token=token)
     assert status == 200, body
-    assert body == {"ref": REF, "has_secret": True}
-    assert seen["ref"] == REF, "в хранилище должен уйти РАСКОДИРОВАННЫЙ ref"
+    assert body == {"ref": PLAIN_REF, "has_secret": True}
+    assert seen["ref"] == PLAIN_REF, "в хранилище должен уйти РАСКОДИРОВАННЫЙ ref"
 
 
 def test_post_secret_with_encoded_colon_saves_under_decoded_ref(tmp_path, monkeypatch):
@@ -50,12 +54,12 @@ def test_post_secret_with_encoded_colon_saves_under_decoded_ref(tmp_path, monkey
 
     monkeypatch.setattr(server_module, "set_secret", _fake_set)
     status, body, _ = _request(
-        base_url, f"/api/secret/{ENCODED}", token=token, method="POST",
+        base_url, f"/api/secret/{PLAIN_ENCODED}", token=token, method="POST",
         origin=base_url, body={"value": "s3cr3t"},
     )
     assert status == 200, body
-    assert body == {"ok": True, "ref": REF}
-    assert captured == {"ref": REF, "value": "s3cr3t"}
+    assert body == {"ok": True, "ref": PLAIN_REF}
+    assert captured == {"ref": PLAIN_REF, "value": "s3cr3t"}
 
 
 def test_delete_secret_with_encoded_colon_deletes_decoded_ref(tmp_path, monkeypatch):

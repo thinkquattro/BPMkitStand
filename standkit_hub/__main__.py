@@ -210,7 +210,7 @@ def _takeover_running_instance(
         )
         print("[standkit-hub] предыдущая вкладка не подтвердила сессию -- диспетчер перезапускается")
     elif not explicit and not version_mismatch and _instance.session_unconfirmed(state_file, state):
-        # GAP-821: хаб поднят в фоне и ни разу не принял вход со своим токеном -- у человека
+        # хаб поднят в фоне и ни разу не принял вход со своим токеном -- у человека
         # нет рабочей ссылки; перезапуск даёт свежий токен, вкладка откроется авторизованной.
         _log.warning(
             f"работающий диспетчер (pid {state.pid}) ни разу не подтвердил сессию браузера -- "
@@ -314,7 +314,7 @@ def _cmd_hub_stop(state_file: Path, run_dir: Path) -> int:
 
 
 def _finish_one_shot(rc: int, *, hard: bool) -> int:
-    """Завершение ОДНОРАЗОВОГО CLI-режима (``--hub-stop``): процесс обязан уйти сразу (GAP-923).
+    """Завершение ОДНОРАЗОВОГО CLI-режима (``--hub-stop``): процесс обязан уйти сразу.
 
     VM-эксперимент 16.10: каждый вызов ``BPMkit-hub.exe --hub-stop`` оставлял живую пару процессов
     (загрузчик onefile + python), которая держала exe диспетчера -- переименование в ``.old`` при
@@ -796,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
     # раньше. Повторный `clear_state` в `_serve.finally` безвреден.
     httpd.instance_state_file = state_file
     _instance.clear_unauthorized(state_file)  # новый процесс -- новый токен
-    _instance.clear_session_confirmed(state_file)  # и сессия ещё не подтверждена (GAP-821)
+    _instance.clear_session_confirmed(state_file)  # и сессия ещё не подтверждена
 
     # Удалённый режим BPMkit (serve-http) поднимается вместе с диспетчером, если
     # включён remote_autostart. В фоновом потоке: ожидание /healthz не задерживает запуск

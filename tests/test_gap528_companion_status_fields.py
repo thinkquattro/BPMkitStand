@@ -182,7 +182,7 @@ def test_hub_status_update_available_true_when_staged(tmp_path, monkeypatch):
 
 
 # ======================================================================================
-# GAP-928: после установки установщиком окно «Обновления» показывает версию из manifest.json
+# после установки установщиком окно «Обновления» показывает версию из manifest.json
 # ======================================================================================
 class TestGap928ManifestVersion:
     def test_fresh_install_shows_manifest_version_not_unknown(self, tmp_path):

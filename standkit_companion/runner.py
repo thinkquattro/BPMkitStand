@@ -1269,7 +1269,7 @@ class CompanionRunner:
         return summary
 
     def _disk_version(self) -> Optional[str]:
-        """Версия поставки по `manifest.json` рядом с найденным CLI (GAP-928) либо `None`.
+        """Версия поставки по `manifest.json` рядом с найденным CLI либо `None`.
 
         Дёшево и без запуска процесса: берётся тот же путь, что и в `_context_status` (последний
         известный из контекста либо автодетект), читается один небольшой файл. Не бросает --

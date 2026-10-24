@@ -64,12 +64,12 @@ DEFAULT_FILTER = "Все файлы (*.*)|*.*"
 #: C#-обёртка окна выбора папки проводника Windows (Vista+): COM ``IFileOpenDialog`` с
 #: ``FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST`` (0x20 | 0x40 | 0x800) --
 #: то самое обычное окно проводника с адресной строкой, а не старое дерево
-#: ``FolderBrowserDialog`` (GAP-821). Начальная папка -- ``SHCreateItemFromParsingName`` +
+#: ``FolderBrowserDialog``. Начальная папка -- ``SHCreateItemFromParsingName`` +
 #: ``SetFolder``. ``Pick`` возвращает путь, ``null`` при отмене (ERROR_CANCELLED) и бросает
 #: исключение при отказе COM -- тогда скрипт падает на прежний ``FolderBrowserDialog``.
 #: ``Ui.SetThreadUILanguage`` выставляет язык интерфейса ПОТОКА по языку ОС: общие диалоги
 #: берут его от потока, и процесс PowerShell, поднятый из pythonw/MSIX без русского UI-языка,
-#: иначе показывал бы английские кнопки на русской Windows (GAP-821 п.2).
+#: иначе показывал бы английские кнопки на русской Windows (задачи п.2).
 #: В скрипт уходит base64 (не сам текст): в исходнике есть двойные кавычки и переводы строк,
 #: а команда передаётся ОДНИМ аргументом ``powershell -Command``.
 _CSHARP_SOURCE = """

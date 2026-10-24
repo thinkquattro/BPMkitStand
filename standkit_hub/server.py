@@ -1487,7 +1487,7 @@ def make_handler(
                 return
             if authed:
                 _instance.clear_unauthorized(state_file)
-                # GAP-821: первый заход со своим токеном -- сессия подтверждена; повторно файл
+                # первый заход со своим токеном -- сессия подтверждена; повторно файл
                 # не пишем (на каждую загрузку страницы лишний ввод-вывод не нужен).
                 if not getattr(self.server, "_session_ok_marked", False):
                     self.server._session_ok_marked = True
@@ -2360,7 +2360,7 @@ def make_handler(
                 return
             remote = self._remote_token_controller(ref)
             if remote is not None:
-                # GAP-612: токен удалённого режима читает serve-http из хранилища BPMkit --
+                # токен удалённого режима читает serve-http из хранилища BPMkit --
                 # статус спрашиваем у него (через CLI), а не у хранилища standkit.
                 self._send_json(200, {"ref": ref, "has_secret": remote.token_present()})
                 return
@@ -2390,7 +2390,7 @@ def make_handler(
                 return
             remote = self._remote_token_controller(ref)
             if remote is not None:
-                # GAP-612: «Задать…» у токена удалённого режима пишет в хранилище BPMkit
+                # «Задать…» у токена удалённого режима пишет в хранилище BPMkit
                 # (его читает serve-http) через CLI; значение уходит переменной окружения.
                 ok, message = remote.set_token(value)
                 if not ok:

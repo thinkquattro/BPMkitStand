@@ -172,3 +172,12 @@ def _hub_run_dir_defaults_to_tmp(tmp_path_factory, monkeypatch):
 
     monkeypatch.setattr(HubConfig, "resolve_run_dir", _patched)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _never_run_real_bpmkit_cli(monkeypatch):
+    """Статус токена удалённого режима спрашивает BPMkit.exe -- в тестах реальный CLI не запускаем."""
+    import standkit_hub.remote_mode as _rm
+
+    monkeypatch.setattr(_rm, "default_cli_runner", lambda argv, env=None, timeout=None: (1, "", ""))
+    yield

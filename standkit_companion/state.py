@@ -465,7 +465,7 @@ class CompanionState:
     def summary(self, disk_version: Optional[str] = None) -> dict[str, Any]:
         """Плоская карточка состояния для `/api/companion/status` и `self_check` MCP.
 
-        `disk_version` (GAP-928) -- версия поставки по `manifest.json` на диске (её пишет
+        `disk_version` -- версия поставки по `manifest.json` на диске (её пишет
         установщик; в состояние канала она не попадает). Источник «установлено» для окна
         «Обновления» после установки установщиком: у свежеустановленной версии нет ни
         `current.json` канала, ни маркера работающего процесса (MCP ещё не запускали), и окно
