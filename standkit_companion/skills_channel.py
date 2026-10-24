@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import zipfile
 from pathlib import Path
 from typing import Optional
@@ -48,7 +49,7 @@ from typing import Optional
 from standkit.platform import run_console
 from standkit.registry import bpmkit_config_dir
 
-from . import fsutil, signature
+from . import context, fsutil, signature
 from .backend import CONTENT_PREFIX
 from .errors import ChannelError
 from .releases import (
@@ -105,10 +106,11 @@ DIST_DIRNAME = "skills-dist"
 #: Имя маркера установленной версии скиллов.
 _INSTALLED_MARKER_NAME = "installed.json"
 
-#: Таймаут одного вызова CLI (`setup skills-install`/`detect-clients`) —
-#: та же величина, что у `context._CLI_TIMEOUT_S`: операция локальная
-#: (копирование файлов), не сетевая, минут ждать нечего.
-_CLI_TIMEOUT_S = 30.0
+#: Таймаут одного вызова CLI (`setup skills-install`/`detect-clients`). Операция локальная
+#: (копирование файлов), но холодный старт onefile-exe на медленном госте (VM 24.10.2026)
+#: длиннее прежних 30 с (GAP-1019), поэтому берём тот же предел, что у запроса
+#: лицензионного контекста, -- `context._CLI_TIMEOUT_S`.
+_CLI_TIMEOUT_S = context._CLI_TIMEOUT_S
 
 
 # ======================================================================================
@@ -523,6 +525,12 @@ def _run_cli_json(cli: list, args: list, *, timeout: float = _CLI_TIMEOUT_S) -> 
     try:
         proc = run_console(list(cli) + list(args), capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ChannelError(
+            f"CLI BPMkit ({' '.join(args)}) не ответил за {int(timeout)} с — повторите "
+            "позже (холодный старт BPMkit.exe на медленной машине бывает долгим)",
+            kind="context_starting",
+        ) from None
     except Exception as exc:  # noqa: BLE001 - один вид отказа наружу
         raise ChannelError(
             f"Не удалось запустить CLI BPMkit ({' '.join(args)}): {exc}",

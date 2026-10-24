@@ -502,6 +502,7 @@ def test_non_string_version_is_rejected(tmp_path, monkeypatch):
     ("signature_invalid", 402),
     ("not_yet_valid", 402),
     ("context_unavailable", 503),
+    ("context_starting", 503),
     ("nothing_staged", 409),
     ("nothing_to_rollback", 409),
     ("offline", 502),

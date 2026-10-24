@@ -738,7 +738,7 @@ class TestGap781InprocessContextAndTimeout:
 
     def test_gap781_timeout_leaves_room_for_cold_exe_start(self):
         """30 с не хватило на VM: холодный старт onefile-exe 14–25 с без нагрузки."""
-        assert 60 <= context_module._CLI_TIMEOUT_S <= 180
+        assert 60 <= context_module._CLI_TIMEOUT_S <= 600
 
     def test_gap781_frozen_caller_starts_cli_as_independent_app(self, monkeypatch, tmp_path):
         """Замороженный вызывающий (хаб-exe) не должен передавать CLI свои переменные
@@ -782,3 +782,94 @@ class TestGap781InprocessContextAndTimeout:
         resolve(_settings(_cli(tmp_path)), cache_ttl=0)
 
         assert captured.get("env") is None
+
+
+# --------------------------------------------------------------------------------------
+# GAP-1019: холодный старт CLI на медленном госте
+# --------------------------------------------------------------------------------------
+class TestGap1019ColdStart:
+    """VM 24.10.2026: stage-skills → 503 `context_unavailable` «CLI BPMkit не ответил за
+    90 с» — холодный старт onefile-exe на медленном госте длиннее. Ждать надо
+    соразмерно, а пока exe поднимается, отвечать «идёт подготовка, повторите», а не
+    «рядом нет CLI»."""
+
+    @staticmethod
+    def _completed(payload):
+        class _Completed:
+            returncode = 0
+            stdout = json.dumps(payload)
+            stderr = ""
+
+        return _Completed()
+
+    def test_hard_timeout_covers_slow_guest_cold_start(self):
+        assert context_module._CLI_TIMEOUT_S >= 180
+        assert context_module._CLI_WAIT_S < context_module._CLI_TIMEOUT_S
+
+    def test_slow_cli_answers_context_starting_not_unavailable(self, monkeypatch, tmp_path):
+        import threading
+        release = threading.Event()
+        spawned = []
+
+        def _slow(cmd, **kwargs):
+            spawned.append(list(cmd))
+            release.wait(10)
+            return self._completed(OK_PAYLOAD)
+
+        monkeypatch.setattr(context_module, "run_console_tree", _slow)
+        monkeypatch.setattr(context_module, "_CLI_WAIT_S", 0.2)
+        settings = _settings(_cli(tmp_path))
+        try:
+            with pytest.raises(ContextUnavailable) as info:
+                resolve(settings, cache_ttl=60)
+            assert info.value.kind == "context_starting"
+            assert "повторите" in str(info.value)
+            assert "context_unavailable" != info.value.kind
+            # Повторный запрос, пока exe ещё поднимается, ТОТ ЖЕ процесс, а не второй.
+            with pytest.raises(ContextUnavailable) as again:
+                resolve(settings, cache_ttl=60)
+            assert again.value.kind == "context_starting"
+            assert len(spawned) == 1
+        finally:
+            release.set()
+
+        deadline = time.monotonic() + 5
+        ctx = None
+        while time.monotonic() < deadline:
+            try:
+                ctx = resolve(settings, cache_ttl=60)
+                break
+            except ContextUnavailable:
+                time.sleep(0.05)
+        assert ctx is not None and ctx.license_status == "valid"
+        assert len(spawned) == 1, "готовый ответ должен лечь в кэш без нового запуска"
+
+    def test_cli_answering_within_wait_is_synchronous(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(context_module, "run_console_tree",
+                            lambda cmd, **kw: self._completed(OK_PAYLOAD))
+
+        ctx = resolve(_settings(_cli(tmp_path)), cache_ttl=0)
+
+        assert ctx.license_status == "valid"
+
+    def test_real_hard_timeout_is_still_context_unavailable(self, monkeypatch, tmp_path):
+        import subprocess
+
+        def _hang(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+        monkeypatch.setattr(context_module, "run_console_tree", _hang)
+
+        with pytest.raises(ContextUnavailable) as info:
+            resolve(_settings(_cli(tmp_path)), cache_ttl=0)
+
+        assert info.value.kind == "context_unavailable"
+        assert "не ответил за {} с".format(int(context_module._CLI_TIMEOUT_S)) in (
+            str(info.value) + " " + (info.value.detail or ""))
+
+    def test_context_starting_is_retriable_and_not_a_user_problem(self):
+        err = ContextUnavailable("BPMkit запускается", kind="context_starting")
+
+        assert err.retriable is True
+        assert err.user_visible is False
+        assert "запускается" in err.title().lower() or "подготов" in err.title().lower()
