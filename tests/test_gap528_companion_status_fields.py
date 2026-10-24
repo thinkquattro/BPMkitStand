@@ -179,3 +179,85 @@ def test_hub_status_update_available_true_when_staged(tmp_path, monkeypatch):
     # а вместе с ним и update_available обязан честно стать False.
     assert status["staged"] is None
     assert status["update_available"] is False
+
+
+# ======================================================================================
+# GAP-928: после установки установщиком окно «Обновления» показывает версию из manifest.json
+# ======================================================================================
+class TestGap928ManifestVersion:
+    def test_fresh_install_shows_manifest_version_not_unknown(self, tmp_path):
+        state = CompanionState(tmp_path / "companion-state.json")
+        state.releases["current"] = None
+        state.releases["running_version"] = None      # MCP после установки ещё не запускали
+
+        releases = state.summary(disk_version="1.4.16")["releases"]
+
+        assert releases["current_version"] == "1.4.16"
+        assert releases["current_version_source"] == "manifest"
+
+    def test_summary_without_disk_version_is_unchanged(self, tmp_path):
+        state = CompanionState(tmp_path / "companion-state.json")
+        state.releases["current"] = None
+        assert state.summary()["releases"]["current_version"] is None
+
+    def test_installer_newer_than_channel_record_wins(self, tmp_path):
+        state = CompanionState(tmp_path / "companion-state.json")
+        state.releases["current"] = {"version": "1.4.10"}
+
+        releases = state.summary(disk_version="1.4.16")["releases"]
+
+        assert releases["current_version"] == "1.4.16"
+        assert releases["current_version_source"] == "manifest"
+
+    def test_channel_record_not_older_than_disk_stays(self, tmp_path):
+        state = CompanionState(tmp_path / "companion-state.json")
+        state.releases["current"] = {"version": "1.4.16"}
+
+        releases = state.summary(disk_version="1.4.16")["releases"]
+
+        assert releases["current_version_source"] == "installed"
+
+    def test_manifest_beats_stale_running_marker(self, tmp_path):
+        state = CompanionState(tmp_path / "companion-state.json")
+        state.releases["current"] = None
+        state.releases["running_version"] = "1.4.10"
+
+        releases = state.summary(disk_version="1.4.16")["releases"]
+
+        assert releases["current_version"] == "1.4.16"
+
+    @pytest.mark.parametrize("latest,expected", [("1.4.17", True), ("1.4.16", False)])
+    def test_update_available_is_computed_against_manifest(self, tmp_path, latest, expected):
+        state = CompanionState(tmp_path / "companion-state.json")
+        state.releases["current"] = None
+        state.releases["known_latest"] = latest
+
+        assert state.summary(disk_version="1.4.16")["releases"]["update_available"] is expected
+
+    def test_runner_status_reads_manifest_next_to_installed_cli(self, tmp_path):
+        """Раскладка установщика: <app>\\server\\BPMkit.exe и <app>\\manifest.json."""
+        from standkit_companion.runner import CompanionRunner
+
+        app = tmp_path / "app"
+        (app / "server").mkdir(parents=True)
+        exe = app / "server" / "BPMkit.exe"
+        exe.write_bytes(b"MZ")
+        (app / "manifest.json").write_text(json.dumps({"name": "BPMkit", "version": "1.4.16"}),
+                                           encoding="utf-8")
+        runner = CompanionRunner(tmp_path / "standkit-hub.json",
+                                 state_path=tmp_path / "companion-state.json")
+        runner._context_cli = [str(exe)]
+
+        releases = runner.status()["state"]["releases"]
+
+        assert releases["current_version"] == "1.4.16"
+        assert releases["current_version_source"] == "manifest"
+
+    def test_runner_status_survives_missing_manifest(self, tmp_path):
+        from standkit_companion.runner import CompanionRunner
+
+        runner = CompanionRunner(tmp_path / "standkit-hub.json",
+                                 state_path=tmp_path / "companion-state.json")
+        runner._context_cli = [str(tmp_path / "nowhere" / "BPMkit.exe")]
+
+        assert runner.status()["state"]["releases"]["current_version"] is None

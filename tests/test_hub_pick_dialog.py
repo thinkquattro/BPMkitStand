@@ -313,3 +313,90 @@ def test_api_pick_survives_dialog_failure(hub, monkeypatch):
     assert status == 500
     assert body["path"] is None
     assert "RuntimeError" in body["error"]
+
+
+# ======================================================================================
+# GAP-821: стандартное окно выбора папки Windows и язык окон
+# ======================================================================================
+
+
+def _decoded_csharp(script: str) -> str:
+    """C#-обёртка, зашитая в скрипт base64 (так её не рвут кавычки аргумента -Command)."""
+    import base64
+    import re
+
+    match = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", script)
+    assert match, "в скрипте нет C#-обёртки проводника"
+    return base64.b64decode(match.group(1)).decode("utf-8")
+
+
+class TestGap821FolderDialog:
+    def test_dir_uses_explorer_file_open_dialog_with_folder_picking(self):
+        script = pick_dialog.build_command("dir", title="Выберите папку", platform="win32",
+                                           which=_no_tools)[-1]
+        source = _decoded_csharp(script)
+
+        # CLSID FileOpenDialog и флаги FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST
+        assert "DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7" in source
+        assert "0x20u | 0x40u | 0x800u" in source
+        assert "SHCreateItemFromParsingName" in source and "SetFolder" in source
+        assert "[SK.FolderPicker]::Pick($owner.Handle" in script
+
+    def test_dir_falls_back_to_folder_browser_dialog_when_com_fails(self):
+        script = pick_dialog.build_command("dir", platform="win32", which=_no_tools)[-1]
+
+        assert "FolderBrowserDialog" in script
+        # запасной путь включается только если COM не отработал ($shown), а не при отмене
+        assert "if (-not $shown)" in script
+        assert script.index("[SK.FolderPicker]::Pick") < script.index("FolderBrowserDialog")
+
+    def test_cancel_in_explorer_dialog_prints_nothing(self):
+        script = pick_dialog.build_command("dir", platform="win32", which=_no_tools)[-1]
+        source = _decoded_csharp(script)
+
+        assert "0x800704C7" in source and "return null" in source     # ERROR_CANCELLED -> null
+        assert script.rstrip().endswith("if ($picked) { [Console]::Out.WriteLine($picked) }")
+
+    def test_initial_folder_is_quoted_for_powershell(self):
+        script = pick_dialog.build_command("dir", initial=r"C:\Стенды\o'neil", platform="win32",
+                                           which=_no_tools)[-1]
+
+        assert r"'C:\Стенды\o''neil'" in script
+
+    @pytest.mark.parametrize("kind", ["dir", "file"])
+    def test_dialog_thread_gets_os_ui_language(self, kind):
+        """Английские окна на русской Windows: язык потока диалога = язык интерфейса ОС."""
+        script = pick_dialog.build_command(kind, platform="win32", which=_no_tools)[-1]
+
+        assert "SetThreadUILanguage" in _decoded_csharp(script)
+        assert "[SK.Ui]::SetThreadUILanguage" in script
+        assert "InstalledUICulture" in script
+        # без компиляции обёртки диалог всё равно открывается (язык не критичен)
+        assert "$native = $false" in script
+
+    def test_file_dialog_stays_open_file_dialog(self):
+        script = pick_dialog.build_command("file", title="Ключ", platform="win32",
+                                           which=_no_tools)[-1]
+
+        assert "OpenFileDialog" in script
+        assert "[SK.FolderPicker]::Pick" not in script
+        assert "ShowDialog($owner)" in script
+
+    def test_script_has_no_double_quotes_outside_base64(self):
+        """Команда уходит одним аргументом powershell -Command: двойные кавычки в ней лишние."""
+        script = pick_dialog.build_command("dir", title='Папка "x"', platform="win32",
+                                           which=_no_tools)[-1]
+
+        # двойные кавычки есть только в самом заголовке пользователя (он подставляется дважды)
+        assert script.replace('Папка "x"', "").count('"') == 0
+
+    def test_ui_opens_builtin_browser_only_when_no_native_dialog(self):
+        from pathlib import Path
+        import standkit_hub.server as server_module
+
+        js = (Path(server_module.__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
+        start = js.index("async function pickFolder")
+        body = js[start:js.index("function setupFsBrowser")]
+
+        assert body.count("openFsBrowser(") == 1
+        assert 'data.error === "no_dialog"' in body

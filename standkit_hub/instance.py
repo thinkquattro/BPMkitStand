@@ -244,6 +244,19 @@ def clear_state(path: Path, *, pid: Optional[int] = None) -> None:
 UNAUTHORIZED_MARKER_NAME = "standkit-hub-unauthorized.json"
 UNAUTHORIZED_MAX_AGE_SEC = 600.0
 
+# GAP-821 п.5: петля ярлыка при экземпляре, поднятом в фоне (агент, shell_run, --takeover) и
+# ни разу не открытом человеком по ссылке с токеном. Маркер 401 появляется только ПОСЛЕ того, как
+# вкладка без сессии уже открылась, поэтому первый запуск ярлыком открывал вкладку, которую нечем
+# авторизовать. Работающий хаб теперь пишет маркер ПОДТВЕРЖДЁННОЙ сессии при первом заходе со
+# своим токеном (ссылка ?t= либо cookie); новый запуск ярлыком (та же версия, тот же SID) видит
+# живой экземпляр БЕЗ такого маркера и перехватывает его -- ссылка со свежим токеном
+# откроется с первого раза. Токена в маркере нет.
+SESSION_OK_MARKER_NAME = "standkit-hub-session-ok.json"
+
+# Экземпляр моложе этого возраста не перехватывается по правилу «сессия не подтверждена»:
+# двойной клик по ярлыку не должен убивать хаб, чья первая вкладка ещё грузится.
+SESSION_UNCONFIRMED_GRACE_SEC = 30.0
+
 
 def unauthorized_marker_path(state_file: Path) -> Path:
     """Маркер лежит рядом с файлом состояния (в ``run_dir``)."""
@@ -270,6 +283,54 @@ def clear_unauthorized(state_file: Path) -> None:
         unauthorized_marker_path(state_file).unlink()
     except OSError:
         pass
+
+
+def session_ok_marker_path(state_file: Path) -> Path:
+    """Маркер подтверждённой сессии лежит рядом с файлом состояния (в ``run_dir``)."""
+    return Path(state_file).with_name(SESSION_OK_MARKER_NAME)
+
+
+def mark_session_confirmed(state_file: Path) -> None:
+    """Отметить: браузер вошёл в хаб со своим токеном (GAP-821). Best-effort, токен не пишется."""
+    try:
+        _atomic_write_text(session_ok_marker_path(state_file), json.dumps({"at": time.time()}))
+    except Exception:
+        pass
+
+
+def clear_session_confirmed(state_file: Path) -> None:
+    """Убрать маркер подтверждённой сессии (новый процесс -- новый токен). Best-effort."""
+    try:
+        session_ok_marker_path(state_file).unlink()
+    except OSError:
+        pass
+
+
+def session_unconfirmed(
+    state_file: Path,
+    running: "Optional[HubInstanceState]",
+    *,
+    grace: float = SESSION_UNCONFIRMED_GRACE_SEC,
+    now: Optional[float] = None,
+) -> bool:
+    """``True`` -- работающий хаб достаточно давно поднят и НИ РАЗУ не принял вход со своим токеном.
+
+    Маркер старше запуска хаба (``started_at``) считается остатком прошлого процесса и не в счёт:
+    удаление маркера при старте best-effort. Возраст неизвестен (старый файл состояния) -- ``False``:
+    без возраста нельзя отличить хаб, чья вкладка ещё грузится."""
+    if running is None:
+        return False
+    started = float(getattr(running, "started_at", 0.0) or 0.0)
+    if started <= 0.0:
+        return False
+    current = float(now if now is not None else time.time())
+    if current - started < grace:
+        return False
+    try:
+        confirmed_at = session_ok_marker_path(state_file).stat().st_mtime
+    except OSError:
+        return True
+    return confirmed_at < started - 1.0
 
 
 def unauthorized_seen(state_file: Path, *, max_age: float = UNAUTHORIZED_MAX_AGE_SEC) -> bool:
@@ -336,6 +397,7 @@ def should_takeover(
     no_takeover: bool = False,
     unauthorized_seen: bool = False,
     our_frozen: Optional[bool] = None,
+    session_unconfirmed: bool = False,
 ) -> bool:
     """
     Нужно ли новому процессу отобрать порт у работающего.
@@ -358,6 +420,11 @@ def should_takeover(
 
     ``unauthorized_seen`` — работающий хаб отметил заход без подтверждённой сессии;
     перехватываем (после проверки SID), чтобы выдать браузеру свежий токен.
+
+    ``session_unconfirmed`` (GAP-821) — работающий хаб (та же версия) давно поднят и ни разу
+    не принял вход со своим токеном (см. ``session_unconfirmed()``): у человека не может быть
+    рабочей ссылки, поэтому ярлык перехватывает экземпляр сразу, не дожидаясь маркера 401.
+    Отключается ``no_takeover`` -- как и версионный автоперехват.
 
     ``our_version``/``no_takeover``. Второй автоматический повод
     (после «мы elevated, а он нет»): работающий экземпляр — ДРУГОЙ версии,
@@ -394,6 +461,8 @@ def should_takeover(
     # работающий хаб недавно отверг заход без сессии (см. mark_unauthorized) --
     # перезапуск даёт свежий токен в ссылке; без этого ярлык вечно открывал бы тот же процесс.
     if unauthorized_seen:
+        return True
+    if session_unconfirmed and not no_takeover:
         return True
     # Повышение прав — первый автоматический повод. Обратного (elevated
     # уступает обычному) не бывает.

@@ -453,7 +453,7 @@
 
   // Режим модалки: "create" — «Зарегистрировать стенд», "edit" — «Изменить»
   // существующего (та же форма, POST /api/stand/update, имя не меняется).
-  const registerState = { mode: "create", name: null };
+  const registerState = { mode: "create", name: null, hasDbSecret: false };
 
   const DEFAULT_DB_PORTS = { postgres: "5432", mssql: "" };
 
@@ -489,6 +489,7 @@
     // открытия и не совпала бы со значениями в полях.
     form.reset();
     setRegisterMode("create");
+    registerState.hasDbSecret = false;
     showRegisterFormError("");
     document.getElementById("iis-detect-status").textContent = "";
     resetRegisterAuxUi();
@@ -534,6 +535,7 @@
     });
     setEngineField(cfg.engine && cfg.engine.type ? cfg.engine : null);
     updateRegisterConditionalFields();
+    registerState.hasDbSecret = !!(data && data.has_db_secret);
     if (data && data.has_db_secret) {
       document.getElementById("register-probe-status").textContent = "Секрет пароля БД в хранилище задан.";
     }
@@ -766,8 +768,15 @@
     }
     if (data.engine) setEngineField(data.engine);
     const pwRow = document.getElementById("register-pw-row");
+    const pwBox = form.elements.namedItem("db_password_from_config");
+    const pwWasHidden = pwRow.hidden;
     pwRow.hidden = !(db && db.password_in_config);
-    if (pwRow.hidden) form.elements.namedItem("db_password_from_config").checked = false;
+    // GAP-821 п.4: одно правило для «Зарегистрировать» и «Изменить». Пароль найден в конфиге
+    // -- флажок включён по умолчанию (один раз, при появлении строки; выбор человека при
+    // повторной пробе не сбрасывается), КРОМЕ случая, когда секрет пароля БД уже лежит в
+    // хранилище: перезаписывать его молча нельзя, там флажок включается руками.
+    if (pwRow.hidden) pwBox.checked = false;
+    else if (pwWasHidden) pwBox.checked = !registerState.hasDbSecret;
     updateRegisterConditionalFields();
   }
 
@@ -948,10 +957,17 @@
         initial: initial || "",
       });
       if (data && data.path) return data.path;
-      if (data && data.error) return openFsBrowser(initial);
+      // GAP-821: самодельный обзор -- только когда нативного окна на машине нет вовсе
+      // (no_dialog). Любой другой отказ -- честное сообщение, а не «странное» окно вместо
+      // обычного окна выбора папки Windows.
+      if (data && data.error === "no_dialog") return openFsBrowser(initial);
+      if (data && data.error) {
+        toast(`Окно выбора папки не открылось: ${data.error}`);
+      }
       return null; // отмена диалога
     } catch (e) {
-      return openFsBrowser(initial);
+      toast(`Окно выбора папки не открылось: ${describeApiError(e)}`);
+      return null;
     }
   }
 
@@ -2882,6 +2898,27 @@
     document.getElementById("mcpremote-copy-token-hint-btn").addEventListener("click", () => {
       if (remoteTokenHint) copyText(remoteTokenHint);
     });
+    const genBtn = document.getElementById("mcpremote-generate-token-btn");
+    const tokenMsg = document.getElementById("mcpremote-token-msg");
+    if (genBtn) {
+      genBtn.addEventListener("click", async () => {
+        errorEl.textContent = "";
+        if (tokenMsg) tokenMsg.textContent = "";
+        genBtn.disabled = true;
+        try {
+          await saveRemoteFields(); // ссылка на токен берётся из формы
+          const data = await apiSend("POST", "/api/remote/token/generate", {});
+          renderRemoteStatus(data);
+          if (tokenMsg) tokenMsg.textContent = data.message || "Токен создан.";
+          await refreshSecretStatuses();
+        } catch (e) {
+          // «уже задан» -- не поломка: ротация обрывает клиентов, поэтому только осознанно.
+          errorEl.textContent = describeApiError(e);
+        } finally {
+          genBtn.disabled = false;
+        }
+      });
+    }
   }
 
   // --- канал обновлений издателя (окно «Обновления») ---
@@ -3943,7 +3980,9 @@
       // честный `current.json`), title честно об этом говорит, не разбавляя строку.
       currentEl.title = rel.current_version_source === "running"
         ? "Приближённо: версия запущенного процесса (файл маркера установки не найден)"
-        : "";
+        : (rel.current_version_source === "manifest"
+          ? "Версия установленной поставки (manifest.json)"
+          : "");
     }
     if (installerRequired) {
       setChip("upd-mcp-chip", "new", `нужен установщик ${latest}`, "");

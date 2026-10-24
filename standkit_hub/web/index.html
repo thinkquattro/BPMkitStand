@@ -489,7 +489,9 @@
         </div>
         <div class="modal-footer">
           <button type="button" id="register-test-btn" class="secondary register-test-btn"
+                  aria-label="Тест" aria-describedby="register-test-hint"
                   title="Проверить введённые данные до сохранения: имена, порты, вход в БД, PING Redis">Тест</button>
+          <span id="register-test-hint" class="visually-hidden">Проверить введённые данные до сохранения: имена, порты, вход в БД, PING Redis</span>
           <button type="button" id="register-modal-cancel-btn" class="secondary">Отмена</button>
           <button type="submit" id="register-modal-submit-btn">Зарегистрировать</button>
         </div>
@@ -1051,10 +1053,14 @@
             <div class="agent-state-row">
               <span>Создать токен: <code id="mcpremote-token-hint">BPMkit.exe setup remote-token --generate --show</code></span>
               <button type="button" id="mcpremote-copy-token-hint-btn" class="secondary">Копировать команду</button>
+              <button type="button" id="mcpremote-generate-token-btn" class="secondary">Сгенерировать токен</button>
             </div>
-            <small class="field-hint">Команду выполняют один раз в своём терминале: токен показывается там
-              и сохраняется в хранилище секретов. Клиенту токен передают заголовком
-              <code>Authorization: Bearer &lt;токен&gt;</code>.</small>
+            <small class="field-hint" id="mcpremote-token-msg" role="status"></small>
+            <small class="field-hint">Токен хранится в хранилище секретов BPMkit — оттуда его читает сервер
+              удалённого режима. «Сгенерировать токен» создаёт его без показа; чтобы увидеть значение
+              (перенести клиенту заголовком <code>Authorization: Bearer &lt;токен&gt;</code>), выполните
+              команду выше в своём терминале при первом создании либо <code>BPMkit.exe setup secrets get</code>.
+              «Задать…» у ссылки сохраняет введённое значение туда же.</small>
             <label class="checkbox-label">
               <input type="checkbox" name="remote_allow_query_token" />
               Принимать токен и в адресе (<code>?token=…</code>)

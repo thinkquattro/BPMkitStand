@@ -462,8 +462,15 @@ class CompanionState:
         del history[RELEASE_HISTORY_KEEP:]
 
     # -- сводка для UI -------------------------------------------------------------------
-    def summary(self) -> dict[str, Any]:
+    def summary(self, disk_version: Optional[str] = None) -> dict[str, Any]:
         """Плоская карточка состояния для `/api/companion/status` и `self_check` MCP.
+
+        `disk_version` (GAP-928) -- версия поставки по `manifest.json` на диске (её пишет
+        установщик; в состояние канала она не попадает). Источник «установлено» для окна
+        «Обновления» после установки установщиком: у свежеустановленной версии нет ни
+        `current.json` канала, ни маркера работающего процесса (MCP ещё не запускали), и окно
+        писало «версия неизвестна». Приоритет: запись канала, если она не старее диска;
+        версия поставки на диске; версия работающего процесса.
 
         Тела паттернов сюда НЕ попадают — только счётчики: ответ статуса дёргается
         поллером UI и обязан оставаться маленьким.
@@ -485,6 +492,12 @@ class CompanionState:
         current_version = current.get("version") or None
         running_version = rel.get("running_version")
         current_version_source = "installed" if current_version else None
+        disk = str(disk_version or "").strip() or None
+        if disk and (not current_version or compare_versions(disk, current_version) > 0):
+            # установщик поставил версию новее записанной каналом (либо канал ещё ничего не
+            # записал): на диске -- факт, маркер работающего процесса отстаёт до перезапуска.
+            current_version = disk
+            current_version_source = "manifest"
         if not current_version and running_version:
             current_version = running_version
             current_version_source = "running"

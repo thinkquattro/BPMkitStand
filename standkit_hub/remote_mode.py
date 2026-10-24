@@ -16,9 +16,14 @@
   не является службой) -- «поднимать само после перезагрузки хоста» закрывает флаг
   ``remote_autostart`` (старт вместе с диспетчером), а настоящая служба -- отдельный остаток.
 * Токен -- ТОЛЬКО ссылка (``remote_token_ref`` -> ``--token-ref``). Значение секрета
-  не читается, не печатается, в argv и в ответы API не попадает; модуль спрашивает
-  лишь «есть ли секрет» (``standkit.secrets.has_secret``). Токен в командной строке
-  ``serve-http`` сам отвергает.
+  не читается, не печатается, в argv и в ответы API не попадает. Токен читает ``serve-http``
+  из хранилища секретов BPMkit (сервис «bpmkit», ``secrets.enc``), а НЕ из хранилища standkit
+  (сервис «standkit»): раньше хаб спрашивал «есть ли секрет» у своего хранилища, и круг
+  замыкался -- токен, созданный предложенной хабом командой ``setup remote-token``, хаб не видел,
+  а токен, заданный кнопкой «Задать…», не видел сервер (GAP-612, приёмка 13.10.2026). Теперь
+  наличие проверяет ``BPMkit.exe setup remote-token --status --ref``, а задаёт/создаёт токен
+  ``setup remote-token --from-env`` / ``--generate`` (значение уходит переменной окружения
+  процесса, не argv). Токен в командной строке ``serve-http`` сам отвергает.
 * Живость -- по ``GET /healthz`` (отвечает без авторизации и без секретов): процесс жив,
   но порт не отвечает -- это «запускается» либо «не отвечает», а не «работает».
 * Резолв ``BPMkit.exe`` -- ТОТ ЖЕ, что у экрана лицензии и канала обновлений
@@ -42,7 +47,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from standkit.platform import ProcessError, is_alive, run_console, spawn_hidden, stop
+from standkit.platform import (
+    ProcessError, is_alive, run_console, run_console_tree, spawn_hidden, stop,
+)
 from standkit.secrets import has_secret as _default_has_secret
 from standkit_hub import license_api
 from standkit_hub.config import (
@@ -70,6 +77,56 @@ _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9.:\[\]_-]{1,255}$")
 
 _WILDCARD_HOSTS = ("0.0.0.0", "::", "[::]", "")
+
+#: Имя переменной окружения, через которую значение токена передаётся ``setup remote-token
+#: --from-env`` (то же, что ``remote_transport.ENV_TOKEN_VALUE`` сервера BPMkit).
+TOKEN_ENV_VAR = "BPMKIT_REMOTE_TOKEN_VALUE"
+
+#: Ответ CLI на статус токена кэшируется: статус удалённого режима опрашивается часто, а запуск
+#: ``BPMkit.exe`` -- это процесс (холодный старт под антивирусом до секунд).
+_TOKEN_CACHE_TTL_S = 20.0
+_TOKEN_CLI_TIMEOUT_S = 15.0
+_TOKEN_CACHE: dict = {}
+_TOKEN_CACHE_LOCK = threading.Lock()
+
+
+def invalidate_token_cache() -> None:
+    """Сбросить кэш статуса токена (после создания/смены токена)."""
+    with _TOKEN_CACHE_LOCK:
+        _TOKEN_CACHE.clear()
+
+
+def default_cli_runner(argv: list, env: Optional[dict] = None, timeout: float = _TOKEN_CLI_TIMEOUT_S) -> tuple:
+    """Запуск CLI BPMkit: ``(rc, stdout, stderr)``; любой сбой запуска -- ``rc=-1``.
+
+    ``run_console_tree``: без мигающего окна, по таймауту умирает всё дерево, stdin -- DEVNULL."""
+    import os
+    kwargs: dict = dict(capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        timeout=timeout)
+    if env:
+        merged = dict(os.environ)
+        merged.update(env)
+        kwargs["env"] = merged
+    try:
+        proc = run_console_tree(list(argv), **kwargs)
+    except Exception as exc:  # noqa: BLE001 - один вид отказа наружу
+        return -1, "", f"{type(exc).__name__}: {exc}"
+    rc = proc.returncode if proc.returncode is not None else -1
+    return int(rc), proc.stdout or "", proc.stderr or ""
+
+
+def _cli_error_text(stdout: str, stderr: str) -> str:
+    """Человеческий текст отказа из JSON-ответа CLI (поле ``error``) либо хвост stderr."""
+    text = (stdout or "").strip()
+    try:
+        start, end = text.index("{"), text.rindex("}")
+        data = json.loads(text[start:end + 1])
+        if isinstance(data, dict) and data.get("error"):
+            return str(data["error"])[:400]
+    except (ValueError, TypeError):
+        pass
+    tail = (stderr or text or "").strip().splitlines()
+    return (tail[-1] if tail else "CLI BPMkit не ответил")[:400]
 
 
 #: Один замок на процесс диспетчера: контроллер создаётся на КАЖДЫЙ запрос хаба, поэтому
@@ -204,7 +261,8 @@ class RemoteModeController:
                  alive: Callable[[int], bool] = is_alive,
                  stopper: Callable = stop,
                  probe: Callable[[str, int], Optional[dict]] = default_health_probe,
-                 has_secret: Callable[[str], bool] = _default_has_secret,
+                 has_secret: Optional[Callable[[str], bool]] = None,
+                 cli_runner: Optional[Callable] = None,
                  sleep: Callable[[float], None] = time.sleep,
                  image_of: Callable[[int], Optional[str]] = default_image_of,
                  startup_wait: float = _STARTUP_WAIT_S):
@@ -214,7 +272,11 @@ class RemoteModeController:
         self._alive = alive
         self._stopper = stopper
         self._probe = probe
-        self._has_secret = has_secret
+        #: ``has_secret`` задан явно (тесты, встраивание) -- наличие токена решает он; иначе токен
+        #: спрашивается у CLI BPMkit, то есть у того хранилища, которое читает serve-http.
+        self._has_secret_override = has_secret
+        self._has_secret = has_secret or _default_has_secret
+        self._cli_runner = cli_runner or default_cli_runner
         self._sleep = sleep
         self._image_of = image_of
         self._startup_wait = startup_wait
@@ -263,6 +325,89 @@ class RemoteModeController:
             return ""
         tail = [ln.strip() for ln in raw.splitlines() if ln.strip()][-lines:]
         return " | ".join(tail)[:600]
+
+    # --- токен (хранилище BPMkit, через CLI) ---
+
+    def _cli_or_none(self) -> Optional[list]:
+        try:
+            return self._cli_resolver()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def token_present(self, *, fresh: bool = False) -> bool:
+        """Есть ли токен в хранилище, которое читает ``serve-http`` (спрашивает CLI BPMkit).
+
+        ``fresh`` -- мимо кэша (перед запуском). CLI не найден -- ``False`` (запустить всё равно
+        нечем). CLI не умеет ``remote-token --status`` (старая сборка) -- прежняя проверка по
+        хранилищу standkit."""
+        ref = str(self.config.remote_token_ref or "").strip()
+        if not ref:
+            return False
+        if self._has_secret_override is not None:
+            return bool(self._has_secret_override(ref))
+        cli = self._cli_or_none()
+        if not cli:
+            return False
+        key = (tuple(cli), ref)
+        now = time.monotonic()
+        if not fresh:
+            with _TOKEN_CACHE_LOCK:
+                hit = _TOKEN_CACHE.get(key)
+            if hit is not None and now - hit[0] < _TOKEN_CACHE_TTL_S:
+                return hit[1]
+        rc, _out, _err = self._cli_runner(
+            list(cli) + ["setup", "remote-token", "--status", "--ref", ref])
+        if rc == 0:
+            present = True
+        elif rc == 1:
+            present = False
+        else:
+            present = bool(_default_has_secret(ref))
+        with _TOKEN_CACHE_LOCK:
+            _TOKEN_CACHE[key] = (now, present)
+        return present
+
+    def set_token(self, value: str) -> tuple:
+        """Записать токен в хранилище BPMkit (кнопка «Задать…»): ``(ok, сообщение)``.
+
+        Значение уходит ПЕРЕМЕННОЙ ОКРУЖЕНИЯ дочернего процесса (``--from-env``), не argv; замена
+        существующего токена -- явное действие человека, поэтому ``--force``. Значение нигде не
+        логируется и в сообщение не попадает."""
+        ref = str(self.config.remote_token_ref or "").strip()
+        if not ref or not _REF_RE.match(ref):
+            return False, "Не задана ссылка на токен (remote_token_ref)."
+        cli = self._cli_or_none()
+        if not cli:
+            return False, ("Не найден BPMkit.exe: укажите путь в Настройки → Основные → «CLI BPMkit» "
+                           "или установите BPMkit.")
+        rc, out, err = self._cli_runner(
+            list(cli) + ["setup", "remote-token", "--from-env", TOKEN_ENV_VAR, "--ref", ref, "--force"],
+            {TOKEN_ENV_VAR: str(value)})
+        invalidate_token_cache()
+        if rc == 0:
+            return True, "Токен сохранён в хранилище секретов BPMkit."
+        return False, _cli_error_text(out, err)
+
+    def generate_token(self, *, force: bool = False) -> tuple:
+        """Создать токен командой CLI (``setup remote-token --generate``): ``(ok, сообщение)``.
+
+        Значение не показывается (без ``--show``): его читают командой ``setup secrets get``.
+        Существующий токен без ``force`` не перезаписывается -- ротация обрывает всех клиентов."""
+        ref = str(self.config.remote_token_ref or "").strip()
+        if not ref or not _REF_RE.match(ref):
+            return False, "Не задана ссылка на токен (remote_token_ref)."
+        cli = self._cli_or_none()
+        if not cli:
+            return False, ("Не найден BPMkit.exe: укажите путь в Настройки → Основные → «CLI BPMkit» "
+                           "или установите BPMkit.")
+        argv = list(cli) + ["setup", "remote-token", "--generate", "--ref", ref]
+        if force:
+            argv.append("--force")
+        rc, out, err = self._cli_runner(argv)
+        invalidate_token_cache()
+        if rc == 0:
+            return True, "Токен создан и сохранён в хранилище секретов BPMkit."
+        return False, _cli_error_text(out, err)
 
     # --- состояние ---
 
@@ -315,7 +460,7 @@ class RemoteModeController:
             started = float((state_row or {}).get("started") or 0)
             state = "starting" if started and time.time() - started < 15 else "unresponsive"
         ref = str(cfg.remote_token_ref or "").strip()
-        token_present = bool(ref) and bool(self._has_secret(ref))
+        token_present = bool(ref) and self.token_present()
         cli = None
         try:
             cli = self._cli_resolver()
@@ -371,16 +516,16 @@ class RemoteModeController:
                 f"По адресу {self.config.remote_host}:{self.config.remote_port} уже отвечает "
                 "сервер BPMkit, запущенный не из диспетчера, -- остановите его или смените порт.")
         ref = str(self.config.remote_token_ref).strip()
-        if not self._has_secret(ref):
-            cmd = self.status()["token_hint"]
-            raise RemoteModeError(
-                f"Токен «{ref}» не найден в хранилище секретов -- без него сервер не запустится. "
-                f"Создайте токен командой: {cmd}")
         cli = self._cli_resolver()
         if not cli:
             raise RemoteModeError(
                 "Не найден BPMkit.exe: укажите путь в Настройки → Основные → «CLI BPMkit» "
                 "или установите BPMkit.")
+        if not self.token_present(fresh=True):
+            cmd = self.status()["token_hint"]
+            raise RemoteModeError(
+                f"Токен «{ref}» не найден в хранилище секретов BPMkit -- без него сервер не запустится. "
+                f"Нажмите «Сгенерировать токен» либо выполните команду: {cmd}")
         argv = build_serve_argv(self.config, cli)
         log_path = self._log_file()
         try:
