@@ -85,6 +85,7 @@ from standkit_hub import security as _security
 from standkit_hub import stand_probe
 from standkit_hub import self_version as _self_version
 from standkit_hub.agent_control import AgentControlError, AgentController
+from standkit_hub.logon_task import LogonTaskController, LogonTaskError
 from standkit_hub.remote_mode import RemoteModeController, RemoteModeError
 from standkit_hub import elevation as _elevation
 from standkit_hub import instance as _instance
@@ -2479,6 +2480,28 @@ def make_handler(
             payload.update({"ok": True, "message": message})
             self._send_json(200, payload)
 
+        def _api_remote_logon_task_status(self) -> None:
+            """``GET /api/remote/logon-task`` -- есть ли задача планировщика «при входе»."""
+            self._send_json(200, LogonTaskController(_load_config(config_path)).status())
+
+        def _api_remote_logon_task_set(self) -> None:
+            """``POST /api/remote/logon-task`` ``{"enabled": bool}`` -- создать или удалить задачу
+            планировщика «при входе пользователя» (без прав администратора)."""
+            body = self._read_json_body(max_bytes=max_body_bytes)
+            if body is None:
+                return
+            controller = LogonTaskController(_load_config(config_path))
+            try:
+                if body.get("enabled"):
+                    payload = controller.enable()
+                else:
+                    payload = controller.disable()
+            except LogonTaskError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            payload["ok"] = True
+            self._send_json(200, payload)
+
         def _api_remote_stop(self) -> None:
             controller = self._remote_controller()
             try:
@@ -3446,6 +3469,11 @@ def make_handler(
                     return
                 self._api_remote_status()
                 return
+            if path == "/api/remote/logon-task":
+                if not self._authorize_read():
+                    return
+                self._api_remote_logon_task_status()
+                return
 
             if path == "/api/license":
                 # Сводка лицензии — обычное чтение (в ней нет ни ключа, ни конверта).
@@ -3605,6 +3633,11 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_remote_token_generate()
+                return
+            if path == "/api/remote/logon-task":
+                if not self._authorize_mutation():
+                    return
+                self._api_remote_logon_task_set()
                 return
 
             if path == _STAND_REGISTER_PATH:
