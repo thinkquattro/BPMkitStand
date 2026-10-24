@@ -89,11 +89,19 @@ CONTEXT_ARGV_TAIL = ("setup", "companion-context", "--json")
 # нужна экрану лицензии хаба (`standkit_hub.license_api`), и держать её в двух местах
 # «дословно одинаковой» руками — значит рано или поздно её рассинхронизировать.
 
-# Сколько ждём ответа CLI. Прежних 30 с не хватило на VM приёмки 13.10.2026 — холодный
-# старт onefile-exe под антивирусом 14–25 с без нагрузки и больше 30 с под нагрузкой.
-# 90 с — с запасом на это и всё ещё заведомо меньше интервала любого цикла: зависший CLI
-# не должен копить тики (по тайм-ауту дерево процессов убивается, см. `_default_run`).
-_CLI_TIMEOUT_S = 90.0
+# Сколько живёт процесс CLI, прежде чем его дерево убивается как зависшее. Прежних 30 с не
+# хватило на VM приёмки 13.10.2026 (холодный старт onefile-exe под антивирусом 14–25 с без
+# нагрузки), а 90 с — на медленном госте 24.10.2026: `stage-skills` отвечал
+# `context_unavailable` «не ответил за 90 с». 240 с — запас на самый медленный гость и всё
+# ещё конечный предел: зависший CLI не живёт вечно.
+_CLI_TIMEOUT_S = 240.0
+
+# Сколько ЖДЁТ вызывающий (запрос хаба, тик цикла) ответа CLI, прежде чем ответить «идёт
+# подготовка, повторите». Процесс при этом НЕ убивается: он доживает свои `_CLI_TIMEOUT_S`
+# в фоне и кладёт готовый контекст в кэш, а повторный запрос присоединяется к нему, а не
+# запускает второй exe. Меньше минуты: запрос хаба не должен висеть дольше, чем терпит
+# клиент HTTP.
+_CLI_WAIT_S = 45.0
 
 # Код возврата `_default_run` для тайм-аута — отдельный от «упал/не запустился» (-1):
 # тайм-аут чинится иначе (повторить позже, проверить антивирус), и текст отказа его называет.
@@ -343,8 +351,19 @@ def resolve(settings, *, run: Optional[Callable] = None,
     if cached is not None:
         return cached
 
-    runner = run if run is not None else _default_run
-    rc, stdout, stderr = runner(argv)
+    if run is not None:
+        rc, stdout, stderr = run(argv)
+        context = _context_from_run(rc, stdout, stderr, cli=list(cli),
+                                    override_url=override_url)
+        _cache_put(key, context, cache_ttl)
+        return context
+    return _resolve_via_background_cli(argv, key, list(cli), override_url, cache_ttl)
+
+
+def _context_from_run(rc: int, stdout: str, stderr: str, *, cli: list,
+                      override_url: str) -> LicenseContext:
+    """Исход запуска CLI → контекст или типизированный отказ (общая часть для явного `run`
+    и фонового запуска)."""
     if rc == RC_TIMEOUT:
         raise ContextUnavailable(
             f"CLI BPMkit не ответил за {int(_CLI_TIMEOUT_S)} с на запрос лицензионного "
@@ -361,9 +380,76 @@ def resolve(settings, *, run: Optional[Callable] = None,
         )
 
     payload = _parse_stdout(stdout)
-    context = _context_from_payload(payload, cli=list(cli), override_url=override_url)
-    _cache_put(key, context, cache_ttl)
-    return context
+    return _context_from_payload(payload, cli=cli, override_url=override_url)
+
+
+class _CliJob:
+    """Один фоновый запуск CLI за контекстом. Исход — `context` либо `error`."""
+
+    def __init__(self, generation: int) -> None:
+        self.generation = generation
+        self.started = time.monotonic()
+        self.done = threading.Event()
+        self.context: Optional[LicenseContext] = None
+        self.error: Optional[BaseException] = None
+
+
+# Запущенные, ещё не завершённые запуски CLI: ключ кэша → задание. Повторный запрос,
+# пришедший пока exe поднимается, присоединяется к нему, а не запускает второй процесс.
+_inflight: dict = {}
+# Поколение кэша: `invalidate_cache` увеличивает его, и результат задания прежнего
+# поколения (ключ введён/сменён, пока exe стартовал) в кэш не ложится.
+_generation = 0
+
+
+def _resolve_via_background_cli(argv: list, key, cli: list, override_url: str,
+                                cache_ttl: float) -> LicenseContext:
+    """Запуск внешнего CLI в фоновом потоке с ограниченным ожиданием.
+
+    Ждём `_CLI_WAIT_S`. Ответил — обычный путь. Не ответил (холодный старт на медленном
+    госте) — `ContextUnavailable(kind="context_starting")`: процесс продолжает работать до
+    `_CLI_TIMEOUT_S`, готовый контекст сам ляжет в кэш, и следующий запрос его получит.
+    """
+    with _cache_lock:
+        job = _inflight.get(key)
+        if job is None or job.done.is_set():
+            job = _CliJob(_generation)
+            _inflight[key] = job
+            thread = threading.Thread(
+                target=_run_cli_job, name="standkit-context-cli", daemon=True,
+                args=(job, argv, key, cli, override_url, cache_ttl))
+            thread.start()
+    if not job.done.wait(_CLI_WAIT_S):
+        waited = int(time.monotonic() - job.started)
+        raise ContextUnavailable(
+            f"BPMkit запускается — идёт подготовка (уже {waited} с, холодный старт "
+            "BPMkit.exe на медленной машине бывает долгим); повторите через минуту",
+            kind="context_starting",
+            detail=f"CLI не ответил за {int(_CLI_WAIT_S)} с, процесс продолжает работу "
+                   f"до {int(_CLI_TIMEOUT_S)} с",
+        )
+    if job.error is not None:
+        raise job.error
+    return job.context
+
+
+def _run_cli_job(job: _CliJob, argv: list, key, cli: list, override_url: str,
+                 cache_ttl: float) -> None:
+    try:
+        rc, stdout, stderr = _default_run(argv)
+        job.context = _context_from_run(rc, stdout, stderr, cli=cli,
+                                        override_url=override_url)
+        with _cache_lock:
+            fresh = job.generation == _generation
+        if fresh:
+            _cache_put(key, job.context, cache_ttl)
+    except BaseException as exc:  # noqa: BLE001 - исход задания, поток не должен упасть молча
+        job.error = exc
+    finally:
+        with _cache_lock:
+            if _inflight.get(key) is job:
+                _inflight.pop(key, None)
+        job.done.set()
 
 
 def _resolve_inprocess(provider: Callable[[], dict], override_url: str,
@@ -429,8 +515,11 @@ def invalidate_cache() -> None:
     сменил адрес бэкенда, применил обновление MCP. Без явного сброса канал до пяти минут
     жил бы с устаревшим ответом — то есть «ключ ввёл, а ничего не поменялось».
     """
+    global _generation
     with _cache_lock:
         _cache.clear()
+        _generation += 1
+        _inflight.clear()
 
 
 def _cache_get(key) -> Optional[LicenseContext]:
