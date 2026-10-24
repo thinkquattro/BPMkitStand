@@ -361,6 +361,20 @@ def _should_hand_over_to_installed_exe(args) -> bool:
     return bool(_installed_exe.find_installed_hub_exe())
 
 
+def _safe_console_streams() -> None:
+    """Вывод CLI диспетчера не должен падать на кодировке консоли (cp1252 на англ. Windows,
+    перенаправленный вывод): непредставимые символы заменяются, а не роняют процесс
+    трейсбеком UnicodeEncodeError."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def _hand_over_to_installed_exe(args) -> int:
     exe = _installed_exe.find_installed_hub_exe()
     if not exe:
@@ -384,6 +398,7 @@ def _hand_over_to_installed_exe(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _safe_console_streams()
     parser = argparse.ArgumentParser(
         prog="standkit-gui",
         description="Локальный веб-дашборд standkit — диспетчер стендов BPMSoft (вариант A: браузер/pywebview)",
