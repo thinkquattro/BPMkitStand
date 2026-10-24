@@ -3176,7 +3176,9 @@
     if (event.kind === "install_failed") return `Автоматическая установка версии ${to} не удалась${when}`;
     if (event.kind === "rollback_failed") return `Версия ${from} не запустилась, откатить её не удалось — переустановите BPMkit`;
     if (event.kind === "install_unverified") return `Автоматическую установку версии ${to} не удалось подтвердить${when} — проверьте установку BPMkit`;
-    if (event.kind === "install_deferred") return `Установка версии ${to} отложена${when}: MCP-сервер был запущен`;
+    if (event.kind === "install_deferred") return `Установка версии ${to} отложена${when}: файл MCP-сервера был занят`;
+    if (event.kind === "install_started") return `Запущена автоматическая установка версии ${to}${when}`;
+    if (event.kind === "install_partial") return `Автоматическая установка версии ${to} не завершилась${when} — поставка смешанная, установка будет повторена`;
     if (event.kind === "manual_rollback") return `Версия ${from} откачена вручную${when} — автоматически не ставится`;
     return "";
   }
@@ -3253,9 +3255,12 @@
       const pending = rel.auto_pending_version;
       const since = rel.auto_pending_since ? ` ${describeMoment(rel.auto_pending_since)}` : "";
       pendingEl.hidden = !pending;
-      pendingEl.textContent = pending
-        ? `Версия ${pending} установлена${since} и ждёт первого рабочего запуска — перезапустите приложение`
-        : "";
+      const verified = rel.auto_pending_verified !== false;
+      pendingEl.textContent = !pending
+        ? ""
+        : verified
+          ? `Версия ${pending} установлена${since} и ждёт первого рабочего запуска — перезапустите приложение`
+          : `Идёт установка версии ${pending}${since} — установщик ещё работает или результат ещё не проверен`;
     }
     const badEl = byId("upd-bad-versions");
     if (badEl) {

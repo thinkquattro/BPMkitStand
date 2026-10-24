@@ -1044,6 +1044,14 @@ class CompanionRunner:
         rolled = self._auto_housekeeping(trigger=trigger)
         if rolled is not None:
             return rolled
+        # Второй запуск при идущем (жив установщик или замок у другого процесса) — выйти
+        # сразу, до лицензионного контекста и сети: «уже идёт».
+        try:
+            busy = autoupdate.busy_payload(self._state, trigger=trigger)
+        except Exception:  # noqa: BLE001 - проверка занятости best-effort
+            busy = None
+        if busy is not None:
+            return busy
         pre = autoupdate.precheck(settings, trigger=trigger)
         if pre is not None:
             return pre

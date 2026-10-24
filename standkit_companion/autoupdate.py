@@ -77,6 +77,26 @@ exe) не меньше двух, последняя — после устано�
 кнопка окна и команда CLI). Для отката не нужен лицензионный
 контекст: сломанный бинарь — это и есть CLI, у которого контекст спрашивается, поэтому
 всё нужное для отката запоминается в момент установки.
+
+**Проверка результата установки и ремонт.** Установщик работает в фоне, поэтому запуск
+установщика — ещё не установка: событие `install_started`, запись `releases.auto` без
+`verified_at`. Когда установщик закончил, `reconcile_pending` сверяет поставку на диске
+(`verify_delivery`): версия `manifest.json` = поставленная, sha256 `bpmkit.exe` = сумма
+релиза этой версии (если она известна по проверке), exe не остался прежним файлом
+(сумма до установки), эталон `<exe>.sha256` = фактическая сумма. Сошлось — событие
+`applied` и `verified_at`; не сошлось — `install_partial`: смешанная поставка (например,
+`manifest.json` новый, а `bpmkit.exe` прежний, потому что его держал другой процесс и
+установщик ушёл в Abort посреди копирования). Это неудача версии (счётчик), а в
+`releases.auto_repair` остаётся «чинить версию X»: следующий проход автоматики ставит ту
+же версию заново, хотя `manifest.json` уже говорит, что она стоит (ремонт повтором
+установщика, до `INSTALL_FAILURES_LIMIT` раз).
+
+**Второй запуск при идущем.** Пока жив запущенный автоматикой установщик или замок
+машины держит живой другой процесс, `busy_reason` отвечает причиной, и `execute`
+выходит `waiting` сразу, до сети и подготовки (`installer_running` /
+`busy_other_process`). Короткий CLI-процесс не должен держать образ `bpmkit.exe`, пока
+установщик его заменяет: сервер BPMkit запускает фоновые `setup auto-update` из копии в
+кэше версий, а установщик перед заменой exe ждёт его освобождения.
 """
 from __future__ import annotations
 
@@ -107,6 +127,10 @@ __all__ = [
     "read_startup_marker",
     "pending_record",
     "reconcile_pending",
+    "verify_delivery",
+    "busy_reason",
+    "busy_payload",
+    "repair_target",
     "maybe_rollback",
     "clear_bad_versions",
     "precheck",
@@ -170,6 +194,9 @@ _NOTIFY_LIKE = frozenset({"mode_notify", "machine_scope", "settings_unreadable"}
 #: признать установку «не подтверждаемой», если версию поставки на диске прочитать
 #: нельзя (`manifest.json` нет или он битый): ожидание подтверждения не вечное.
 PENDING_UNVERIFIED_SEC = 6 * 3600
+
+#: Суффикс эталона суммы рядом с бинарём (как у сборки: `<exe>.sha256`).
+SHA256_SIDECAR_SUFFIX = releases.SHA256_SIDECAR_SUFFIX
 
 
 # ======================================================================================
@@ -543,15 +570,25 @@ INSTALLER_LOG_DEFERRED = "BPMKIT_DEFERRED: server_running"
 INSTALLER_LOG_CANCELLED = "установка отменена ДО копирования файлов"
 INSTALLER_LOG_SERVER = "MCP-сервер (мьютекс"
 
+#: Общий префикс ASCII-меток отказа установщика ДО копирования файлов: кроме
+#: `server_running` ещё `exe_busy` (файл сервера держит не сервер, а другой процесс, и
+#: установщик его не дождался). Поставка не тронута — это «подождём», а не неудача версии.
+INSTALLER_LOG_DEFERRED_PREFIX = "BPMKIT_DEFERRED:"
+
+#: ASCII-метка установщика «копирование началось и не завершилось» (замена exe не
+#: удалась посреди установки): поставка может быть смешанной.
+INSTALLER_LOG_PARTIAL = "BPMKIT_PARTIAL:"
+
 #: Сколько последних байт журнала установщика читать (причина отказа — в конце).
 _INSTALLER_LOG_TAIL = 256 * 1024
 
 
-def _installer_refused_by_server(log_path) -> bool:
-    """Установщик отказал, потому что работал MCP-сервер (по его журналу `/LOG`)."""
+def _installer_log_tail(log_path) -> list:
+    """Хвост журнала установщика в нескольких кодировках (Inno пишет журнал в кодировке
+    системы, старые сборки — в UTF-16). Нет файла — пустой список."""
     text = str(log_path or "").strip()
     if not text:
-        return False
+        return []
     try:
         with open(text, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -559,14 +596,107 @@ def _installer_refused_by_server(log_path) -> bool:
             fh.seek(max(0, size - _INSTALLER_LOG_TAIL))
             raw = fh.read()
     except OSError:
-        return False
-    for encoding in ("utf-8", "utf-16", "cp1251"):
-        content = raw.decode(encoding, errors="ignore")
-        if INSTALLER_LOG_DEFERRED in content:
+        return []
+    return [raw.decode(encoding, errors="ignore") for encoding in ("utf-8", "utf-16", "cp1251")]
+
+
+def _installer_refused_by_server(log_path) -> bool:
+    """Установщик отказал ДО копирования файлов (по его журналу `/LOG`): работал MCP-сервер
+    или файл сервера так и не освободился (`BPMKIT_DEFERRED: …`)."""
+    for content in _installer_log_tail(log_path):
+        if INSTALLER_LOG_PARTIAL in content:
+            return False
+        if INSTALLER_LOG_DEFERRED in content or INSTALLER_LOG_DEFERRED_PREFIX in content:
             return True
         if INSTALLER_LOG_CANCELLED in content and INSTALLER_LOG_SERVER in content:
             return True
     return False
+
+
+def _installer_reported_partial(log_path) -> bool:
+    """Установщик сам пометил незавершённое копирование (`BPMKIT_PARTIAL: …`)."""
+    return any(INSTALLER_LOG_PARTIAL in content for content in _installer_log_tail(log_path))
+
+
+def _norm_sha(value) -> str:
+    text = str(value or "").strip().lower()
+    if len(text) == 64 and all(ch in "0123456789abcdef" for ch in text):
+        return text
+    return ""
+
+
+def _sidecar_sha(binary: Path) -> Optional[str]:
+    """Сумма из эталона `<exe>.sha256` (формат sha256sum). Нет файла — `None`; файл есть,
+    но не разбирается — пустая строка (это расхождение, а не «эталона нет»)."""
+    side = binary.with_name(binary.name + SHA256_SIDECAR_SUFFIX)
+    try:
+        text = side.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return ""
+    parts = text.strip().split()
+    return _norm_sha(parts[0]) if parts else ""
+
+
+def verify_delivery(binary, version, *, expected_sha256=None, previous_sha256=None,
+                    previous_version=None) -> dict:
+    """Сверка поставки на диске с ожидаемой версией после работы установщика.
+
+    Проверки (каждая — код в `problems`):
+
+    * `manifest_unreadable` / `manifest_version` — `manifest.json` не читается или его версия
+      не `version`;
+    * `exe_unreadable` — `bpmkit.exe` нет или он не читается;
+    * `exe_sha256` — сумма exe не равна сумме релиза этой версии (`expected_sha256`, когда
+      она известна по проверке релиза);
+    * `exe_not_replaced` — сумма exe равна сумме файла ДО установки (`previous_sha256`), а
+      версия менялась: установщик положил `manifest.json` новой версии, а exe не заменил;
+    * `sidecar` — эталон `<exe>.sha256` есть, а с фактической суммой exe не сходится.
+
+    Возвращает `{ok, manifest, exe_sha256, sidecar_sha256, problems, detail}`; сама ничего не
+    пишет и не бросает.
+    """
+    path = Path(str(binary or ""))
+    problems: list = []
+    notes: list = []
+    manifest = releases.manifest_version(path) if str(binary or "").strip() else None
+    if manifest is None:
+        problems.append("manifest_unreadable")
+        notes.append("manifest.json поставки не читается")
+    elif not _same_version(manifest, version):
+        problems.append("manifest_version")
+        notes.append(f"manifest.json — версия {manifest}, ожидалась {version}")
+    actual = ""
+    try:
+        actual = fsutil.sha256_file(path) if path.is_file() else ""
+    except OSError:
+        actual = ""
+    if not actual:
+        problems.append("exe_unreadable")
+        notes.append(f"{path.name or 'bpmkit.exe'} не найден или не читается")
+    expected = _norm_sha(expected_sha256)
+    previous = _norm_sha(previous_sha256)
+    if actual and expected and actual != expected:
+        problems.append("exe_sha256")
+        notes.append(f"{path.name} не от версии {version} (sha256 …{actual[-8:]}, "
+                     f"ожидался …{expected[-8:]})")
+    if (actual and previous and actual == previous and "exe_sha256" not in problems
+            and not _same_version(previous_version, version)):
+        problems.append("exe_not_replaced")
+        notes.append(f"{path.name} остался прежним (версии {previous_version or '—'})")
+    sidecar = _sidecar_sha(path) if actual else None
+    if actual and sidecar is not None and sidecar != actual:
+        problems.append("sidecar")
+        notes.append(f"эталон {path.name}{SHA256_SIDECAR_SUFFIX} не совпадает с файлом")
+    return {
+        "ok": not problems,
+        "manifest": manifest,
+        "exe_sha256": actual or None,
+        "sidecar_sha256": sidecar or None,
+        "problems": problems,
+        "detail": "; ".join(notes),
+    }
 
 
 def _confirm(state, record: dict, applied: str, at: str, *, via: str = "") -> dict:
@@ -580,6 +710,7 @@ def _confirm(state, record: dict, applied: str, at: str, *, via: str = "") -> di
     if via:
         record["confirmed_via"] = via
     rel = state.releases
+    _clear_repair(rel, applied)
     current = rel.get("current") if isinstance(rel.get("current"), dict) else {}
     if not _same_version(current.get("version"), applied):
         rel["current"] = {
@@ -591,6 +722,21 @@ def _confirm(state, record: dict, applied: str, at: str, *, via: str = "") -> di
         }
     state.save()
     return {"kind": "confirmed", "version": applied}
+
+
+def _clear_repair(rel: dict, version: str) -> None:
+    repair = rel.get("auto_repair")
+    if isinstance(repair, dict) and _same_version(repair.get("version"), version):
+        rel["auto_repair"] = None
+
+
+def repair_target(state) -> Optional[str]:
+    """Версия, которую автоматика должна поставить заново (смешанная поставка), или `None`."""
+    repair = state.releases.get("auto_repair")
+    if not isinstance(repair, dict):
+        return None
+    version = str(repair.get("version") or "").strip()
+    return version or None
 
 
 def reconcile_pending(state, *, now=None) -> Optional[dict]:
@@ -613,9 +759,16 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
       журнал: маркер `BPMKIT_DEFERRED: server_running`, запасной — русская строка
       отказа) — `install_deferred`: неудачей версии не считается, поставим в окно простоя.
 
+    * установщик закончил, `manifest.json` — поставленная версия: поставка сверяется
+      целиком (`verify_delivery`); сошлось — `installed` (событие `applied`, `verified_at`,
+      дальше ждём рабочего старта), не сошлось — `install_partial`: смешанная поставка,
+      неудача версии и `releases.auto_repair` (следующий проход ставит её заново);
+    * поставка осталась прежней, а установщик сам пометил незавершённое копирование
+      (`BPMKIT_PARTIAL`) — тоже `install_partial`.
+
     Подтверждение установщиком записывает `releases.current` (сам установщик состояние
-    канала не трогает). Возвращает `{"kind": "confirmed"|"install_failed"|
-    "install_unverified"|"install_deferred"}` или `None` (нечего делать).
+    канала не трогает). Возвращает `{"kind": "confirmed"|"installed"|"install_partial"|
+    "install_failed"|"install_unverified"|"install_deferred"}` или `None` (нечего делать).
     """
     record = pending_record(state)
     if record is None:
@@ -654,7 +807,26 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
                   f"manifest.json поставки не читается, рабочего старта новой версии не "
                   f"было. Проверьте установку BPMkit."))
     if _same_version(on_disk, applied):
-        return None
+        if record.get("verified_at"):
+            return None
+        check = verify_delivery(record.get("binary") or "", applied,
+                                expected_sha256=record.get("expected_sha256"),
+                                previous_sha256=record.get("previous_sha256"),
+                                previous_version=record.get("previous_version"))
+        if not check["ok"]:
+            return _install_partial(state, record, applied, at, check, log=launched.get("log"))
+        record["verified_at"] = at
+        _clear_repair(rel, applied)
+        _event(rel, "applied", src=record.get("previous_version"), dst=applied, at=at,
+               via="installer", trigger=record.get("trigger"), verified=True)
+        state.save()
+        return {"kind": "installed", "version": applied}
+    if _installer_reported_partial(launched.get("log")):
+        check = verify_delivery(record.get("binary") or "", applied,
+                                expected_sha256=record.get("expected_sha256"),
+                                previous_sha256=record.get("previous_sha256"),
+                                previous_version=record.get("previous_version"))
+        return _install_partial(state, record, applied, at, check, log=launched.get("log"))
     if _installer_refused_by_server(launched.get("log")):
         # Установщик отказал из-за работающего MCP-сервера (так говорит его журнал) —
         # это не неудача версии: ожидание снимается БЕЗ счёта, поставим в следующее окно
@@ -664,8 +836,8 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
         _event(rel, "install_deferred", src=record.get("previous_version"), dst=applied,
                at=at, log=launched.get("log"))
         state.mark("releases", "ok",
-                   f"Установка версии {applied} отложена: MCP-сервер был запущен и держал "
-                   f"файл. Повторим, когда он будет остановлен.")
+                   f"Установка версии {applied} отложена: файл MCP-сервера был занят "
+                   f"(сервер запущен или файл держал другой процесс). Повторим позже.")
         state.save()
         return {"kind": "install_deferred", "version": applied}
     return _install_not_confirmed(
@@ -675,15 +847,41 @@ def reconcile_pending(state, *, now=None) -> Optional[dict]:
               f"{launched.get('log') or '—'}"))
 
 
+def _install_partial(state, record: dict, applied: str, at: str, check: dict, *,
+                     log) -> dict:
+    """Смешанная поставка: неудача версии и задание «поставить её заново» (ремонт)."""
+    rel = state.releases
+    rel["auto_repair"] = {
+        "version": applied,
+        "previous_version": record.get("previous_version"),
+        "at": at,
+        "problems": list(check.get("problems") or []),
+        "detail": check.get("detail") or "",
+        "manifest": check.get("manifest"),
+        "backup": record.get("backup"),
+    }
+    out = _install_not_confirmed(
+        state, record, applied, at, kind="install_partial", log=log,
+        text=(f"Автоматическая установка версии {applied} не завершилась и оставила "
+              f"поставку в смешанном состоянии ({check.get('detail') or 'расхождение'}). "
+              f"Установка будет повторена автоматически; если и она не пройдёт, "
+              f"переустановите BPMkit полным установщиком. Журнал установщика: "
+              f"{log or '—'}"),
+        problems=list(check.get("problems") or []))
+    out["problems"] = list(check.get("problems") or [])
+    return out
+
+
 def _install_not_confirmed(state, record: dict, applied: str, at: str, *, kind: str,
-                           log, text: str) -> dict:
+                           log, text: str, problems=None) -> dict:
     """Снять ожидание как неудачу версии: счётчик, событие, причина в статусе."""
     rel = state.releases
     failures = dict(rel.get("auto_failures") or {})
     failures[applied] = int(failures.get(applied) or 0) + 1
     rel["auto_failures"] = failures
     rel["auto"] = None
-    _event(rel, kind, src=record.get("previous_version"), dst=applied, at=at, log=log)
+    _event(rel, kind, src=record.get("previous_version"), dst=applied, at=at, log=log,
+           problems=problems or None)
     state.mark("releases", "error", text)
     state.save()
     return {"kind": kind, "version": applied}
@@ -1094,6 +1292,50 @@ class _MachineLock:
                 pass
 
 
+def busy_reason(state, *, ctx=None, now=None) -> Optional[str]:
+    """Почему автообновление сейчас запускать нельзя, или `None`.
+
+    * `installer_running` — жив установщик, запущенный автоматикой или кнопкой
+      (`releases.installer_launched`): он прямо сейчас заменяет файлы поставки, и второму
+      проходу там делать нечего — тем более держать `bpmkit.exe`;
+    * `busy_other_process` — замок машины держит другой живой процесс (свежий замок).
+
+    Без сети и без лицензионного контекста — для раннего выхода `execute` и CLI.
+    """
+    _refresh_shared(state)
+    now_iso = _iso(_aware(now)) if now is not None else None
+    try:
+        launched = (releases.installer_status(state, now_iso=now_iso) or {}).get("launched") or {}
+    except TypeError:
+        launched = (releases.installer_status(state) or {}).get("launched") or {}
+    if launched.get("running"):
+        return "installer_running"
+    record = state.releases.get("auto")
+    lock = _MachineLock(_lock_path(state, ctx=ctx,
+                                   record=record if isinstance(record, dict) else None))
+    try:
+        exists = lock.path.exists()
+    except OSError:
+        exists = False
+    if exists and not lock._abandoned():
+        try:
+            owner = json.loads(lock.path.read_text(encoding="utf-8")).get("pid")
+        except (OSError, ValueError, AttributeError):
+            owner = None
+        if owner is None or _int(owner) != os.getpid():
+            return "busy_other_process"
+    return None
+
+
+def busy_payload(state, *, ctx=None, trigger: str = "", now=None) -> Optional[dict]:
+    """Исход `waiting` с причиной занятости (см. `busy_reason`) или `None`."""
+    reason = busy_reason(state, ctx=ctx, now=now)
+    if reason is None:
+        return None
+    return _payload(DECISION_WAITING, reason, trigger=trigger,
+                    detail="автообновление уже идёт")
+
+
 def _remember(state, payload: dict, at: str) -> dict:
     state.releases["last_auto_decision"] = {
         "decision": payload.get("decision"),
@@ -1136,6 +1378,10 @@ def _evaluate(state, ctx, settings, check: dict, binary: Path, moment) -> tuple:
             and releases.is_numeric_version(current)
             and releases.compare_versions(version, current) <= 0):
         available = False
+    if _repairing(state, version, current):
+        # Смешанная поставка этой версии: manifest.json уже говорит «стоит», но exe — нет.
+        # Ставим ту же версию заново (ремонт повтором установщика).
+        available = True
     failures = rel.get("auto_failures") or {}
     server_running = mcp_mutex.server_mutex_exists(strict=True)
     relocated = server_running and self_relocate_active(binary)
@@ -1158,6 +1404,28 @@ def _evaluate(state, ctx, settings, check: dict, binary: Path, moment) -> tuple:
     return policy, version, current, relocated
 
 
+def _repairing(state, version, current) -> bool:
+    """Нужен ли ремонт найденной версии: `releases.auto_repair` — она же, и поставка
+    по `manifest.json` числится именно ею (иначе это обычное обновление)."""
+    target = repair_target(state)
+    if not target or not _same_version(target, version):
+        return False
+    return not current or _same_version(current, target)
+
+
+def _expected_exe_sha(state, check: dict, version: str) -> Optional[str]:
+    """Сумма exe релиза `version`: из проверки (`/meta` бинаря той же версии) или из
+    подготовленного бинаря той же версии. Не известна — `None` (сверка без неё)."""
+    if _same_version(check.get("latest"), version):
+        sha = _norm_sha(check.get("sha256"))
+        if sha:
+            return sha
+    staged = state.releases.get("staged")
+    if isinstance(staged, dict) and _same_version(staged.get("version"), version):
+        return _norm_sha(staged.get("sha256")) or None
+    return None
+
+
 def execute(state, session, settings, *, trigger: str = "manual", now=None,
             check: Optional[dict] = None) -> dict:
     """Проверка → политика → подготовка → установка. Исход — словарь, не исключение.
@@ -1178,6 +1446,11 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
     at = _iso(moment)
     client, ctx = session.client, session.ctx
     _refresh_shared(state)
+    busy = busy_payload(state, ctx=ctx, trigger=trigger, now=moment)
+    if busy is not None:
+        # Второй проход при идущем (установщик работает или замок у живого процесса):
+        # ни сети, ни подготовки — выйти сразу.
+        return _remember(state, busy, at)
     if check is None:
         check = releases.check(client, state, ctx)
     binary = Path(str(getattr(ctx, "binary_path", "") or ""))
@@ -1236,7 +1509,10 @@ def execute(state, session, settings, *, trigger: str = "manual", now=None,
         return _remember(state, _apply(state, ctx, artifact, binary=binary,
                                        version=version, current=current,
                                        trigger=trigger, at=at, payload=payload,
-                                       swap_busy=relocated), at)
+                                       swap_busy=relocated,
+                                       expected_sha256=_expected_exe_sha(state, check,
+                                                                         version),
+                                       repair=_repairing(state, version, current)), at)
 
 
 def _reset_startup_marker(version: str) -> Optional[str]:
@@ -1264,7 +1540,8 @@ def _reset_startup_marker(version: str) -> Optional[str]:
 
 
 def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
-           trigger: str, at: str, payload: dict, swap_busy: bool = False) -> dict:
+           trigger: str, at: str, payload: dict, swap_busy: bool = False,
+           expected_sha256: Optional[str] = None, repair: bool = False) -> dict:
     """Установка подготовленного артефакта (под замком машины).
 
     `swap_busy` — только при самопереносе работающего сервера (`self_relocate_active`):
@@ -1275,6 +1552,13 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
     первым делом останавливает диспетчер, и запись, отложенная «на после запуска»,
     могла бы не успеть на диск — а без неё некому ни подтвердить новую версию, ни
     откатить её. Не удалось запустить — запись возвращается к прежней.
+
+    Установщик работает в фоне: его запуск — событие `install_started`, а не `applied`.
+    `applied` пишет `reconcile_pending`, когда установщик закончил и поставка на диске
+    сошлась (`verify_delivery`: версия, сумма exe релиза `expected_sha256`, exe заменён —
+    сумма до установки `previous_sha256`, эталон суммы). Путь «только exe» синхронный и
+    сверяет сумму сам — там `applied` сразу. `repair` — повтор установки версии, которая
+    легла смешанной поставкой (`releases.auto_repair`).
     """
     rel = state.releases
     before_auto = rel.get("auto")
@@ -1286,6 +1570,12 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
                         current=current, artifact=artifact, trigger=trigger, ok=False,
                         detail=f"маркер старта той же версии не сброшен: {problem}")
     backup = _backup_before_install(ctx, binary, current) if via == "installer" else None
+    previous_sha = None
+    if via == "installer":
+        try:
+            previous_sha = fsutil.sha256_file(binary) if binary.is_file() else None
+        except OSError:
+            previous_sha = None
     # Счётчик маркера старта ЭТОЙ версии в момент установки (после сброса — 0): попытки
     # сверх него — уже запуски установленного файла.
     marker = read_startup_marker()
@@ -1306,10 +1596,17 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
         "startup_attempts_at_install": attempts_before,
         # каталог замка машины для автоотката (у него нет лицензионного контекста).
         "workdir": str(releases.companion_workdir(ctx)),
+        # сверка результата установки (`verify_delivery`): сумма exe релиза этой версии
+        # (если известна) и сумма exe до установки.
+        "expected_sha256": _norm_sha(expected_sha256) or None,
+        "previous_sha256": previous_sha,
+        "repair": bool(repair) or None,
+        "verified_at": None,
         "confirmed_at": None,
     }
-    _event(rel, "applied", src=current, dst=version, at=at, via=via, trigger=trigger or None,
-           swap_busy=bool(swap_busy))
+    _event(rel, "install_started" if via == "installer" else "applied", src=current,
+           dst=version, at=at, via=via, trigger=trigger or None, swap_busy=bool(swap_busy),
+           repair=bool(repair) or None)
     try:
         state.save()
     except OSError:
@@ -1322,6 +1619,8 @@ def _apply(state, ctx, artifact: dict, *, binary: Path, version: str, current,
             result = releases.apply_staged(state, ctx, swap_busy=bool(swap_busy))
             rel["auto"]["backup"] = result.get("backup")
             rel["auto"]["swap_busy"] = bool(result.get("old_path"))
+            rel["auto"]["verified_at"] = at
+            _clear_repair(rel, version)
     except Exception as exc:  # noqa: BLE001 - исход, а не исключение
         rel["auto"] = before_auto
         rel["last_auto_event"] = before_event
