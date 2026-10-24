@@ -47,6 +47,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -83,6 +84,20 @@ _ERROR_BODY_LIMIT = 64 * 1024
 # Максимум переходов по редиректам. Даже разрешённый (внутри base_url) редирект не должен
 # превращаться в бесконечный цикл на тике планировщика.
 _MAX_REDIRECTS = 3
+
+# Скачивание файла. Таймаут сокета в `urllib` — это ПРОСТОЙ без единого байта, а
+# не лимит всей загрузки; для справочного JSON хватает 15 с клиента, но на медленном канале
+# гостя VM закачка 92 МБ (~10 мин) «жива», хотя отдельный кусок бывает дольше этих 15 с, и
+# прежний `read operation timed out` отдавал человеку 502 посреди работающей загрузки.
+# Поэтому для файла простой ждём дольше, а оборванный на простое поток переоткрываем с
+# `Range` от того, что уже лежит на диске.
+DOWNLOAD_IDLE_TIMEOUT_S = 90.0
+# Сколько ПОДРЯД переподключений без единого нового байта терпим. Любая попытка, принёсшая
+# данные, счётчик обнуляет: пока файл растёт, загрузка жива, как бы долго она ни шла.
+DOWNLOAD_STALL_RETRIES = 4
+# Пауза перед переподключением (подставляется тестами через `_sleep`).
+DOWNLOAD_RETRY_PAUSE_S = 2.0
+_sleep = time.sleep
 
 
 def _clip(text: str, limit: int = _DETAIL_LIMIT) -> str:
@@ -255,6 +270,19 @@ class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
                 detail=_clip(f"Location: {newurl}"),
             )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class _StreamInterrupted(ChannelError):
+    """Поток файла оборвался ПОСЛЕ открытия ответа (простой сокета, сброс соединения).
+
+    Отдельный тип нужен затем, что такой обрыв лечится переподключением с `Range`, а отказ
+    открыть соединение (сети нет вовсе) — нет: его повторять внутри одного вызова незачем.
+    `written` — сколько байт эта попытка успела записать: по нему решается, была ли
+    попытка живой."""
+
+    def __init__(self, *args, written: int = 0, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.written = int(written)
 
 
 @dataclass(frozen=True)
@@ -483,6 +511,58 @@ class BackendClient:
                  expected_size: Optional[int] = None,
                  chunk_size: int = 1024 * 1024,
                  max_bytes: Optional[int] = None) -> dict:
+        """Скачать файл в `dest` потоком с докачкой; оборванный на простое поток — продолжить.
+
+        Это обёртка над `_download_once` (там все правила записи — см. его докстринг).
+        Здесь одно решение: если поток оборвался ПОСЛЕ открытия ответа
+        (`read operation timed out`, сброс соединения), соединение открывается заново с
+        `Range` от размера файла на диске. Лимит — `DOWNLOAD_STALL_RETRIES` попыток ПОДРЯД
+        без единого нового байта; попытка, принёсшая данные, счётчик обнуляет, поэтому долгая,
+        но живая загрузка не обрывается. Отказ открыть соединение до первого байта повторов
+        не вызывает (как раньше: сети нет — повтор на следующей проверке), а вот после
+        первого байта обрыв на подключении считается пустой попыткой и повторяется.
+        В результате добавлено `reconnects` — сколько раз поток переоткрывался.
+        """
+        dest = Path(dest)
+        offset = max(0, int(resume_from or 0))
+        total_written = 0
+        reconnects = 0
+        dry_attempts = 0
+        while True:
+            try:
+                result = self._download_once(
+                    path, dest, authorized=authorized, resume_from=offset, etag=etag,
+                    expected_size=expected_size, chunk_size=chunk_size, max_bytes=max_bytes)
+            except ChannelError as exc:
+                interrupted = isinstance(exc, _StreamInterrupted)
+                reconnect_failed = (exc.kind == "offline" and not interrupted
+                                    and (reconnects > 0 or total_written > 0))
+                if not (interrupted or reconnect_failed):
+                    raise
+                gained = exc.written if interrupted else 0
+                total_written += gained
+                dry_attempts = 0 if gained > 0 else dry_attempts + 1
+                if dry_attempts > DOWNLOAD_STALL_RETRIES:
+                    raise
+                reconnects += 1
+                _sleep(DOWNLOAD_RETRY_PAUSE_S)
+                try:
+                    offset = dest.stat().st_size
+                except OSError:
+                    offset = 0
+                continue
+            out = dict(result)
+            out["bytes_written"] = total_written + int(result.get("bytes_written") or 0)
+            out["reconnects"] = reconnects
+            if reconnects:
+                out["resumed"] = True
+            return out
+
+    def _download_once(self, path: str, dest, *, authorized: bool = True,
+                 resume_from: int = 0, etag: Optional[str] = None,
+                 expected_size: Optional[int] = None,
+                 chunk_size: int = 1024 * 1024,
+                 max_bytes: Optional[int] = None) -> dict:
         """Скачать файл в `dest` потоком, при необходимости — с докачкой.
 
         `max_bytes` — потолок артефакта, fail-closed. `None` (по
@@ -521,7 +601,7 @@ class BackendClient:
                                   etag=etag, range_start=resume_from or None,
                                   extra_headers=None)
         try:
-            resp = self._open(req, None)
+            resp = self._open(req, DOWNLOAD_IDLE_TIMEOUT_S)
         except ChannelError as exc:
             if exc.http_status == 416:
                 _unlink_quietly(dest)
@@ -684,10 +764,11 @@ def _stream_to_file(resp, dest: Path, *, mode: str, chunk_size: int,
             try:
                 chunk = resp.read(max(1, int(chunk_size)))
             except (urllib.error.URLError, socket.timeout, OSError) as exc:
-                raise ChannelError(
+                raise _StreamInterrupted(
                     "Обрыв соединения при скачивании файла",
                     kind="offline",
                     detail=_clip(_reason_text(exc)),
+                    written=written,
                 ) from None
             if not chunk:
                 break

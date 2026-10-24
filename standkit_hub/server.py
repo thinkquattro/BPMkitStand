@@ -848,6 +848,8 @@ COMPANION_ERROR_STATUS = {
     "signature_invalid": 402,
     "not_yet_valid": 402,
     "context_unavailable": 503,
+    # CLI запускается (холодный старт) -- «повторите позже», не «CLI нет».
+    "context_starting": 503,
     "nothing_staged": 409,
     "nothing_to_rollback": 409,
     # установщик не опубликован для этой версии / хабу без прав его не

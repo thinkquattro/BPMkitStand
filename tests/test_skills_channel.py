@@ -300,3 +300,27 @@ def test_install_summary_lite_does_not_invoke_cli(env, monkeypatch):
     assert "app_dir" in result
     assert "plugin_dir" in result
     assert isinstance(result["clients"], list)
+
+
+class TestGap1019CliColdStart:
+    """VM 24.10.2026: вызов CLI из диспетчера на медленном госте не укладывался в 30 с."""
+
+    def test_cli_timeout_matches_context_limit(self):
+        from standkit_companion import context
+        assert skills_channel._CLI_TIMEOUT_S == context._CLI_TIMEOUT_S
+        assert skills_channel._CLI_TIMEOUT_S >= 180
+
+    def test_timeout_is_named_and_asks_to_retry(self, monkeypatch):
+        import subprocess
+
+        def _hang(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+        monkeypatch.setattr(skills_channel, "run_console", _hang)
+
+        with pytest.raises(ChannelError) as info:
+            skills_channel._run_cli_json(["BPMkit.exe"], ["setup", "detect-clients"])
+
+        assert info.value.kind == "context_starting"
+        assert "не ответил за {} с".format(int(skills_channel._CLI_TIMEOUT_S)) in str(info.value)
+        assert "повторите" in str(info.value)

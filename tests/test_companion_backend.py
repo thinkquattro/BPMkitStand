@@ -704,3 +704,161 @@ def test_redirect_inside_https_base_url_is_followed_by_the_handler():
         req, None, 302, "Found", {}, f"{HTTPS_BASE}/v1/content/releases/0.307.0")
 
     assert new_req.full_url == f"{HTTPS_BASE}/v1/content/releases/0.307.0"
+
+
+# --------------------------------------------------------------------------------------
+# долгая, но живая загрузка не обрывается на простое сокета
+# --------------------------------------------------------------------------------------
+class _StallingResponse:
+    """Ответ, который отдаёт `chunks` и затем «зависает»: `read` бросает `socket.timeout`
+    ровно так, как это делает `urllib` на медленном канале (read operation timed out)."""
+
+    def __init__(self, status, headers, chunks, stall=True):
+        self.status = status
+        self.headers = headers
+        self._chunks = list(chunks)
+        self._stall = stall
+
+    def read(self, _n=-1):
+        if self._chunks:
+            return self._chunks.pop(0)
+        if self._stall:
+            import socket
+            raise socket.timeout("The read operation timed out")
+        return b""
+
+    def close(self):
+        pass
+
+
+class _ScriptedOpener:
+    """Opener, отдающий заготовленные ответы по очереди и помнящий Range и таймаут."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.ranges = []
+        self.timeouts = []
+
+    def open(self, req, timeout=None):
+        self.ranges.append(req.get_header("Range"))
+        self.timeouts.append(timeout)
+        return self._responses.pop(0)
+
+
+def _full_headers(total):
+    return {"Content-Length": str(total), "X-BPMkit-SHA256": "c" * 64}
+
+
+def _tail_headers(start, total):
+    return {"Content-Length": str(total - start),
+            "Content-Range": f"bytes {start}-{total - 1}/{total}",
+            "X-BPMkit-SHA256": "c" * 64}
+
+
+class TestGap1019SlowDownload:
+    """VM 24.10.2026: stage-installer (92 МБ, ~10 мин по медленной сети гостя) → 502 offline
+    «read operation timed out». Таймаут сокета — это ПРОСТОЙ без данных, а не лимит всей
+    загрузки; живую загрузку надо продолжать с места, а не отдавать человеку на ручной
+    повтор."""
+
+    BODY = bytes(range(256)) * 8
+
+    @pytest.fixture(autouse=True)
+    def _no_pauses(self, monkeypatch):
+        import standkit_companion.backend as backend_module
+        monkeypatch.setattr(backend_module, "_sleep", lambda _s: None)
+
+    def _client(self, opener):
+        return BackendClient("https://publisher.example", ENVELOPE, timeout=5.0,
+                             opener=opener)
+
+    def test_stall_midway_reconnects_with_range_and_completes(self, tmp_path):
+        head = 600
+        opener = _ScriptedOpener([
+            _StallingResponse(200, _full_headers(len(self.BODY)), [self.BODY[:head]]),
+            _StallingResponse(206, _tail_headers(head, len(self.BODY)),
+                              [self.BODY[head:]], stall=False),
+        ])
+        dest = tmp_path / "setup.exe.part"
+
+        result = self._client(opener).download("/v1/content/installer/latest", dest,
+                                               expected_size=len(self.BODY))
+
+        assert dest.read_bytes() == self.BODY
+        assert opener.ranges == [None, f"bytes={head}-"]
+        assert result["bytes_written"] == len(self.BODY)
+        assert result["total_bytes"] == len(self.BODY)
+        assert result["reconnects"] == 1
+
+    def test_no_progress_stalls_give_up_with_offline(self, tmp_path):
+        import standkit_companion.backend as backend_module
+        attempts = backend_module.DOWNLOAD_STALL_RETRIES + 1
+        opener = _ScriptedOpener([
+            _StallingResponse(200, _full_headers(len(self.BODY)), []) for _ in range(attempts)
+        ])
+        dest = tmp_path / "setup.exe.part"
+
+        with pytest.raises(ChannelError) as info:
+            self._client(opener).download("/v1/content/installer/latest", dest,
+                                          expected_size=len(self.BODY))
+
+        assert info.value.kind == "offline"
+        assert len(opener.ranges) == attempts, "лишние или недостающие попытки"
+
+    def test_progress_resets_stall_counter(self, tmp_path):
+        """Каждая попытка приносит данные, поэтому их может быть больше лимита «пустых»."""
+        import standkit_companion.backend as backend_module
+        step = 64
+        stalls = backend_module.DOWNLOAD_STALL_RETRIES + 3
+        responses = []
+        for i in range(stalls):
+            start = i * step
+            headers = _full_headers(len(self.BODY)) if i == 0 else \
+                _tail_headers(start, len(self.BODY))
+            responses.append(_StallingResponse(200 if i == 0 else 206, headers,
+                                               [self.BODY[start:start + step]]))
+        done_from = stalls * step
+        responses.append(_StallingResponse(206, _tail_headers(done_from, len(self.BODY)),
+                                           [self.BODY[done_from:]], stall=False))
+        opener = _ScriptedOpener(responses)
+        dest = tmp_path / "setup.exe.part"
+
+        result = self._client(opener).download("/v1/content/installer/latest", dest,
+                                               expected_size=len(self.BODY))
+
+        assert dest.read_bytes() == self.BODY
+        assert result["reconnects"] == stalls
+
+    def test_download_waits_longer_than_api_timeout(self, tmp_path):
+        """Для файла простой допускается дольше, чем для справочного запроса (15 с)."""
+        import standkit_companion.backend as backend_module
+        opener = _ScriptedOpener([
+            _StallingResponse(200, _full_headers(len(self.BODY)), [self.BODY], stall=False),
+        ])
+        client = self._client(opener)
+
+        client.download("/v1/content/installer/latest", tmp_path / "a.part",
+                        expected_size=len(self.BODY))
+
+        assert opener.timeouts == [backend_module.DOWNLOAD_IDLE_TIMEOUT_S]
+        assert backend_module.DOWNLOAD_IDLE_TIMEOUT_S >= 60
+        assert client.timeout == 5.0
+
+    def test_connect_failure_is_not_retried_in_place(self, tmp_path):
+        """Отказ ДО первого байта (сеть недоступна) — прежнее поведение: сразу offline,
+        повтор на следующей проверке. Внутренние повторы — только для оборванного потока."""
+        import urllib.error
+
+        class _Down:
+            calls = 0
+
+            def open(self, req, timeout=None):
+                _Down.calls += 1
+                raise urllib.error.URLError("нет сети")
+
+        with pytest.raises(ChannelError) as info:
+            self._client(_Down()).download("/v1/content/installer/latest",
+                                           tmp_path / "a.part")
+
+        assert info.value.kind == "offline"
+        assert _Down.calls == 1
