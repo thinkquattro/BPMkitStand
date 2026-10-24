@@ -2808,6 +2808,45 @@
     }
   }
 
+  // --- автозапуск при входе в Windows (задача Планировщика) ---
+
+  let logonTaskPresent = false;
+
+  function renderLogonTask(data) {
+    const el = document.getElementById("mcpremote-logon-status");
+    const btn = document.getElementById("mcpremote-logon-btn");
+    if (!el || !btn) return;
+    if (data.supported === false) {
+      el.textContent = "недоступен (только Windows)";
+      btn.disabled = true;
+      return;
+    }
+    btn.disabled = false;
+    logonTaskPresent = !!data.present;
+    if (!data.present) {
+      el.textContent = "выключен (задачи нет)";
+      btn.textContent = "Включить";
+      return;
+    }
+    let text = "включён (задача есть)";
+    if (data.never_run) text += "; ещё не запускалась";
+    else if (data.last_run) text += `; последний запуск ${data.last_run}`;
+    if (data.up_to_date === false) text += "; настройки изменились — нажмите «Обновить задачу»";
+    el.textContent = text;
+    btn.textContent = data.up_to_date === false ? "Обновить задачу" : "Выключить";
+    logonTaskPresent = data.up_to_date === false ? false : true;
+  }
+
+  async function refreshLogonTask() {
+    const el = document.getElementById("mcpremote-logon-status");
+    if (!el) return;
+    try {
+      renderLogonTask(await apiGet("/api/remote/logon-task"));
+    } catch (e) {
+      el.textContent = `ошибка: ${describeApiError(e)}`;
+    }
+  }
+
   async function refreshRemoteStatus() {
     const el = document.getElementById("mcpremote-status");
     if (!el) return;
@@ -2816,6 +2855,7 @@
     } catch (e) {
       el.textContent = `ошибка: ${describeApiError(e)}`;
     }
+    refreshLogonTask();
   }
 
   // Сохраняем ТОЛЬКО поля удалённого режима перед запуском: сервер мержит тело поверх
@@ -2898,6 +2938,23 @@
     document.getElementById("mcpremote-copy-token-hint-btn").addEventListener("click", () => {
       if (remoteTokenHint) copyText(remoteTokenHint);
     });
+    const logonBtn = document.getElementById("mcpremote-logon-btn");
+    if (logonBtn) {
+      logonBtn.addEventListener("click", async () => {
+        const logonErr = document.getElementById("mcpremote-logon-error");
+        logonErr.textContent = "";
+        logonBtn.disabled = true;
+        try {
+          const enable = !logonTaskPresent;
+          if (enable) await saveRemoteFields(); // задача строится из сохранённых настроек
+          renderLogonTask(await apiSend("POST", "/api/remote/logon-task", { enabled: enable }));
+        } catch (e) {
+          logonErr.textContent = describeApiError(e);
+        } finally {
+          logonBtn.disabled = false;
+        }
+      });
+    }
     const genBtn = document.getElementById("mcpremote-generate-token-btn");
     const tokenMsg = document.getElementById("mcpremote-token-msg");
     if (genBtn) {
