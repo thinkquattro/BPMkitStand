@@ -52,10 +52,20 @@ RELEASE_HISTORY_KEEP = 3
 SHARED_KEYS = {
     "releases": ("auto", "bad_versions", "last_auto_event", "auto_failures",
                  "last_auto_decision", "current", "restart_required", "staged",
-                 "history", "installer_staged", "installer_launched"),
+                 "history", "installer_staged", "installer_launched", "auto_repair"),
 }
 
 _MISSING = object()
+
+
+def _auto_install_verified(record) -> bool:
+    """Поставка последней автоустановки сверена с диском. Запись без поля `verified_at`
+    (сделана прежней версией канала) и путь «только exe» считаются сверенными."""
+    if not isinstance(record, dict):
+        return False
+    if record.get("via") != "installer" or "verified_at" not in record:
+        return True
+    return bool(record.get("verified_at"))
 
 
 def utc_now_iso() -> str:
@@ -144,6 +154,9 @@ def _default_state() -> dict:
             "auto_failures": {},
             # последний исход автоматики (`{decision, reason, version, trigger, at}`).
             "last_auto_decision": None,
+            # смешанная поставка после автоустановки (`{version, problems, detail, at}`):
+            # следующий проход ставит эту версию заново (`autoupdate.reconcile_pending`).
+            "auto_repair": None,
         },
         # узкий поток кукбука. Отдельная секция, а не поле внутри
         # `releases`, — по той же причине, по которой отдельный модуль
@@ -590,6 +603,11 @@ class CompanionState:
                                        else None),
                 "auto_failures": ({str(k): v for k, v in rel["auto_failures"].items()}
                                   if isinstance(rel.get("auto_failures"), dict) else {}),
+                # установщик закончил и поставка сверена (`verify_delivery`); до этого
+                # окно пишет «идёт установка», а не «установлена».
+                "auto_pending_verified": _auto_install_verified(rel.get("auto")),
+                "auto_repair": (dict(rel["auto_repair"])
+                                if isinstance(rel.get("auto_repair"), dict) else None),
             },
             "cookbook": {
                 "last_check_at": cb.get("last_check_at"),

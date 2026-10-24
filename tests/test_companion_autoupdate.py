@@ -216,7 +216,10 @@ def test_execute_applies_installer_and_records_before_launch(env, monkeypatch):
     assert auto["binary"] == str(binary) and auto["via"] == "installer"
     assert auto["previous_version"] == "1.3.19" and auto["trigger"] == "schedule"
     assert Path(auto["backup"]).read_bytes() == b"MZ stary 1.3.19", "запасная точка отката"
-    assert state.releases["last_auto_event"]["kind"] == "applied"
+    # установщик работает в фоне: его запуск — ещё не установка (applied пишет сверка).
+    assert state.releases["last_auto_event"]["kind"] == "install_started"
+    assert auto["verified_at"] is None
+    assert auto["previous_sha256"] == _sha(b"MZ stary 1.3.19")
     assert state.releases["last_auto_decision"]["decision"] == "applied"
 
 
@@ -443,6 +446,12 @@ def _pending(state, binary, *, via="installer", backup=None, swap_busy=False):
                               "confirmed_at": None}
 
 
+def _unconfirmed(result) -> bool:
+    """Исход сверки без подтверждения рабочим стартом: ничего не произошло либо поставка
+    только сверена с диском (`installed`)."""
+    return result is None or result.get("kind") == "installed"
+
+
 def _marker(path, *, version="1.3.20", attempts=2, ok=False,
             first="2026-10-20T11:50:00Z", last="2026-10-20T11:55:00Z", ok_at=None):
     if ok and ok_at is None:
@@ -560,12 +569,14 @@ def test_reconcile_counts_failed_installer_run(env, monkeypatch):
 
 
 def test_reconcile_keeps_waiting_when_installer_did_its_job(env):
-    """Поставка на диске уже новая, рабочего старта ещё не было — ждём перезапуска хоста."""
+    """Поставка на диске уже новая, рабочего старта ещё не было — сверка поставки один раз
+    (`installed`), дальше ждём перезапуска хоста."""
     state, _ctx, binary, _marker_path = env
     (binary.parent.parent / "manifest.json").write_text(json.dumps({"version": "1.3.20"}),
                                                        encoding="utf-8")
     _pending(state, binary)
 
+    assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "installed"
     assert autoupdate.reconcile_pending(state, now=NOW) is None
     assert autoupdate.pending_record(state) is not None
 
@@ -592,7 +603,8 @@ def test_reconcile_ignores_runtime_marker_started_before_install(env, monkeypatc
         "version": "1.3.20", "started_at": "2026-10-20T10:30:00Z", "pid": 1,
         "frozen": True, "binary": str(binary)})
 
-    assert autoupdate.reconcile_pending(state, now=NOW) is None
+    # поставка сверена (`installed`), но рабочий старт не подтверждён
+    assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "installed"
     assert autoupdate.pending_record(state) is not None
 
 
@@ -770,12 +782,12 @@ def test_marker_older_than_install_neither_confirms_nor_rolls_back(env):
     _marker(marker, attempts=3, first="2026-10-20T09:00:00Z", last="2026-10-20T09:10:00Z")
 
     assert autoupdate.maybe_rollback(state, now=NOW) is None
-    assert autoupdate.reconcile_pending(state, now=NOW) is None
+    assert _unconfirmed(autoupdate.reconcile_pending(state, now=NOW))
     assert binary.read_bytes() == b"MZ slomannyj 1.3.20"
 
     _marker(marker, attempts=1, ok=True, first="2026-10-20T09:00:00Z",
             last="2026-10-20T09:00:05Z", ok_at="2026-10-20T09:00:06Z")
-    assert autoupdate.reconcile_pending(state, now=NOW) is None
+    assert _unconfirmed(autoupdate.reconcile_pending(state, now=NOW))
     assert autoupdate.pending_record(state) is not None, "старый ok не подтверждает установку"
 
 
@@ -856,7 +868,7 @@ def test_sticky_ok_before_install_does_not_block_rollback(env):
         "first_attempt_at": "2026-10-19T09:00:00Z", "last_attempt_at": "2026-10-20T11:50:00Z",
         "ok_at": "2026-10-19T09:00:05Z"}), encoding="utf-8")
 
-    assert autoupdate.reconcile_pending(state, now=NOW) is None, "старый ok — не подтверждение"
+    assert _unconfirmed(autoupdate.reconcile_pending(state, now=NOW)), "старый ok — не подтверждение"
     assert autoupdate.maybe_rollback(state, now=NOW)["decision"] == "rolled_back"
 
 
@@ -1031,7 +1043,7 @@ def test_live_process_postpones_rollback_but_never_confirms(env, monkeypatch):
              started_at="2026-10-20T11:55:00Z")
 
     assert autoupdate.maybe_rollback(state, now=NOW) is None, "жив — откат отложен"
-    assert autoupdate.reconcile_pending(state, now=NOW) is None, "живость — не ok"
+    assert _unconfirmed(autoupdate.reconcile_pending(state, now=NOW)), "живость — не ok"
     assert autoupdate.pending_record(state) is not None
     assert not state.releases.get("bad_versions")
 
@@ -1053,7 +1065,7 @@ def test_liveness_without_ok_never_confirms(env, monkeypatch):
     for pid in (999999, None):
         _runtime(monkeypatch, relocated=False, version="1.3.20", binary=str(binary),
                  started_at="2026-10-20T11:50:00Z", pid=pid)
-        assert autoupdate.reconcile_pending(state, now=NOW) is None
+        assert _unconfirmed(autoupdate.reconcile_pending(state, now=NOW))
         assert autoupdate.pending_record(state) is not None
 
 
@@ -1336,3 +1348,243 @@ def test_clear_bad_versions(env):
     assert disk["releases"]["bad_versions"] == []
     assert autoupdate.clear_bad_versions(state)["reason"] == "nothing_to_clear"
 
+
+# --------------------------------------------------------------------------------------
+# Гонка двух запусков автообновления, сверка результата установки, ремонт
+# (живой случай приёмки на VM 24.10.2026: установщик, запущенный триггером выхода, не
+# заменил занятый bpmkit.exe — его держал параллельный `setup auto-update --trigger
+# schedule`, — ушёл в Abort и оставил manifest.json новой версии рядом со старым exe, а
+# канал записал «applied»).
+# --------------------------------------------------------------------------------------
+def _sha(data: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
+
+
+#: Хвост журнала Inno Setup того случая (Abort на замене занятого файла).
+_INNO_ABORT_LOG = (
+    "2026-10-24 13:01:21.500   -- File entry --\r\n"
+    "2026-10-24 13:01:21.510   Dest filename: C:\\BPMkit\\server\\BPMkit.exe\r\n"
+    "2026-10-24 13:01:21.520   Installing the file.\r\n"
+    "2026-10-24 13:01:21.600   DeleteFile: The existing file appears to be in use (32/5).\r\n"
+    "2026-10-24 13:01:21.610   Defaulting to Abort for suppressed message box "
+    "(Abort/Retry/Ignore):\r\n"
+    "2026-10-24 13:01:21.620   User canceled the installation process.\r\n"
+    "2026-10-24 13:01:21.700   Rolling back changes.\r\n")
+
+OLD_EXE = b"MZ stary 1.3.19"
+NEW_EXE = b"MZ novyj 1.3.20"
+
+
+def _mixed_delivery(binary, *, sidecar_of=OLD_EXE):
+    """manifest.json — новой версии, bpmkit.exe и эталон суммы — старой."""
+    (binary.parent.parent / "manifest.json").write_text(json.dumps({"version": "1.3.20"}),
+                                                       encoding="utf-8")
+    binary.write_bytes(OLD_EXE)
+    binary.with_name(binary.name + ".sha256").write_text(
+        f"{_sha(sidecar_of)}  BPMkit.exe\n", encoding="utf-8")
+
+
+def _launched_finished(state, log_path):
+    state.releases["installer_launched"] = {"pid": 0, "log": str(log_path),
+                                            "launched_at": "2026-10-20T11:00:00Z"}
+
+
+class TestConcurrentAutoUpdateAndVerification:
+    def test_second_run_exits_while_installer_runs_without_network(self, env, monkeypatch):
+        """Второй запуск при живом установщике — `waiting/installer_running` сразу: ни
+        проверки релиза (клиент — пустышка, сеть упала бы), ни подготовки."""
+        state, ctx, _binary, _m = env
+        state.releases["installer_launched"] = {
+            "pid": os.getpid(), "log": "setup.log", "launched_at": NOW}
+        calls = _Calls()
+        _stub_channel(monkeypatch, calls)
+
+        payload = autoupdate.execute(state, _Session(object(), ctx), _settings(),
+                                     trigger="schedule", now=NOW)
+
+        assert (payload["decision"], payload["reason"]) == ("waiting", "installer_running")
+        assert calls.log == []
+        assert state.releases["last_auto_decision"]["reason"] == "installer_running"
+
+    def test_busy_reason_lock_of_other_live_process(self, env):
+        state, ctx, _binary, _m = env
+        lock = Path(ctx.workdir) / autoupdate.LOCK_FILENAME
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(json.dumps({"pid": os.getppid(), "at": NOW}), encoding="utf-8")
+        assert autoupdate.busy_reason(state, ctx=ctx) == "busy_other_process"
+        lock.write_text(json.dumps({"pid": os.getpid(), "at": NOW}), encoding="utf-8")
+        assert autoupdate.busy_reason(state, ctx=ctx) is None, "свой замок — не занятость"
+        lock.unlink()
+        assert autoupdate.busy_reason(state, ctx=ctx) is None
+
+    def test_busy_payload_is_waiting(self, env):
+        state, _ctx, _binary, _m = env
+        state.releases["installer_launched"] = {
+            "pid": os.getpid(), "log": "setup.log", "launched_at": NOW}
+        payload = autoupdate.busy_payload(state, trigger="schedule", now=NOW)
+        assert (payload["decision"], payload["reason"], payload["trigger"]) == (
+            "waiting", "installer_running", "schedule")
+
+    def test_mixed_delivery_is_partial_not_applied(self, env, tmp_path):
+        """manifest.json — поставленная версия, а exe и эталон — прежние: не `installed`, а
+        `install_partial` с заданием ремонта и неудачей версии."""
+        state, _ctx, binary, _m = env
+        _pending(state, binary)
+        state.releases["auto"]["expected_sha256"] = _sha(NEW_EXE)
+        state.releases["auto"]["previous_sha256"] = _sha(OLD_EXE)
+        state.releases["auto"]["verified_at"] = None
+        _mixed_delivery(binary)
+        log = tmp_path / "installer_setup.log"
+        log.write_text(_INNO_ABORT_LOG, encoding="utf-8")
+        _launched_finished(state, log)
+
+        result = autoupdate.reconcile_pending(state, now=NOW)
+
+        assert result["kind"] == "install_partial"
+        assert "exe_sha256" in result["problems"]
+        assert state.releases["auto"] is None
+        assert state.releases["auto_failures"] == {"1.3.20": 1}
+        assert state.releases["last_auto_event"]["kind"] == "install_partial"
+        repair = state.releases["auto_repair"]
+        assert repair["version"] == "1.3.20" and repair["manifest"] == "1.3.20"
+        assert autoupdate.repair_target(state) == "1.3.20"
+        assert state.data["releases"]["last_status"] == "error"
+
+    def test_exe_not_replaced_without_known_release_sum(self, env, tmp_path):
+        """Сумма релиза не известна (проверка 304) — смесь видна по сумме ДО установки."""
+        state, _ctx, binary, _m = env
+        _pending(state, binary)
+        state.releases["auto"]["previous_sha256"] = _sha(OLD_EXE)
+        _mixed_delivery(binary)
+        _launched_finished(state, tmp_path / "missing.log")
+
+        result = autoupdate.reconcile_pending(state, now=NOW)
+
+        assert result["kind"] == "install_partial"
+        assert result["problems"] == ["exe_not_replaced"]
+
+    def test_sidecar_of_other_build_is_partial(self, env, tmp_path):
+        state, _ctx, binary, _m = env
+        _pending(state, binary)
+        (binary.parent.parent / "manifest.json").write_text(
+            json.dumps({"version": "1.3.20"}), encoding="utf-8")
+        binary.write_bytes(NEW_EXE)
+        binary.with_name(binary.name + ".sha256").write_text(
+            f"{_sha(OLD_EXE)}  BPMkit.exe\n", encoding="utf-8")
+        _launched_finished(state, tmp_path / "missing.log")
+
+        assert autoupdate.reconcile_pending(state, now=NOW)["problems"] == ["sidecar"]
+
+    def test_consistent_delivery_is_verified_once(self, env, tmp_path):
+        state, _ctx, binary, _m = env
+        _pending(state, binary)
+        state.releases["auto"]["expected_sha256"] = _sha(NEW_EXE)
+        state.releases["auto"]["previous_sha256"] = _sha(OLD_EXE)
+        state.releases["auto_repair"] = {"version": "1.3.20"}
+        (binary.parent.parent / "manifest.json").write_text(
+            json.dumps({"version": "1.3.20"}), encoding="utf-8")
+        binary.write_bytes(NEW_EXE)
+        binary.with_name(binary.name + ".sha256").write_text(
+            f"{_sha(NEW_EXE)}  BPMkit.exe\n", encoding="utf-8")
+        _launched_finished(state, tmp_path / "missing.log")
+
+        assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "installed"
+        event = state.releases["last_auto_event"]
+        assert (event["kind"], event.get("verified")) == ("applied", True)
+        assert state.releases["auto"]["verified_at"] == NOW
+        assert state.releases["auto_repair"] is None, "ремонт удался — задание снято"
+        assert autoupdate.reconcile_pending(state, now=NOW) is None
+        assert autoupdate.pending_record(state) is not None, "ждём рабочего старта"
+
+    def test_installer_running_is_never_verified(self, env):
+        state, _ctx, binary, _m = env
+        _pending(state, binary)
+        state.releases["auto"]["previous_sha256"] = _sha(OLD_EXE)
+        _mixed_delivery(binary)
+        state.releases["installer_launched"] = {
+            "pid": os.getpid(), "log": "setup.log",
+            "launched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+        assert autoupdate.reconcile_pending(state, now=NOW) is None
+        assert state.releases["auto"] is not None
+
+    def test_installer_partial_marker_with_old_manifest(self, env, tmp_path):
+        state, _ctx, binary, _m = env
+        _pending(state, binary)
+        log = tmp_path / "installer_setup.log"
+        log.write_bytes(b"Log opened.\r\n" * 20
+                        + b"2026-10-24 13:01:21.600   BPMKIT_PARTIAL: exe_busy\r\n")
+        _launched_finished(state, log)
+
+        result = autoupdate.reconcile_pending(state, now=NOW)
+
+        assert result["kind"] == "install_partial"
+        assert autoupdate.repair_target(state) == "1.3.20"
+
+    def test_installer_exe_busy_deferred_marker(self, env, tmp_path):
+        """Установщик не дождался освобождения exe и отказал ДО копирования — отложено."""
+        state, _ctx, binary, _m = env
+        _pending(state, binary)
+        log = tmp_path / "installer_setup.log"
+        log.write_bytes(b"Log opened.\r\n" * 20
+                        + b"2026-10-24 13:01:21.600   BPMKIT_DEFERRED: exe_busy\r\n")
+        _launched_finished(state, log)
+
+        assert autoupdate.reconcile_pending(state, now=NOW)["kind"] == "install_deferred"
+        assert not state.releases.get("auto_failures")
+
+    def test_repair_reinstalls_same_version(self, env, monkeypatch):
+        """После смешанной поставки manifest.json уже «1.3.20», проверка говорит «нет
+        обновления», но ремонт ставит ту же версию заново."""
+        state, ctx, binary, _m = env
+        _mixed_delivery(binary)
+        state.releases["auto_repair"] = {"version": "1.3.20", "problems": ["exe_sha256"]}
+        state.releases["auto_failures"] = {"1.3.20": 1}
+        calls = _Calls()
+        _stub_channel(monkeypatch, calls)
+
+        payload = _run(state, ctx, check=_check(current="1.3.20", available=False,
+                                                sha256=_sha(NEW_EXE)))
+
+        assert (payload["decision"], payload["reason"]) == ("applied", "policy_ok")
+        name, target, _swap, auto_at_launch = calls.log[-1]
+        assert (name, target) == ("apply_installer", "1.3.20")
+        assert auto_at_launch["repair"] is True
+        assert auto_at_launch["expected_sha256"] == _sha(NEW_EXE)
+        assert state.releases["last_auto_event"]["repair"] is True
+
+    def test_repair_stops_after_failure_limit(self, env, monkeypatch):
+        state, ctx, binary, _m = env
+        _mixed_delivery(binary)
+        state.releases["auto_repair"] = {"version": "1.3.20"}
+        state.releases["auto_failures"] = {"1.3.20": autoupdate.INSTALL_FAILURES_LIMIT}
+        calls = _Calls()
+        _stub_channel(monkeypatch, calls)
+
+        payload = _run(state, ctx, check=_check(current="1.3.20", available=False))
+
+        assert (payload["decision"], payload["reason"]) == ("skipped", "install_failed")
+        assert not [c for c in calls.log if c[0] == "apply_installer"]
+
+    def test_no_repair_without_task(self, env, monkeypatch):
+        state, ctx, binary, _m = env
+        _mixed_delivery(binary)
+        calls = _Calls()
+        _stub_channel(monkeypatch, calls)
+
+        payload = _run(state, ctx, check=_check(current="1.3.20", available=False))
+
+        assert (payload["decision"], payload["reason"]) == ("skipped", "no_update")
+
+    def test_status_shows_unverified_install(self, env):
+        state, _ctx, binary, _m = env
+        _pending(state, binary)
+        state.releases["auto"]["verified_at"] = None
+        assert state.summary()["releases"]["auto_pending_verified"] is False
+        state.releases["auto"]["verified_at"] = NOW
+        assert state.summary()["releases"]["auto_pending_verified"] is True
+        del state.releases["auto"]["verified_at"]
+        assert state.summary()["releases"]["auto_pending_verified"] is True, (
+            "запись прежней версии канала — не «идёт установка» навсегда")
