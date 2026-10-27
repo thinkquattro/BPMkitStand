@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 
 class Transport(str, Enum):
@@ -224,6 +225,35 @@ class Stand:
             result[f.name] = value
         result.update(self.extra)
         return result
+
+    def web_url(self) -> Optional[str]:
+        """Адрес веб-приложения стенда без хвостового «/» либо ``None``.
+
+        у удалённого (``transport=http``) стенда источник адреса — ``stand_url``
+        записи (схема + хост + порт + префикс пути, как его вставили из браузера; поле
+        живёт в ``extra`` — его же первым читает BPMkit). Порт 0 у такого стенда значит
+        «по схеме» (443/80), а не «адреса нет». Локальный стенд — как раньше:
+        ``stand_scheme://stand_host:stand_port``, без порта адреса нет.
+        """
+        is_http = self.effective_transport == Transport.HTTP
+        if is_http:
+            raw = str(self.extra.get("stand_url") or "").strip()
+            if raw:
+                parts = urlsplit(raw)
+                scheme = (parts.scheme or "").lower()
+                if scheme in ("http", "https") and parts.netloc:
+                    return f"{scheme}://{parts.netloc}{parts.path.rstrip('/')}"
+        host = str(self.stand_host or "").strip()
+        if not host:
+            return None
+        scheme = (self.stand_scheme or "http").lower()
+        try:
+            port = int(self.stand_port or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if port:
+            return f"{scheme}://{host}:{port}"
+        return f"{scheme}://{host}" if is_http else None
 
     @property
     def effective_transport(self) -> Transport:

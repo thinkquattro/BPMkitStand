@@ -284,6 +284,12 @@ _REGISTER_ALLOWED_FIELDS = {
     "redis_port",
     "agent_url",
     "agent_secret_ref",
+    # удалённый (http) стенд — адрес одной строкой (``stand_url``, его же
+    # первым читает BPMkit) и учётка администратора: логин и ССЫЛКА на пароль в
+    # хранилище секретов (сам пароль через форму не проходит).
+    "stand_url",
+    "admin_user",
+    "secret_ref_admin",
     # Доверие к сертификату АГЕНТА (канал «хаб → агент»), не путать с
     # stand_scheme/verify_tls выше — те про пробу самого стенда. Без этой пары
     # агент с самоподписанным сертификатом подключался только через
@@ -309,8 +315,87 @@ _ENGINE_FIELDS = ("type", "wsc_dll", "workspace_name", "web_app_path")
 _OPTIONAL_STR_FIELDS = {
     "agent_url", "agent_secret_ref", "agent_ca", "iis_site", "iis_app_pool",
     "docker_container", "docker_compose_file", "docker_compose_service",
-    "k8s_deployment", "secret_ref_db",
+    "k8s_deployment", "secret_ref_db", "secret_ref_admin",
 }
+
+# поля локального стенда, которых у удалённого (transport=http) нет по
+# построению, и их «пустые» значения. Форма их для http скрывает, а сервер при
+# сохранении такой записи очищает — дефолты локального стенда (порт 5000, kestrel,
+# каталоги, Redis, движок) в запись удалённого стенда не попадают.
+_HTTP_CLEARED_FIELDS = {
+    "host_kind": "kestrel",
+    "stand_dir": "",
+    "logs_dir": "",
+    "redis_host": "",
+    "redis_port": 0,
+    "iis_site": None,
+    "iis_app_pool": None,
+    "docker_container": None,
+    "docker_compose_file": None,
+    "docker_compose_service": None,
+    "k8s_namespace": "",
+    "k8s_deployment": None,
+}
+
+# поля БД, которые очищаются у удалённого стенда при снятом
+# переключателе «Есть доступ к БД» (тело запроса ``db_access: false``).
+_DB_CLEARED_FIELDS = {
+    "db_host": "",
+    "db_port": 0,
+    "db_name": "",
+    "db_user": "",
+    "secret_ref_db": None,
+}
+
+
+def _parse_stand_url(raw: str) -> tuple[Optional[dict], Optional[str]]:
+    """``stand_url`` → ``({"url", "scheme", "host", "port"}, None)`` или ``(None, ошибка)``.
+
+    Порт без явного указания — 0 («по схеме»), хвостовой «/» снимается, префикс пути
+    остаётся (стенд за прокси на подпути). Только http/https.
+    """
+    from urllib.parse import urlsplit
+
+    text = str(raw or "").strip()
+    try:
+        parts = urlsplit(text)
+        port = parts.port or 0
+    except ValueError as exc:
+        return None, f"stand_url: адрес не разобран ({exc})"
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return None, "stand_url: нужна схема http:// или https://"
+    if not parts.hostname:
+        return None, "stand_url: не указан хост"
+    return {
+        "url": f"{scheme}://{parts.netloc}{parts.path.rstrip('/')}",
+        "scheme": scheme,
+        "host": parts.hostname,
+        "port": port,
+    }, None
+
+
+def _normalize_http_record(record: dict, body: dict, *, creating: bool) -> None:
+    """запись удалённого стенда — адрес из ``stand_url``, без локальных полей.
+
+    Схема/хост/порт выводятся из ``stand_url`` (порт 0 — «по схеме»); без адреса при
+    регистрации порт тоже 0, а не дефолт модели 5000. Локальные поля и движок
+    очищаются всегда, поля БД — только при явном ``db_access: false``.
+    """
+    url = str(record.get("stand_url") or "").strip()
+    if url:
+        parsed, _error = _parse_stand_url(url)
+        if parsed is not None:
+            record["stand_url"] = parsed["url"]
+            record["stand_scheme"] = parsed["scheme"]
+            record["stand_host"] = parsed["host"]
+            record["stand_port"] = parsed["port"]
+    elif creating and "stand_port" not in body:
+        record["stand_port"] = 0
+    record.update(_HTTP_CLEARED_FIELDS)
+    record.pop("engine", None)
+    if body.get("db_access") is False:
+        record.update(_DB_CLEARED_FIELDS)
 
 # Поля, которые сервер ЯВНО отклоняет с понятной ошибкой (а не молча
 # игнорирует), если клиент вдруг их пришлёт — защита от того, чтобы кто-то
@@ -671,11 +756,8 @@ def _stand_entry(name: str, stand: Stand, status) -> dict:
     bpmkit_logs_available = logs_dir is not None
     # Схему берём из записи: стенд за TLS по http:// не откроется, а ссылка
     # «Открыть стенд» в дашборде вела бы в никуда (см. Stand.stand_scheme).
-    http_url = (
-        f"{(stand.stand_scheme or 'http').lower()}://{stand.stand_host}:{stand.stand_port}"
-        if stand.stand_host and stand.stand_port
-        else None
-    )
+    # у удалённого стенда — stand_url (порт по схеме), см. Stand.web_url.
+    http_url = stand.web_url()
     return {
         "name": name,
         "transport": stand.transport.value,
@@ -728,6 +810,13 @@ def _stand_entry(name: str, stand: Stand, status) -> dict:
             # «пул остановлен» / «порт держит http.sys, 503»), см.
             # health.check_stand.
             "reason": (status.details.get("process_reason") if status else None),
+            # Остановленные службы IIS (WAS/W3SVC): UI показывает отдельный бейдж
+            # «службы IIS остановлены» вместо up/down, см. hosting.IisState.
+            "services_down": [
+                item.strip()
+                for item in str((status.details.get("process_services_down") if status else "") or "").split(",")
+                if item.strip()
+            ],
         },
         "logs": {"bpmkit_available": bpmkit_logs_available},
     }
@@ -2058,6 +2147,20 @@ def make_handler(
                 errors.append("secret_ref_db: недопустимая ссылка на секрет (буквы/цифры/._:-)")
                 bad_fields.append("secret_ref_db")
 
+            # ссылка на пароль администратора и адрес удалённого стенда.
+            admin_ref = data.get("secret_ref_admin")
+            if admin_ref and not _security.validate_secret_ref(str(admin_ref)):
+                errors.append("secret_ref_admin: недопустимая ссылка на секрет (буквы/цифры/._:-)")
+                bad_fields.append("secret_ref_admin")
+            if "admin_user" in data and not isinstance(data["admin_user"], str):
+                errors.append("admin_user должен быть строкой")
+                bad_fields.append("admin_user")
+            if data.get("stand_url"):
+                _parsed_url, url_error = _parse_stand_url(str(data["stand_url"]))
+                if url_error:
+                    errors.append(url_error)
+                    bad_fields.append("stand_url")
+
             if errors:
                 self._send_json(400, {"error": "; ".join(errors), "fields": bad_fields})
                 return
@@ -2067,9 +2170,11 @@ def make_handler(
                 merged.update(data)
                 if merged.get("engine") is None:
                     merged.pop("engine", None)
-                stand = Stand.from_dict(name, merged)
             else:
-                stand = Stand.from_dict(name, data)
+                merged = dict(data)
+            if str(merged.get("transport") or Transport.LOCAL.value) == Transport.HTTP.value:
+                _normalize_http_record(merged, body, creating=existing is None)
+            stand = Stand.from_dict(name, merged)
             validation_errors = stand.validate()
             if validation_errors:
                 self._send_json(400, {"error": "; ".join(validation_errors), "fields": []})

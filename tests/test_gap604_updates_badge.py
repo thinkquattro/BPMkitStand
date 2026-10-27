@@ -38,6 +38,9 @@ FUNCS = (
     "companionHasNews",
     "updateNotificationEvents",
     "actionUnavailableReason",
+    # actionUnavailableReason берёт причину из mcpUpdateView.
+    "formatMegabytes",
+    "mcpUpdateView",
 )
 
 
@@ -177,3 +180,140 @@ def test_notifications_and_reasons_use_segment_compare_via_node(tmp_path):
     assert r["requires_installer_older_latest"]["reason"] == "generic"
     assert "установщиком" in r["requires_installer_newer_latest"]["reason"]
     assert r["cmp"] == [1, 0, -1, False]
+
+
+# --------------------------------------------------------------------------
+# строка MCP окна «Обновления» — «Скачать»/ход/ошибка вместо
+# выключенной «Установить», «Откатить» не рядом с доступным обновлением.
+# --------------------------------------------------------------------------
+
+MCP_ROW_CASES = {
+    # версия известна, но не скачана (случай клиента: 1.3.16 → 1.4.32)
+    "known_not_staged": {
+        "state": {"releases": {"known_latest": "1.4.32", "current_version": "1.3.16",
+                     "update_available": True, "rollback_available": True}},
+        "actions": {"apply_update": False, "stage_update": True, "rollback": True},
+    },
+    # загрузка оборвалась на середине — кусок на диске
+    "partial": {
+        "state": {"releases": {"known_latest": "1.4.32", "current_version": "1.3.16",
+                     "update_available": True, "resume_bytes": 52428800,
+                     "resume_size_bytes": 96468992}},
+        "actions": {"apply_update": False, "stage_update": True},
+    },
+    # прошлая загрузка упала — причина из состояния канала
+    "stage_error": {
+        "state": {"releases": {"known_latest": "1.4.32", "current_version": "1.3.16",
+                     "update_available": True, "status": "error",
+                     "detail": "read operation timed out"}},
+        "actions": {"apply_update": False, "stage_update": True},
+    },
+    # скачана и проверена — «Установить» включена, «Откатить» не показывается
+    "staged": {
+        "state": {"releases": {"known_latest": "1.4.32", "staged_version": "1.4.32",
+                     "current_version": "1.3.16", "update_available": True,
+                     "rollback_available": True}},
+        "actions": {"apply_update": True, "stage_update": True, "rollback": True},
+    },
+    # версию ставит установщик — ни «Скачать», ни «Установить» в этой строке
+    "requires_installer": {
+        "state": {"releases": {"known_latest": "1.4.32", "current_version": "1.3.16",
+                     "update_available": True, "requires_installer": True}},
+        "actions": {"apply_update": False, "stage_update": True},
+    },
+    # актуально, есть история — «Откатить» видна
+    "up_to_date_with_history": {
+        "state": {"releases": {"known_latest": "1.4.32", "current_version": "1.4.32",
+                     "update_available": False, "rollback_available": True}},
+        "actions": {"apply_update": False, "rollback": True},
+    },
+}
+
+
+def _run_mcp_row_node(tmp_path) -> dict:
+    js = _read_js()
+    parts = [_extract_function(js, name) for name in FUNCS]
+    script = "\n".join(
+        [
+            'const COMPANION_ACTION_REASONS = {apply_update: "generic"};',
+            *parts,
+            f"const CASES = {json.dumps(MCP_ROW_CASES)};",
+            "const out = {};",
+            "for (const [k, st] of Object.entries(CASES)) {",
+            "  out[k] = {view: mcpUpdateView(st), reason: actionUnavailableReason('apply_update', st)};",
+            "}",
+            "console.log(JSON.stringify(out));",
+        ]
+    )
+    path = tmp_path / "gap1045_mcp_row.js"
+    path.write_text(script, encoding="utf-8")
+    proc = subprocess.run(
+        [NODE, str(path)], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+class TestGap1045McpRow:
+    """видимость кнопок строки MCP совпадает с их доступностью."""
+
+    @pytest.mark.skipif(NODE is None, reason="node недоступен в этой среде")
+    def test_known_but_not_staged_offers_download_not_disabled_install(self, tmp_path):
+        r = _run_mcp_row_node(tmp_path)["known_not_staged"]
+        assert r["view"]["install"] is False
+        assert r["view"]["stage"] is True
+        assert r["view"]["stageLabel"] == "Скачать"
+        assert "1.4.32" in r["view"]["detail"] and "не скачана" in r["view"]["detail"]
+        # откат рядом с доступным обновлением не показывается
+        assert r["view"]["rollback"] is False
+        # подсказка выключенной «Установить» — та же причина, а не общая фраза
+        assert r["reason"] == r["view"]["detail"]
+
+    @pytest.mark.skipif(NODE is None, reason="node недоступен в этой среде")
+    def test_partial_download_shows_progress(self, tmp_path):
+        r = _run_mcp_row_node(tmp_path)["partial"]["view"]
+        assert r["stage"] is True and r["stageState"] == "partial"
+        assert r["stageLabel"] == "Докачать"
+        assert "50,0 МБ" in r["detail"] and "92,0 МБ" in r["detail"]
+
+    @pytest.mark.skipif(NODE is None, reason="node недоступен в этой среде")
+    def test_stage_error_shows_reason_and_retry(self, tmp_path):
+        r = _run_mcp_row_node(tmp_path)["stage_error"]["view"]
+        assert r["stageState"] == "error" and r["stageLabel"] == "Повторить"
+        assert "read operation timed out" in r["detail"]
+
+    @pytest.mark.skipif(NODE is None, reason="node недоступен в этой среде")
+    def test_staged_shows_enabled_install_without_rollback(self, tmp_path):
+        r = _run_mcp_row_node(tmp_path)["staged"]["view"]
+        assert r["install"] is True and r["stage"] is False and r["rollback"] is False
+
+    @pytest.mark.skipif(NODE is None, reason="node недоступен в этой среде")
+    def test_installer_required_offers_neither(self, tmp_path):
+        r = _run_mcp_row_node(tmp_path)["requires_installer"]
+        assert r["view"]["install"] is False and r["view"]["stage"] is False
+        assert "установщиком" in r["reason"]
+
+    @pytest.mark.skipif(NODE is None, reason="node недоступен в этой среде")
+    def test_rollback_only_without_pending_update(self, tmp_path):
+        r = _run_mcp_row_node(tmp_path)["up_to_date_with_history"]["view"]
+        assert r["rollback"] is True and r["install"] is False and r["stage"] is False
+
+    def test_markup_and_render_use_single_view(self):
+        html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+        js = _read_js()
+        assert '<button type="button" id="upd-stage-btn" data-companion-action="stage_update" hidden>' in html
+        body = _extract_function(js, "renderMcpRow")
+        assert "mcpUpdateView(status)" in body
+        assert "install.hidden = !view.install" in body
+        assert "!view.rollback" in body
+        assert 'stage_update: "Скачиваем…"' in js
+
+    def test_status_summary_reports_partial_size(self, tmp_path):
+        from standkit_companion.state import CompanionState
+        state = CompanionState(tmp_path / "state.json")
+        state.releases["partial"] = {"bytes": 1024, "size_bytes": 4096}
+        rel = state.summary()["releases"]
+        assert (rel["resume_bytes"], rel["resume_size_bytes"]) == (1024, 4096)
+        state.releases["partial"] = None
+        assert state.summary()["releases"]["resume_size_bytes"] is None

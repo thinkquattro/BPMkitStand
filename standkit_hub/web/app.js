@@ -426,16 +426,77 @@
   // полей (agent_*/iis_*/docker_*/k8s_*), которые показываются по значению
   // select'ов transport/host_kind без сторонних либ.
 
+  /** адрес удалённого стенда одной строкой → схема/хост/порт.
+   * Адрес вставляют из браузера как есть; без схемы считаем https. Порт без явного
+   * указания — 0 («по схеме»: 443/80), а не дефолт локального стенда 5000.
+   * Префикс пути (стенд за прокси на подпути) сохраняется, хвостовой «/» снимается. */
+  function parseStandUrl(raw) {
+    let text = String(raw || "").trim();
+    if (!text) return { ok: false, error: "Укажите адрес стенда, например https://crm.example.ru" };
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) text = `https://${text}`;
+    let u;
+    try {
+      u = new URL(text);
+    } catch (e) {
+      return { ok: false, error: `Адрес стенда не разобран: ${String(raw).trim()}` };
+    }
+    const scheme = u.protocol.replace(/:$/, "").toLowerCase();
+    if (scheme !== "http" && scheme !== "https") {
+      return { ok: false, error: "Адрес стенда: допустимы только http:// и https://" };
+    }
+    if (!u.hostname) return { ok: false, error: "Адрес стенда: не указан хост" };
+    const port = u.port ? Number(u.port) : 0;
+    const path = (u.pathname || "").replace(/\/+$/, "");
+    const hostPart = u.host; // с портом, если он указан явно
+    return {
+      ok: true,
+      scheme,
+      host: u.hostname,
+      port,
+      effectivePort: port || (scheme === "https" ? 443 : 80),
+      url: `${scheme}://${hostPart}${path}`,
+    };
+  }
+
+  /** Поле внутри СКРЫТОГО условного блока (на любом уровне вложенности) на сервер не
+   * уходит: так скрытые для удалённого стенда локальные поля не попадают в реестр. */
+  function inHiddenRegisterBlock(input) {
+    let el = input ? input.parentElement : null;
+    while (el) {
+      if (el.hidden && el.classList &&
+          (el.classList.contains("register-conditional") || el.classList.contains("register-local"))) {
+        return true;
+      }
+      el = el.parentElement;
+    }
+    return false;
+  }
+
   function updateRegisterConditionalFields() {
     const form = document.getElementById("register-form");
     const transport = form.elements.namedItem("transport").value;
     const hostKind = form.elements.namedItem("host_kind").value;
-    const scheme = form.elements.namedItem("stand_scheme").value;
+    const isHttp = transport === "http";
+    // У удалённого стенда схема берётся из адреса (stand_url), а не из select'а
+    // локальной схемы, который для него скрыт.
+    let scheme = form.elements.namedItem("stand_scheme").value;
+    if (isHttp) {
+      const parsed = parseStandUrl(form.elements.namedItem("stand_url").value);
+      scheme = parsed.ok ? parsed.scheme : "";
+    }
     form.querySelectorAll(".register-conditional[data-when-transport]").forEach((el) => {
       el.hidden = el.dataset.whenTransport !== transport;
     });
+    // локальные поля (хостинг, каталоги, схема/хост/порт, Redis, движок)
+    // для transport=http скрыты; БД — только при «Есть доступ к БД».
+    form.querySelectorAll("[data-hide-when-transport]").forEach((el) => {
+      el.hidden = el.dataset.hideWhenTransport === transport;
+    });
+    form.querySelectorAll("[data-db-block]").forEach((el) => {
+      el.hidden = isHttp && !form.elements.namedItem("has_db").checked;
+    });
     form.querySelectorAll(".register-conditional[data-when-host-kind]").forEach((el) => {
-      el.hidden = el.dataset.whenHostKind !== hostKind;
+      el.hidden = isHttp || el.dataset.whenHostKind !== hostKind;
     });
     // verify_tls показываем только при stand_scheme=https: на http флаг ничего
     // не меняет и лишь путает. Механика — та же самая, третий
@@ -534,6 +595,18 @@
       setFormValue(form, key, cfg[key]);
     });
     setEngineField(cfg.engine && cfg.engine.type ? cfg.engine : null);
+    if (cfg.transport === "http") {
+      // запись без stand_url (заведена до поля адреса) — адрес собирается
+      // из схемы/хоста/порта; БД-блок открыт, если у записи есть адрес БД.
+      if (!cfg.stand_url && cfg.stand_host) {
+        const scheme = String(cfg.stand_scheme || "http").toLowerCase();
+        const port = Number(cfg.stand_port) || 0;
+        const defaultPort = scheme === "https" ? 443 : 80;
+        setFormValue(form, "stand_url",
+          `${scheme}://${cfg.stand_host}${port && port !== defaultPort ? `:${port}` : ""}`);
+      }
+      form.elements.namedItem("has_db").checked = !!cfg.db_host;
+    }
     updateRegisterConditionalFields();
     registerState.hasDbSecret = !!(data && data.has_db_secret);
     if (data && data.has_db_secret) {
@@ -595,6 +668,11 @@
     "redis_port",
     "agent_url",
     "agent_secret_ref",
+    // удалённый стенд — адрес одной строкой и учётка администратора
+    // (сам пароль — только в хранилище секретов, в форме лишь ссылка на него).
+    "stand_url",
+    "admin_user",
+    "secret_ref_admin",
     // Доверие к сертификату АГЕНТА. Живут в условном блоке
     // транспорта agent (data-when-transport), поэтому при transport=local не
     // уезжают на сервер вовсе — включая чекбокс (см. ветку block.hidden ниже).
@@ -622,8 +700,7 @@
       // уезжал бы бессмысленный verify_tls. Одно правило закрывает оба случая
       // и заодно чинит старую мелочь: заполнил IIS-поля, передумал и выбрал
       // docker — их значения больше не едут на сервер.
-      const block = input.closest ? input.closest(".register-conditional") : null;
-      if (block && block.hidden) return;
+      if (inHiddenRegisterBlock(input)) return;
 
       if (input.type === "checkbox") {
         // ГРАБЛЯ: у чекбокса input.value — это "on" независимо
@@ -666,11 +743,36 @@
       if (registerState.mode === "edit") payload.redis_port = "";
       else delete payload.redis_port;
     }
+    if (payload.transport === "http") {
+      // адрес — единственный источник схемы/хоста/порта удалённого стенда;
+      // порт без явного указания — 0 («по схеме»), дефолт 5000 сюда не утекает.
+      // Redis удалённому стенду не нужен — пустая пара не шлётся вовсе.
+      delete payload.redis_port;
+      const parsed = parseStandUrl(payload.stand_url);
+      if (parsed.ok) {
+        payload.stand_url = parsed.url;
+        payload.stand_scheme = parsed.scheme;
+        payload.stand_host = parsed.host;
+        payload.stand_port = parsed.port;
+      }
+      // Сервер очищает поля БД, если доступа к ней нет (переключатель снят).
+      payload.db_access = !!form.elements.namedItem("has_db").checked;
+    }
     // Пароль БД из конфига стенда в хранилище секретов (значение страница не видит).
     const pwBox = form.elements.namedItem("db_password_from_config");
-    const pwBlock = pwBox && pwBox.closest ? pwBox.closest(".register-conditional") : null;
-    if (pwBox && pwBox.checked && !(pwBlock && pwBlock.hidden)) payload.db_password_from_config = true;
+    if (pwBox && pwBox.checked && !inHiddenRegisterBlock(pwBox)) payload.db_password_from_config = true;
     return payload;
+  }
+
+  /** что не так с формой удалённого стенда до отправки (или ""). */
+  function registerHttpFormError(form) {
+    if (form.elements.namedItem("transport").value !== "http") return "";
+    const parsed = parseStandUrl(form.elements.namedItem("stand_url").value);
+    if (!parsed.ok) return parsed.error;
+    if (!form.elements.namedItem("admin_user").value.trim()) {
+      return "Укажите логин администратора стенда (admin_user) — молча Supervisor не подставляется";
+    }
+    return "";
   }
 
   // Закрытие модалки кликом по подложке — но ТОЛЬКО если нажатие (mousedown)
@@ -855,7 +957,12 @@
     // Пароль БД для проверки входа: секрет по secret_ref_db, а если его нет — пароль из
     // конфига стенда (читает сервер, наружу он не выводится).
     const pwRow = document.getElementById("register-pw-row");
-    payload.use_config_password = !pwRow.hidden;
+    payload.use_config_password = !pwRow.hidden && !inHiddenRegisterBlock(pwRow);
+    if (payload.transport === "http") {
+      // Проба сайта: у адреса без порта — порт по схеме (443/80), а не «порт не задан».
+      const parsed = parseStandUrl(payload.stand_url);
+      if (parsed.ok) payload.stand_port = parsed.effectivePort;
+    }
     btn.disabled = true;
     list.hidden = false;
     list.textContent = "";
@@ -1057,11 +1164,19 @@
     form.elements.namedItem("transport").addEventListener("change", updateRegisterConditionalFields);
     form.elements.namedItem("host_kind").addEventListener("change", updateRegisterConditionalFields);
     form.elements.namedItem("stand_scheme").addEventListener("change", updateRegisterConditionalFields);
+    // переключатель БД и адрес удалённого стенда (схема → verify_tls).
+    form.elements.namedItem("has_db").addEventListener("change", updateRegisterConditionalFields);
+    form.elements.namedItem("stand_url").addEventListener("input", updateRegisterConditionalFields);
 
     form.addEventListener("submit", async (evt) => {
       evt.preventDefault();
       showRegisterFormError("");
       const submitBtn = document.getElementById("register-modal-submit-btn");
+      const httpError = registerHttpFormError(form);
+      if (httpError) {
+        showRegisterFormError(httpError);
+        return;
+      }
       const payload = collectRegisterPayload(form);
       const editing = registerState.mode === "edit";
       submitBtn.disabled = true;
@@ -1368,20 +1483,34 @@
     // Legacy-запись agent без agent_url сервер отдаёт с transport_warning и
     // remote_host — показываем её как http, но с явным предупреждением, а не
     // молча (реестр мы не переписывали, и оператор должен знать почему).
+    //
+    // ячейка переносится (td.cell-transport), а не режется многоточием:
+    // вид и хост — отдельные span (перенос встаёт на разделитель «·», а не
+    // посреди слова), бейдж — с новой строки, полный текст — в title.
     const warn = s.transport_warning || "";
     if (s.transport === "http" || warn) {
       const rhost = s.remote_host || (s.http && s.http.url) || "";
-      const title = warn ? `${REMOTE_HTTP_TITLE} ${warn}` : REMOTE_HTTP_TITLE;
+      const host = rhost ? hostOf(rhost) : "";
       const label = "удалённый · http";
-      const body = rhost ? `${label} · ${escapeHtml(hostOf(rhost))}` : label;
+      const full = host ? `${label} · ${host}` : label;
+      const title = warn ? `${full}. ${REMOTE_HTTP_TITLE} ${warn}` : `${full}. ${REMOTE_HTTP_TITLE}`;
       const badge = warn
-        ? ` <span class="badge badge-warn" title="${escapeAttr(warn)}">запись agent без адреса</span>`
+        ? `<span class="transport-badge"><span class="badge badge-warn" title="${escapeAttr(warn)}">запись agent без адреса</span></span>`
         : "";
-      return `<span title="${escapeAttr(title)}">${body}</span>${badge}`;
+      return `<span class="transport-value" title="${escapeAttr(title)}">${transportParts(label, host)}</span>${badge}`;
     }
     if (s.transport !== "agent") return escapeHtml(s.transport || "—");
     const host = s.agent || (s.process && s.process.agent) || "";
-    return host ? `агент · ${escapeHtml(host)}` : "агент";
+    const full = host ? `агент · ${host}` : "агент";
+    return `<span class="transport-value" title="${escapeAttr(full)}">${transportParts("агент", host)}</span>`;
+  }
+
+  /** «вид · хост» двумя span: строка переносится по разделителю. */
+  function transportParts(kind, host) {
+    const kindHtml = `<span class="transport-kind">${escapeHtml(kind)}</span>`;
+    return host
+      ? `${kindHtml} <span class="transport-host">·&nbsp;${escapeHtml(host)}</span>`
+      : kindHtml;
   }
 
   function dbCell(s) {
@@ -1513,6 +1642,14 @@
       return '<span class="process-starting"><span class="mini-spinner" aria-hidden="true"></span>Запускается…</span>';
     }
     const process = s.process || {};
+    const servicesDown = Array.isArray(process.services_down) ? process.services_down : [];
+    if (servicesDown.length) {
+      // Службы IIS (WAS/W3SVC) остановлены: это не «сайт погашен» и тем более не up
+      // (порт держит http.sys) — отдельный бейдж, что делать — в подсказке.
+      const title = process.reason ||
+        `Остановлены службы IIS (${servicesDown.join(", ")}): поднимите их от имени администратора`;
+      return `<span class="badge badge-warn badge-iis-services" title="${escapeAttr(title)}">службы IIS остановлены</span>`;
+    }
     let html = processBadge(process.state);
     if (process.reason) {
       // Причина от бэкенда хостинга (IIS: сайт/пул остановлен, порт держит
@@ -1679,7 +1816,7 @@
       if (s.name === selectedStand) tr.classList.add("selected");
       tr.innerHTML = `
         <td>${standNameCell(s)}</td>
-        <td>${transportCell(s)}</td>
+        <td class="cell-transport">${transportCell(s)}</td>
         <td>${processCell(s)}</td>
         <td>${httpCell(http)}</td>
         <td>${dbCell(s)}</td>
@@ -3020,6 +3157,8 @@
   const COMPANION_ACTION_BUSY = {
     sync_patterns: "Обновляем…",
     check_update: "Проверяем…",
+    // ход скачивания MCP виден на самой кнопке «Скачать».
+    stage_update: "Скачиваем…",
     apply_update: "Устанавливаем…",
     rollback: "Откатываем…",
     stage_installer: "Скачиваем установщик…",
@@ -3035,6 +3174,7 @@
   const COMPANION_ACTION_DONE = {
     sync_patterns: "Паттерны обновлены",
     check_update: "Проверка обновлений выполнена",
+    stage_update: "Новая версия MCP скачана и проверена",
     apply_update: "MCP обновлён",
     rollback: "Откат выполнен",
     stage_installer: "Установщик скачан и проверен",
@@ -4021,6 +4161,57 @@
     }
   }
 
+  /** Байты → «12,3 МБ» для строки хода скачивания. */
+  function formatMegabytes(bytes) {
+    const n = Number(bytes) || 0;
+    return `${(n / 1048576).toFixed(1).replace(".", ",")} МБ`;
+  }
+
+  /** что показывать в строке MCP окна «Обновления».
+   *
+   * Видимость и доступность кнопок считаются по ОДНОМУ условию: «Установить» —
+   * только при `actions.apply_update` (файл версии скачан и проверен), иначе она
+   * висела выключенной без причины. Версия известна, но не скачана — «Скачать»
+   * (`stage_update`) с причиной в строке деталей: идёт ли докачка (`resume_bytes`),
+   * чем кончилась прошлая попытка (`status=error`, `detail`). «Откатить» рядом с
+   * доступным обновлением не показывается. Чистая функция — без DOM. */
+  function mcpUpdateView(status) {
+    const rel = releasesBlock(status);
+    const actions = (status && status.actions) || {};
+    const hasNew = !!rel.update_available;
+    const installerRequired = hasNew && !!rel.requires_installer;
+    const staged = rel.staged_version || "";
+    const latest = rel.known_latest || "";
+    const view = {
+      install: hasNew && !installerRequired && actions.apply_update === true,
+      stage: hasNew && !installerRequired && !staged,
+      stageLabel: "Скачать",
+      stageState: "",
+      detail: "",
+      rollback: !!rel.rollback_available && !hasNew,
+    };
+    if (!view.stage) return view;
+    const done = Number(rel.resume_bytes) || 0;
+    const total = Number(rel.resume_size_bytes) || 0;
+    const progress = done > 0
+      ? `скачано ${formatMegabytes(done)}${total > done ? ` из ${formatMegabytes(total)}` : ""}, докачка продолжится с места`
+      : "";
+    if (rel.status === "error") {
+      view.stageState = "error";
+      view.stageLabel = "Повторить";
+      const reason = String(rel.detail || "").trim() || "причина не сообщена";
+      view.detail = `Версия ${latest} не скачана: ${reason}` + (progress ? ` (${progress})` : "");
+    } else if (done > 0) {
+      view.stageState = "partial";
+      view.stageLabel = "Докачать";
+      view.detail = `Версия ${latest}: ${progress}.`;
+    } else {
+      view.stageState = "pending";
+      view.detail = `Версия ${latest} ещё не скачана — нажмите «Скачать»; установка станет доступна после проверки файла.`;
+    }
+    return view;
+  }
+
   function renderMcpRow(status) {
     const rel = releasesBlock(status);
     const current = rel.current_version || "";
@@ -4046,10 +4237,15 @@
           ? "Версия установленной поставки (manifest.json)"
           : "");
     }
+    // что делать со строкой (скачать / установить / откатить) — одна
+    // чистая функция `mcpUpdateView`, её же проверяет тест в node.
+    const view = mcpUpdateView(status);
     if (installerRequired) {
       setChip("upd-mcp-chip", "new", `нужен установщик ${latest}`, "");
     } else if (staged) {
       setChip("upd-mcp-chip", "new", `доступна ${staged}`, "");
+    } else if (view.stageState === "error") {
+      setChip("upd-mcp-chip", "err", "не скачана", view.detail);
     } else if (hasNew) {
       setChip("upd-mcp-chip", "new", `доступна ${latest}`, "");
     } else if (rel.status === "error") {
@@ -4060,7 +4256,9 @@
       setChip("upd-mcp-chip", null, "", "");
     }
 
-    setDetail("upd-mcp-detail", rel.status === "error" ? String(rel.detail || "") : "");
+    setDetail("upd-mcp-detail", view.stage
+      ? view.detail
+      : (rel.status === "error" ? String(rel.detail || "") : ""));
 
     // Вторая строка — «▸ Что нового в X · после установки перезапустите Claude
     // Desktop» — только при доступной версии (макет владельца): длинные абзацы
@@ -4077,13 +4275,22 @@
     if (!companionBusy && install.dataset.idleLabel === undefined) {
       install.textContent = "Установить →";
     }
-    // кнопка «Установить» — только когда действительно есть что ставить
-    // тихим обновлением (staged/hasNew без требования установщика), а не всегда.
-    install.hidden = installerRequired || !hasNew;
+    // «Установить» видна, только когда её можно нажать (файл версии
+    // скачан и проверен — `actions.apply_update`). Версия известна, но не скачана —
+    // вместо выключенной «Установить» кнопка «Скачать» (ход — на ней же, отказ —
+    // чипом «не скачана» и причиной в строке деталей).
+    install.hidden = !view.install;
+    const stageBtn = byId("upd-stage-btn");
+    if (stageBtn) {
+      stageBtn.hidden = !view.stage;
+      if (!companionBusy && stageBtn.dataset.idleLabel === undefined) {
+        stageBtn.textContent = view.stageLabel;
+      }
+    }
 
-    // «Откатить» показывается только когда откат реально возможен: кнопка,
-    // которая всегда выключена, — это вопрос без ответа, а не подсказка.
-    byId("upd-rollback-btn").hidden = !rel.rollback_available;
+    // «Откатить» — только когда откат реально возможен И рядом нет доступного
+    // обновления (откат рядом с новой версией только путал).
+    byId("upd-rollback-btn").hidden = !view.rollback;
 
     const note = byId("upd-restart-note");
     note.hidden = !rel.restart_required;
@@ -4607,6 +4814,12 @@
       if (hasNew && rel.requires_installer) {
         return "Эта версия ставится установщиком — тихая доставка невозможна. " +
           "Скачайте новую поставку у издателя BPMkit и запустите установку.";
+      }
+      // явная причина вместо общей фразы — версия известна, но не скачана.
+      if (action === "apply_update" && rel.update_available && !rel.requires_installer &&
+          !rel.staged_version) {
+        const view = mcpUpdateView(status);
+        if (view.detail) return view.detail;
       }
     }
     return COMPANION_ACTION_REASONS[action] || "Сейчас действие недоступно";

@@ -429,6 +429,10 @@ def check_stand(
     вынесена в вызывающий поток, ниже по коду.
     """
     status = StandStatus(name=stand.name)
+    # Остановленные службы IIS (WAS/W3SVC) из describe_state — отдельный признак
+    # для UI («службы IIS остановлены», не обычный DOWN сайта). Пишет рабочий поток
+    # пробы процесса, читает вызывающий — после future.result() (синхронизация пула).
+    iis_services_down: list[str] = []
 
     def _probe_process() -> tuple[ProbeState, Optional[str]]:
         # Транспорт http — удалённый стенд БЕЗ агента: процессом
@@ -473,6 +477,9 @@ def check_stand(
                     is_up = detailed.running
                     if detailed.reason:
                         reason = detailed.reason
+                    down = getattr(detailed, "services_down", None)
+                    if isinstance(down, list) and down:
+                        iis_services_down[:] = [str(item) for item in down]
                 else:
                     is_up = backend.is_running(stand)
             except Exception:
@@ -491,10 +498,12 @@ def check_stand(
         return ProbeState.UNKNOWN, None
 
     def _probe_http() -> tuple[ProbeState, Optional[str]]:
-        if not (stand.stand_host and stand.stand_port):
+        # адрес — Stand.web_url(): у удалённого стенда stand_url записи
+        # (порт по схеме, префикс пути), у локального — схема/хост/порт, как раньше.
+        base = stand.web_url()
+        if not base:
             return ProbeState.UNKNOWN, None
-        scheme = (stand.stand_scheme or "http").lower()
-        url = f"{scheme}://{stand.stand_host}:{stand.stand_port}{http_path}"
+        url = f"{base}{http_path}"
         result = http_probe(url, verify=stand.verify_tls)
         if result.ok:
             return ProbeState.OK, None
@@ -562,6 +571,8 @@ def check_stand(
         setattr(status, field, state)
         if reason:
             status.details[f"{field}_reason"] = reason
+    if iis_services_down:
+        status.details["process_services_down"] = ", ".join(iis_services_down)
 
     # last_deploy — задел на будущее, источник данных пока не определён (бэклог,
     # см. docs/ARCHITECTURE.md).

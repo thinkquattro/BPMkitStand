@@ -463,7 +463,9 @@ def test_gap528_buttons_hidden_unless_actionable():
     html = (_web_dir() / "index.html").read_text(encoding="utf-8")
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
     assert '<button type="button" id="upd-install-btn" data-companion-action="apply_update" hidden>' in html
-    assert "install.hidden = installerRequired || !hasNew" in js
+    # видимость «Установить» — по той же доступности, что и включение
+    # (`mcpUpdateView`: только при `actions.apply_update`), а не по update_available.
+    assert "install.hidden = !view.install" in js
     assert "applyBtn.hidden = !(hasNew && staged)" in js  # renderSkillsRow
 
 

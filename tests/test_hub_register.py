@@ -404,8 +404,14 @@ def test_collect_register_payload_skips_hidden_conditional_blocks():
     (пустая строка отсекалась), для чекбокса — нет.
     """
     body = _collect_register_payload_source()
-    assert ".register-conditional" in body
-    assert "block.hidden" in body
+    # проверка вынесена в inHiddenRegisterBlock — она смотрит на ВСЕ
+    # скрытые блоки-предки (вложенные локальные поля удалённого стенда).
+    assert "inHiddenRegisterBlock(input)" in body
+    helper = re.search(r"function inHiddenRegisterBlock\(input\) \{(.*?)\n  \}", _app_js(), re.S)
+    assert helper, "в app.js не найдена inHiddenRegisterBlock"
+    assert "register-conditional" in helper.group(1)
+    assert "register-local" in helper.group(1)
+    assert "el.hidden" in helper.group(1)
 
 
 def test_register_tls_stand_with_redis_and_logs_dir_persists_new_fields(tmp_path):
@@ -595,3 +601,168 @@ def test_register_rejects_agent_ca_over_plain_http(tmp_path):
     )
     assert status == 400
     assert "agent_ca" in body.get("error", "")
+
+
+
+# --- удалённый (http) стенд в форме регистрации ---------------------
+
+
+class TestGap1037HttpStandForm:
+    """Адрес одной строкой, без локальных полей и без дефолта stand_port=5000."""
+
+    def _register(self, tmp_path, payload, path="/api/stand/register"):
+        base_url, token, _config_path, registry_path, _ = _start_hub(tmp_path, stand_name="existing")
+        status, body, _ = _request(
+            base_url, path, token=token, method="POST", origin=base_url, body=payload
+        )
+        return status, body, registry_path, (base_url, token)
+
+    def test_http_stand_from_url_without_port_gets_port_by_scheme(self, tmp_path):
+        status, body, registry_path, _ = self._register(tmp_path, {
+            "name": "remote-http",
+            "transport": "http",
+            "stand_url": "https://crm.example.test/crm/",
+            "admin_user": "Supervisor",
+            "secret_ref_admin": "standkit:remote-http:admin",
+            # локальные поля, если их всё-таки прислали, в запись не попадают
+            "host_kind": "iis",
+            "iis_site": "Site",
+            "redis_host": "127.0.0.1",
+            "redis_port": "6379",
+            "db_access": False,
+        })
+        assert status == 200, body
+        stand = Registry.load(registry_path).get("remote-http")
+        assert stand.transport.value == "http"
+        assert stand.extra["stand_url"] == "https://crm.example.test/crm"
+        assert (stand.stand_scheme, stand.stand_host, stand.stand_port) == ("https", "crm.example.test", 0)
+        assert stand.web_url() == "https://crm.example.test/crm"
+        assert stand.stand_dir == "" and stand.host_kind.value == "kestrel" and stand.iis_site is None
+        assert (stand.redis_host, stand.redis_port) == ("", 0)
+        assert (stand.admin_user, stand.secret_ref_admin) == ("Supervisor", "standkit:remote-http:admin")
+
+    def test_http_stand_explicit_port_in_url_is_kept(self, tmp_path):
+        status, body, registry_path, _ = self._register(tmp_path, {
+            "name": "remote-port", "transport": "http",
+            "stand_url": "http://crm.example.test:8080", "admin_user": "Supervisor",
+        })
+        assert status == 200, body
+        stand = Registry.load(registry_path).get("remote-port")
+        assert (stand.stand_scheme, stand.stand_port) == ("http", 8080)
+
+    def test_http_stand_without_url_and_port_does_not_get_5000(self, tmp_path):
+        status, body, registry_path, _ = self._register(tmp_path, {
+            "name": "remote-host-only", "transport": "http", "stand_host": "crm.example.test",
+        })
+        assert status == 200, body
+        assert Registry.load(registry_path).get("remote-host-only").stand_port == 0
+
+    def test_invalid_stand_url_returns_400(self, tmp_path):
+        status, body, _registry_path, _ = self._register(tmp_path, {
+            "name": "bad-url", "transport": "http", "stand_url": "ftp://crm.example.test",
+        })
+        assert status == 400
+        assert "stand_url" in body["fields"]
+
+    def test_invalid_secret_ref_admin_returns_400(self, tmp_path):
+        status, body, _registry_path, _ = self._register(tmp_path, {
+            "name": "bad-ref", "transport": "http", "stand_url": "https://crm.example.test",
+            "secret_ref_admin": "bad ref with spaces",
+        })
+        assert status == 400
+        assert "secret_ref_admin" in body["fields"]
+
+    def test_update_local_to_http_clears_local_and_db_fields(self, tmp_path):
+        base_url, token, _config_path, registry_path, _ = _start_hub(tmp_path, stand_name="existing")
+        local = {
+            "name": "moving", "transport": "local", "host_kind": "kestrel",
+            "stand_dir": str(tmp_path / "moving"), "stand_port": "5000",
+            "db_host": "db.example.test", "db_port": "5432", "db_name": "moving_db",
+            "redis_host": "127.0.0.1", "redis_port": "6379",
+        }
+        status, body, _ = _request(base_url, "/api/stand/register", token=token,
+                                   method="POST", origin=base_url, body=local)
+        assert status == 200, body
+        status, body, _ = _request(base_url, "/api/stand/update", token=token, method="POST",
+                                   origin=base_url, body={
+                                       "name": "moving", "transport": "http",
+                                       "stand_url": "https://crm.example.test",
+                                       "admin_user": "Supervisor", "db_access": False,
+                                   })
+        assert status == 200, body
+        stand = Registry.load(registry_path).get("moving")
+        assert stand.stand_dir == "" and stand.stand_port == 0
+        assert (stand.redis_host, stand.redis_port) == ("", 0)
+        assert (stand.db_host, stand.db_port, stand.db_name) == ("", 0, "")
+
+    def test_update_http_keeps_db_when_access_is_on(self, tmp_path):
+        base_url, token, _config_path, registry_path, _ = _start_hub(tmp_path, stand_name="existing")
+        status, body, _ = _request(base_url, "/api/stand/register", token=token, method="POST",
+                                   origin=base_url, body={
+                                       "name": "with-db", "transport": "http",
+                                       "stand_url": "https://crm.example.test",
+                                       "db_host": "db.example.test", "db_port": "5432",
+                                       "db_name": "crm", "db_access": True,
+                                   })
+        assert status == 200, body
+        stand = Registry.load(registry_path).get("with-db")
+        assert (stand.db_host, stand.db_port, stand.db_name) == ("db.example.test", 5432, "crm")
+
+    def test_client_sends_url_and_admin_fields(self):
+        names = _client_register_field_names()
+        for field in ("stand_url", "admin_user", "secret_ref_admin"):
+            assert field in names and field in _REGISTER_ALLOWED_FIELDS
+        body = _collect_register_payload_source()
+        assert "parseStandUrl(payload.stand_url)" in body
+        assert "payload.db_access" in body
+
+    def test_form_markup_hides_local_fields_for_http(self):
+        html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+        assert 'name="stand_url"' in html and 'name="admin_user"' in html
+        assert 'name="secret_ref_admin"' in html and 'name="has_db"' in html
+        assert html.count('data-hide-when-transport="http"') >= 3
+        assert "data-db-block" in html
+        js = _app_js()
+        assert "data-hide-when-transport" in js and "[data-db-block]" in js
+
+
+def test_gap1037_web_url_for_http_and_local_stands():
+    from standkit.models import Stand, Transport
+
+    remote = Stand(name="r", transport=Transport.HTTP, stand_host="crm.example.test",
+                   stand_port=0, stand_scheme="https")
+    assert remote.web_url() == "https://crm.example.test"
+    remote.extra["stand_url"] = "https://crm.example.test:8443/crm/"
+    assert remote.web_url() == "https://crm.example.test:8443/crm"
+    local = Stand(name="l", stand_dir="C:/x", stand_port=5000)
+    assert local.web_url() == "http://127.0.0.1:5000"
+    local.stand_port = 0
+    assert local.web_url() is None
+
+
+
+def test_gap1037_parse_stand_url_in_browser_js(tmp_path):
+    """parseStandUrl: адрес из браузера как есть → схема/хост/порт (0 = по схеме)."""
+    import shutil
+    import subprocess
+
+    from tests.test_gap604_updates_badge import _extract_function
+
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node недоступен в этой среде")
+    fn = _extract_function(_app_js(), "parseStandUrl")
+    cases = ["https://crm.example.test/", "crm.example.test:8443/crm/",
+             "http://crm.example.test:8080", "ftp://x", ""]
+    script = fn + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(parseStandUrl)));"
+    path = tmp_path / "gap1037_url.js"
+    path.write_text(script, encoding="utf-8")
+    proc = subprocess.run([node, str(path)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    r = json.loads(proc.stdout)
+    assert (r[0]["url"], r[0]["port"], r[0]["effectivePort"]) == ("https://crm.example.test", 0, 443)
+    assert (r[1]["url"], r[1]["scheme"], r[1]["port"]) == ("https://crm.example.test:8443/crm", "https", 8443)
+    assert (r[2]["scheme"], r[2]["port"]) == ("http", 8080)
+    assert r[3]["ok"] is False and r[4]["ok"] is False

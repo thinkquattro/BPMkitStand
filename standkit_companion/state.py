@@ -564,6 +564,9 @@ class CompanionState:
                 "restart_required": bool(rel.get("restart_required")),
                 "rollback_available": bool(rel.get("history")),
                 "resume_bytes": (rel.get("partial") or {}).get("bytes"),
+                # полный размер недокачанного файла — окно «Обновления»
+                # пишет «скачано N из M МБ», а не голое число байт.
+                "resume_size_bytes": (rel.get("partial") or {}).get("size_bytes"),
                 # версия и момент старта РЕАЛЬНО работающего процесса (маркер
                 # `mcp_runtime.json`), отдельно от того, что канал считает установленным
                 # (`current_version` выше). `None` — маркера не видно.
