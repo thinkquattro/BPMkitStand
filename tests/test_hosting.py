@@ -347,6 +347,10 @@ def _prep_iis_windows(monkeypatch, tmp_path):
     appcmd = inetsrv / "appcmd.exe"
     appcmd.write_text("stub", encoding="utf-8")
     monkeypatch.setenv("WINDIR", str(tmp_path))
+    # По умолчанию службы IIS живы: опрос `sc query` не должен смешиваться с
+    # подменённым subprocess.run тестов appcmd. Тесты остановленных служб
+    # переопределяют это своим monkeypatch.
+    monkeypatch.setattr(hosting, "_iis_services_down", lambda: [])
     return str(appcmd)
 
 
@@ -550,16 +554,18 @@ def test_iis_detect_site_falls_back_to_application_pool_attribute(monkeypatch, t
 
 
 def test_iis_state_unknown_is_indeterminate_not_stopped(monkeypatch, tmp_path):
-    # Службы IIS остановлены → appcmd отдаёт state:Unknown. Это «не знаю», а НЕ
-    # «остановлен»: вердикт должен уходить в TCP-фолбэк, а причина — называть
-    # службы, а не врать про остановленный сайт.
+    # Службы IIS остановлены → appcmd отдаёт state:Unknown, а порт держит
+    # http.sys. Прежний вердикт «по TCP-порту» показывал UP у неработающего стенда;
+    # теперь остановленные службы — стенд НЕ работает, причина называет службы, а
+    # не «сайт остановлен».
     _prep_iis_windows(monkeypatch, tmp_path)
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="Unknown"))
     monkeypatch.setattr(hosting, "_iis_services_down", lambda: ["WAS", "W3SVC"])
     monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
     stand = _make_stand(host_kind=HostKind.IIS, iis_site="site1", iis_app_pool="pool1")
     state = IisBackend().describe_state(stand)
-    assert state.running is True  # вердикт по порту, состояние не выяснено
+    assert state.running is False
+    assert state.services_down == ["WAS", "W3SVC"]
     assert state.site_state is None
     assert "остановлены службы IIS" in state.reason
     assert "WAS" in state.reason
@@ -1568,3 +1574,64 @@ def test_check_stand_iis_stopped_not_masked_by_open_port(monkeypatch):
     stand = _make_stand(host_kind=HostKind.IIS, iis_app_pool="pool1", db_host="", db_port=0)
     status = check_stand(stand)
     assert status.process == ProbeState.DOWN
+
+
+
+class TestGap1047IisServicesStopped:
+    """Остановленные WAS/W3SVC: стенд не работает при любом appcmd и открытом порте."""
+
+    def test_services_down_and_port_open_is_not_running_without_tcp_fallback(self, monkeypatch, tmp_path):
+        _prep_iis_windows(monkeypatch, tmp_path)
+        monkeypatch.setattr(hosting, "_iis_services_down", lambda: ["WAS", "W3SVC"])
+        tcp_calls = []
+        monkeypatch.setattr(hosting, "_tcp_fallback", lambda stand: tcp_calls.append(stand) or True)
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="Unknown"))
+        stand = _make_stand(host_kind=HostKind.IIS, iis_site="site1")
+        state = IisBackend().describe_state(stand)
+        assert state.running is False
+        assert state.services_down == ["WAS", "W3SVC"]
+        assert "sc start WAS" in state.reason and "iisreset /start" in state.reason
+        assert tcp_calls == []
+        assert state.to_dict()["services_down"] == ["WAS", "W3SVC"]
+
+    def test_w3svc_down_with_appcmd_started_is_not_running(self, monkeypatch, tmp_path):
+        _prep_iis_windows(monkeypatch, tmp_path)
+        monkeypatch.setattr(hosting, "_iis_services_down", lambda: ["W3SVC"])
+        monkeypatch.setattr(hosting, "_tcp_fallback", lambda stand: True)
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="Started"))
+        stand = _make_stand(host_kind=HostKind.IIS, iis_site="site1", iis_app_pool="pool1")
+        state = IisBackend().describe_state(stand)
+        assert state.running is False
+        assert state.services_down == ["W3SVC"]
+        assert "W3SVC" in state.reason
+
+    def test_services_alive_keep_previous_verdicts(self, monkeypatch, tmp_path):
+        _prep_iis_windows(monkeypatch, tmp_path)  # службы живы по умолчанию
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="Started"))
+        stand = _make_stand(host_kind=HostKind.IIS, iis_site="site1")
+        state = IisBackend().describe_state(stand)
+        assert state.running is True and state.services_down == []
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _completed(cmd, returncode=0, stdout="Stopped"))
+        monkeypatch.setattr(health_module, "tcp_open", lambda host, port, **kw: True)
+        state = IisBackend().describe_state(stand)
+        assert state.running is False and state.services_down == []
+        assert "сайт остановлен" in state.reason and "http.sys" in state.reason
+
+    def test_check_stand_exposes_services_down_for_ui(self, monkeypatch, tmp_path):
+        _prep_iis_windows(monkeypatch, tmp_path)
+        monkeypatch.setattr(hosting, "_iis_services_down", lambda: ["WAS"])
+        stand = _make_stand(host_kind=HostKind.IIS, iis_site="site1")
+        from standkit.models import ProbeState
+
+        status = health_module.check_stand(stand)
+        assert status.process is ProbeState.DOWN
+        assert status.details["process_services_down"] == "WAS"
+        assert "службы IIS" in status.details["process_reason"]
+
+    def test_dashboard_shows_separate_badge(self):
+        from pathlib import Path as _P
+        import standkit_hub.server as _srv
+        js = (_P(_srv.__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
+        assert "службы IIS остановлены" in js and "process.services_down" in js
+        src = _P(_srv.__file__).read_text(encoding="utf-8")
+        assert '"services_down": [' in src

@@ -1642,6 +1642,14 @@
       return '<span class="process-starting"><span class="mini-spinner" aria-hidden="true"></span>Запускается…</span>';
     }
     const process = s.process || {};
+    const servicesDown = Array.isArray(process.services_down) ? process.services_down : [];
+    if (servicesDown.length) {
+      // Службы IIS (WAS/W3SVC) остановлены: это не «сайт погашен» и тем более не up
+      // (порт держит http.sys) — отдельный бейдж, что делать — в подсказке.
+      const title = process.reason ||
+        `Остановлены службы IIS (${servicesDown.join(", ")}): поднимите их от имени администратора`;
+      return `<span class="badge badge-warn badge-iis-services" title="${escapeAttr(title)}">службы IIS остановлены</span>`;
+    }
     let html = processBadge(process.state);
     if (process.reason) {
       // Причина от бэкенда хостинга (IIS: сайт/пул остановлен, порт держит

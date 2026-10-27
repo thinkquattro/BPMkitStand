@@ -810,6 +810,13 @@ def _stand_entry(name: str, stand: Stand, status) -> dict:
             # «пул остановлен» / «порт держит http.sys, 503»), см.
             # health.check_stand.
             "reason": (status.details.get("process_reason") if status else None),
+            # Остановленные службы IIS (WAS/W3SVC): UI показывает отдельный бейдж
+            # «службы IIS остановлены» вместо up/down, см. hosting.IisState.
+            "services_down": [
+                item.strip()
+                for item in str((status.details.get("process_services_down") if status else "") or "").split(",")
+                if item.strip()
+            ],
         },
         "logs": {"bpmkit_available": bpmkit_logs_available},
     }

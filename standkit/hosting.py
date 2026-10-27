@@ -38,7 +38,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
@@ -600,6 +600,10 @@ class IisState:
     pool_state: Optional[str] = None
     port_open: bool = False
     reason: str = ""
+    # Остановленные службы IIS (WAS/W3SVC). Непусто — стенд НЕ работает при любом
+    # ответе appcmd и открытом порте (порт держит http.sys); UI показывает это
+    # отдельным статусом «службы IIS остановлены», а не обычным DOWN сайта.
+    services_down: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -608,6 +612,7 @@ class IisState:
             "pool_state": self.pool_state,
             "port_open": self.port_open,
             "reason": self.reason,
+            "services_down": list(self.services_down),
         }
 
 
@@ -860,8 +865,22 @@ class IisBackend:
         IIS/http.sys держит порт 80/443 даже у остановленного сайта (503),
         открытый порт НЕ означает «стенд работает». TCP-фолбэк — только когда
         appcmd состояния не дал (сайт/пул не найден, ошибка команды, нет прав).
+
+        Службы IIS проверяются ДО appcmd: остановленная WAS или W3SVC — стенд не
+        работает, что бы ни ответил appcmd (Unknown или устаревший Started) и как бы
+        ни был открыт порт (его держит http.sys). TCP-фолбэк в этом случае не
+        вызывается. «Неизвестно» (не Windows, sc не ответил) остановкой не считается.
         """
         state = IisState()
+        down = _iis_services_down()
+        if down:
+            state.services_down = list(down)
+            state.running = False
+            state.reason = (
+                "остановлены службы IIS (%s): стенд не работает — поднимите `sc start WAS` / "
+                "`sc start W3SVC` или `iisreset /start` от имени администратора" % ", ".join(down)
+            )
+            return state
         try:
             appcmd = _resolve_appcmd()
         except HostingError as exc:
@@ -877,22 +896,14 @@ class IisBackend:
 
         primary = state.site_state if stand.iis_site else state.pool_state
         if primary is None:
+            # Службы IIS уже проверены выше и живы (или неизвестны) — значит,
+            # сайт/пул не найден либо не хватает прав: вердикт по TCP-порту.
             state.port_open = _tcp_fallback(stand)
             state.running = state.port_open
-            down = _iis_services_down()
-            if down:
-                # Самая частая причина «состояние Unknown» — остановленные службы
-                # IIS. Говорим это прямо, чтобы пользователь поднимал службу, а не
-                # искал стенд (живая приёмка 17.08.2026).
-                state.reason = (
-                    "состояние не выяснено: остановлены службы IIS (%s) — appcmd отдаёт "
-                    "Unknown; вердикт по TCP-порту" % ", ".join(down)
-                )
-            else:
-                state.reason = (
-                    "appcmd не вернул определённого состояния (сайт/пул не найден, "
-                    "состояние Unknown либо не хватает прав) — вердикт по TCP-порту"
-                )
+            state.reason = (
+                "appcmd не вернул определённого состояния (сайт/пул не найден, "
+                "состояние Unknown либо не хватает прав) — вердикт по TCP-порту"
+            )
             return state
 
         site_ok = (state.site_state == "Started") if stand.iis_site else True
