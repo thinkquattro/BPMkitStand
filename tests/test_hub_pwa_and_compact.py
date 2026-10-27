@@ -320,3 +320,28 @@ def test_snapshot_age_is_always_visible():
     app = _read_web("app.js")
     assert "обновлено ${formatAge(age)} назад" in app
     assert "stands-age-stale" in app
+
+
+
+class TestGap1048TransportColumnWraps:
+    """GAP-1048: «Транспорт» переносится, остальные колонки режутся, ширины те же."""
+
+    def test_transport_cell_wraps_and_others_keep_ellipsis(self):
+        import re
+
+        css = _read_web("style.css")
+        rule = re.search(r"\.stands-table td\.cell-transport \{(.*?)\}", css, re.S)
+        assert rule, "нет правила для ячейки «Транспорт»"
+        assert "white-space: normal" in rule.group(1)
+        assert "overflow-wrap: anywhere" in rule.group(1)
+        # общая обрезка остальных ячеек и фиксированная раскладка — на месте
+        assert "text-overflow: ellipsis" in css and "table-layout: fixed" in css
+        assert ".col-transport { width: 11%; }" in css
+        assert ".transport-badge" in css
+
+    def test_transport_cell_markup_splits_kind_host_and_badge(self):
+        js = _read_web("app.js")
+        assert '<td class="cell-transport">${transportCell(s)}</td>' in js
+        assert "function transportParts(kind, host)" in js
+        assert 'class="transport-host">·&nbsp;' in js
+        assert 'class="transport-badge"' in js

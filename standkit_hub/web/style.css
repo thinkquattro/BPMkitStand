@@ -544,6 +544,12 @@ body {
   display: none;
 }
 
+/* GAP-1037: локальные поля формы, скрытые для удалённого (http) стенда, — без
+   рамки условного блока (в локальной форме они выглядят как раньше). */
+.register-local[hidden] {
+  display: none !important;
+}
+
 /* --- форма регистрации/изменения: заполнение из конфигов, «Тест», встроенный выбор папки --- */
 
 /* Свои [hidden]-правила: .field-hint и список результатов задают display сами. */
@@ -1323,6 +1329,22 @@ body.hub-offline .stands-table-wrap {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* GAP-1048: «Транспорт» (вид · хост, бейдж предупреждения) не помещается в
+   11% и резался многоточием — эта ячейка переносится по словам, длинный хост без
+   пробелов ломается где угодно. Ширины колонок (colgroup) не меняются, остальные
+   ячейки сохраняют обрезку. */
+.stands-table td.cell-transport {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  line-height: 1.35;
+}
+
+.stands-table td.cell-transport .transport-badge {
+  display: block;
+  margin-top: 3px;
 }
 
 /* Действия — не переносить кнопки и не обрезать их. */
@@ -2642,6 +2664,11 @@ span.value-has-reason {
   padding: 5px 9px;
   line-height: 1.25;
   text-align: center;
+  /* GAP-1045: кнопки строки одной высоты и ширины — при переносе во вторую
+     строку колонки они стоят ровно друг под другом, а не «лесенкой». */
+  min-width: 96px;
+  min-height: 28px;
+  white-space: nowrap;
 }
 
 /* Подписанные кнопки с иконкой: «Копировать pip», «Папка». */

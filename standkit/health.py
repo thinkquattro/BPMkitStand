@@ -491,10 +491,12 @@ def check_stand(
         return ProbeState.UNKNOWN, None
 
     def _probe_http() -> tuple[ProbeState, Optional[str]]:
-        if not (stand.stand_host and stand.stand_port):
+        # GAP-1037: адрес — Stand.web_url(): у удалённого стенда stand_url записи
+        # (порт по схеме, префикс пути), у локального — схема/хост/порт, как раньше.
+        base = stand.web_url()
+        if not base:
             return ProbeState.UNKNOWN, None
-        scheme = (stand.stand_scheme or "http").lower()
-        url = f"{scheme}://{stand.stand_host}:{stand.stand_port}{http_path}"
+        url = f"{base}{http_path}"
         result = http_probe(url, verify=stand.verify_tls)
         if result.ok:
             return ProbeState.OK, None

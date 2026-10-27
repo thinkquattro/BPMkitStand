@@ -847,3 +847,20 @@ class _QuietHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *args):  # тишина в выводе тестов
         pass
+
+
+
+class TestGap1037HttpProbeUrl:
+    """GAP-1037: проба удалённого стенда идёт по stand_url (порт по схеме, подпуть)."""
+
+    def test_probe_uses_stand_url_with_path_prefix(self):
+        port = _find_closed_port()
+        stand = _http_stand(stand_host="127.0.0.1", stand_port=0)
+        stand.extra["stand_url"] = f"http://127.0.0.1:{port}/crm/"
+        status = check_stand(stand)
+        assert status.http is ProbeState.DOWN
+        assert f"127.0.0.1:{port}/crm" in status.details["http_reason"]
+
+    def test_local_stand_without_port_stays_unknown(self):
+        stand = Stand(name="local0", stand_dir="C:/stand", stand_host="127.0.0.1", stand_port=0)
+        assert stand.web_url() is None
