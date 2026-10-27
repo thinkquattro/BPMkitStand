@@ -284,7 +284,7 @@ _REGISTER_ALLOWED_FIELDS = {
     "redis_port",
     "agent_url",
     "agent_secret_ref",
-    # GAP-1037: удалённый (http) стенд — адрес одной строкой (``stand_url``, его же
+    # удалённый (http) стенд — адрес одной строкой (``stand_url``, его же
     # первым читает BPMkit) и учётка администратора: логин и ССЫЛКА на пароль в
     # хранилище секретов (сам пароль через форму не проходит).
     "stand_url",
@@ -318,7 +318,7 @@ _OPTIONAL_STR_FIELDS = {
     "k8s_deployment", "secret_ref_db", "secret_ref_admin",
 }
 
-# GAP-1037: поля локального стенда, которых у удалённого (transport=http) нет по
+# поля локального стенда, которых у удалённого (transport=http) нет по
 # построению, и их «пустые» значения. Форма их для http скрывает, а сервер при
 # сохранении такой записи очищает — дефолты локального стенда (порт 5000, kestrel,
 # каталоги, Redis, движок) в запись удалённого стенда не попадают.
@@ -337,7 +337,7 @@ _HTTP_CLEARED_FIELDS = {
     "k8s_deployment": None,
 }
 
-# GAP-1037: поля БД, которые очищаются у удалённого стенда при снятом
+# поля БД, которые очищаются у удалённого стенда при снятом
 # переключателе «Есть доступ к БД» (тело запроса ``db_access: false``).
 _DB_CLEARED_FIELDS = {
     "db_host": "",
@@ -376,7 +376,7 @@ def _parse_stand_url(raw: str) -> tuple[Optional[dict], Optional[str]]:
 
 
 def _normalize_http_record(record: dict, body: dict, *, creating: bool) -> None:
-    """GAP-1037: запись удалённого стенда — адрес из ``stand_url``, без локальных полей.
+    """запись удалённого стенда — адрес из ``stand_url``, без локальных полей.
 
     Схема/хост/порт выводятся из ``stand_url`` (порт 0 — «по схеме»); без адреса при
     регистрации порт тоже 0, а не дефолт модели 5000. Локальные поля и движок
@@ -756,7 +756,7 @@ def _stand_entry(name: str, stand: Stand, status) -> dict:
     bpmkit_logs_available = logs_dir is not None
     # Схему берём из записи: стенд за TLS по http:// не откроется, а ссылка
     # «Открыть стенд» в дашборде вела бы в никуда (см. Stand.stand_scheme).
-    # GAP-1037: у удалённого стенда — stand_url (порт по схеме), см. Stand.web_url.
+    # у удалённого стенда — stand_url (порт по схеме), см. Stand.web_url.
     http_url = stand.web_url()
     return {
         "name": name,
@@ -2140,7 +2140,7 @@ def make_handler(
                 errors.append("secret_ref_db: недопустимая ссылка на секрет (буквы/цифры/._:-)")
                 bad_fields.append("secret_ref_db")
 
-            # GAP-1037: ссылка на пароль администратора и адрес удалённого стенда.
+            # ссылка на пароль администратора и адрес удалённого стенда.
             admin_ref = data.get("secret_ref_admin")
             if admin_ref and not _security.validate_secret_ref(str(admin_ref)):
                 errors.append("secret_ref_admin: недопустимая ссылка на секрет (буквы/цифры/._:-)")

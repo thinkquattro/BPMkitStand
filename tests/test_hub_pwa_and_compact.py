@@ -324,7 +324,7 @@ def test_snapshot_age_is_always_visible():
 
 
 class TestGap1048TransportColumnWraps:
-    """GAP-1048: «Транспорт» переносится, остальные колонки режутся, ширины те же."""
+    """«Транспорт» переносится, остальные колонки режутся, ширины те же."""
 
     def test_transport_cell_wraps_and_others_keep_ellipsis(self):
         import re

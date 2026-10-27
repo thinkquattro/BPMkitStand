@@ -284,7 +284,7 @@
                 <option value="http">http — удалённый, без агента</option>
               </select>
             </label>
-            <!-- GAP-1037: у удалённого (http) стенда хостинга «здесь» нет — поле скрыто. -->
+            <!-- у удалённого (http) стенда хостинга «здесь» нет — поле скрыто. -->
             <label class="register-local" data-hide-when-transport="http">Хостинг
               <select name="host_kind">
                 <option value="kestrel" selected>kestrel</option>
@@ -295,7 +295,7 @@
             </label>
           </div>
 
-          <!-- GAP-1037: удалённый стенд без агента — адрес одной строкой (как в
+          <!-- удалённый стенд без агента — адрес одной строкой (как в
                браузере), учётка администратора; локальные поля (хостинг, каталоги,
                схема/хост/порт, Redis, движок) скрыты, БД — по переключателю. -->
           <div class="register-conditional" data-when-transport="http" hidden>
@@ -316,7 +316,7 @@
                 <input type="text" name="admin_user" autocomplete="off" placeholder="Supervisor" />
               </label>
               <label>Секрет пароля (secret_ref_admin)
-                <input type="text" name="secret_ref_admin" autocomplete="off" placeholder="bpmsoft-mcp:имя:admin" />
+                <input type="text" name="secret_ref_admin" autocomplete="off" placeholder="standkit:имя:admin" />
               </label>
             </div>
             <label class="checkbox-label">
@@ -453,7 +453,7 @@
             </label>
           </div>
 
-          <!-- GAP-1037: у удалённого стенда поля БД — только при «Есть доступ к БД». -->
+          <!-- у удалённого стенда поля БД — только при «Есть доступ к БД». -->
           <div class="register-local" data-db-block>
           <div class="form-row">
             <label>Тип БД
@@ -1418,7 +1418,7 @@
                    скачан и проверен; сценарий — app.js::installUpdateFlow. -->
               <button type="button" id="upd-installer-btn" data-companion-action="apply_installer" hidden>Установить →</button>
               <button type="button" id="upd-installer-stage-btn" class="secondary" data-companion-action="stage_installer" hidden>Скачать установщик</button>
-              <!-- GAP-1045: версия известна, но не скачана — «Скачать» (ход на кнопке,
+              <!-- версия известна, но не скачана — «Скачать» (ход на кнопке,
                    отказ — чипом и строкой деталей) вместо выключенной «Установить». -->
               <button type="button" id="upd-stage-btn" data-companion-action="stage_update" hidden>Скачать</button>
               <button type="button" id="upd-install-btn" data-companion-action="apply_update" hidden>Установить →</button>

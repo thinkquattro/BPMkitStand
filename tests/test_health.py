@@ -851,7 +851,7 @@ class _QuietHandler(http.server.BaseHTTPRequestHandler):
 
 
 class TestGap1037HttpProbeUrl:
-    """GAP-1037: проба удалённого стенда идёт по stand_url (порт по схеме, подпуть)."""
+    """проба удалённого стенда идёт по stand_url (порт по схеме, подпуть)."""
 
     def test_probe_uses_stand_url_with_path_prefix(self):
         port = _find_closed_port()

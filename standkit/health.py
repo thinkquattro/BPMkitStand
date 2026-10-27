@@ -491,7 +491,7 @@ def check_stand(
         return ProbeState.UNKNOWN, None
 
     def _probe_http() -> tuple[ProbeState, Optional[str]]:
-        # GAP-1037: адрес — Stand.web_url(): у удалённого стенда stand_url записи
+        # адрес — Stand.web_url(): у удалённого стенда stand_url записи
         # (порт по схеме, префикс пути), у локального — схема/хост/порт, как раньше.
         base = stand.web_url()
         if not base:

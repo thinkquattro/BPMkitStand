@@ -704,7 +704,10 @@ def test_get_stand_config_returns_form_fields_and_secret_flag_but_no_secret(hub,
     assert cfg["db_user"] == "u" and cfg["secret_ref_db"] == "standkit:c1:db"
     assert cfg["engine"] == {"type": "workspaceconsole", "wsc_dll": "/x.dll"}
     assert set(cfg) <= set(_REGISTER_ALLOWED_FIELDS)
-    assert "topsecret" not in json.dumps(body) and "admin_user" not in cfg
+    # Логин администратора — не секрет: форма правит его у удалённого (http) стенда,
+    # поэтому он в записи формы есть; секреты (сам пароль) — по-прежнему нет.
+    assert "topsecret" not in json.dumps(body)
+    assert cfg.get("admin_user") == "Supervisor" and "admin_password" not in cfg
     assert _request(base_url, "/api/stand/ghost/config", token=token)[0] == 404
     assert _request(base_url, "/api/stand/c1/config")[0] == 401  # без токена/cookie
 

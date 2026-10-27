@@ -564,7 +564,7 @@ class CompanionState:
                 "restart_required": bool(rel.get("restart_required")),
                 "rollback_available": bool(rel.get("history")),
                 "resume_bytes": (rel.get("partial") or {}).get("bytes"),
-                # GAP-1045: полный размер недокачанного файла — окно «Обновления»
+                # полный размер недокачанного файла — окно «Обновления»
                 # пишет «скачано N из M МБ», а не голое число байт.
                 "resume_size_bytes": (rel.get("partial") or {}).get("size_bytes"),
                 # версия и момент старта РЕАЛЬНО работающего процесса (маркер

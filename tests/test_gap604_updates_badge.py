@@ -38,7 +38,7 @@ FUNCS = (
     "companionHasNews",
     "updateNotificationEvents",
     "actionUnavailableReason",
-    # GAP-1045: actionUnavailableReason берёт причину из mcpUpdateView.
+    # actionUnavailableReason берёт причину из mcpUpdateView.
     "formatMegabytes",
     "mcpUpdateView",
 )
@@ -183,7 +183,7 @@ def test_notifications_and_reasons_use_segment_compare_via_node(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# GAP-1045: строка MCP окна «Обновления» — «Скачать»/ход/ошибка вместо
+# строка MCP окна «Обновления» — «Скачать»/ход/ошибка вместо
 # выключенной «Установить», «Откатить» не рядом с доступным обновлением.
 # --------------------------------------------------------------------------
 
@@ -256,7 +256,7 @@ def _run_mcp_row_node(tmp_path) -> dict:
 
 
 class TestGap1045McpRow:
-    """GAP-1045: видимость кнопок строки MCP совпадает с их доступностью."""
+    """видимость кнопок строки MCP совпадает с их доступностью."""
 
     @pytest.mark.skipif(NODE is None, reason="node недоступен в этой среде")
     def test_known_but_not_staged_offers_download_not_disabled_install(self, tmp_path):

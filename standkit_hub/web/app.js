@@ -426,7 +426,7 @@
   // полей (agent_*/iis_*/docker_*/k8s_*), которые показываются по значению
   // select'ов transport/host_kind без сторонних либ.
 
-  /** GAP-1037: адрес удалённого стенда одной строкой → схема/хост/порт.
+  /** адрес удалённого стенда одной строкой → схема/хост/порт.
    * Адрес вставляют из браузера как есть; без схемы считаем https. Порт без явного
    * указания — 0 («по схеме»: 443/80), а не дефолт локального стенда 5000.
    * Префикс пути (стенд за прокси на подпути) сохраняется, хвостовой «/» снимается. */
@@ -487,7 +487,7 @@
     form.querySelectorAll(".register-conditional[data-when-transport]").forEach((el) => {
       el.hidden = el.dataset.whenTransport !== transport;
     });
-    // GAP-1037: локальные поля (хостинг, каталоги, схема/хост/порт, Redis, движок)
+    // локальные поля (хостинг, каталоги, схема/хост/порт, Redis, движок)
     // для transport=http скрыты; БД — только при «Есть доступ к БД».
     form.querySelectorAll("[data-hide-when-transport]").forEach((el) => {
       el.hidden = el.dataset.hideWhenTransport === transport;
@@ -596,7 +596,7 @@
     });
     setEngineField(cfg.engine && cfg.engine.type ? cfg.engine : null);
     if (cfg.transport === "http") {
-      // GAP-1037: запись без stand_url (заведена до поля адреса) — адрес собирается
+      // запись без stand_url (заведена до поля адреса) — адрес собирается
       // из схемы/хоста/порта; БД-блок открыт, если у записи есть адрес БД.
       if (!cfg.stand_url && cfg.stand_host) {
         const scheme = String(cfg.stand_scheme || "http").toLowerCase();
@@ -668,7 +668,7 @@
     "redis_port",
     "agent_url",
     "agent_secret_ref",
-    // GAP-1037: удалённый стенд — адрес одной строкой и учётка администратора
+    // удалённый стенд — адрес одной строкой и учётка администратора
     // (сам пароль — только в хранилище секретов, в форме лишь ссылка на него).
     "stand_url",
     "admin_user",
@@ -744,7 +744,7 @@
       else delete payload.redis_port;
     }
     if (payload.transport === "http") {
-      // GAP-1037: адрес — единственный источник схемы/хоста/порта удалённого стенда;
+      // адрес — единственный источник схемы/хоста/порта удалённого стенда;
       // порт без явного указания — 0 («по схеме»), дефолт 5000 сюда не утекает.
       // Redis удалённому стенду не нужен — пустая пара не шлётся вовсе.
       delete payload.redis_port;
@@ -764,7 +764,7 @@
     return payload;
   }
 
-  /** GAP-1037: что не так с формой удалённого стенда до отправки (или ""). */
+  /** что не так с формой удалённого стенда до отправки (или ""). */
   function registerHttpFormError(form) {
     if (form.elements.namedItem("transport").value !== "http") return "";
     const parsed = parseStandUrl(form.elements.namedItem("stand_url").value);
@@ -1164,7 +1164,7 @@
     form.elements.namedItem("transport").addEventListener("change", updateRegisterConditionalFields);
     form.elements.namedItem("host_kind").addEventListener("change", updateRegisterConditionalFields);
     form.elements.namedItem("stand_scheme").addEventListener("change", updateRegisterConditionalFields);
-    // GAP-1037: переключатель БД и адрес удалённого стенда (схема → verify_tls).
+    // переключатель БД и адрес удалённого стенда (схема → verify_tls).
     form.elements.namedItem("has_db").addEventListener("change", updateRegisterConditionalFields);
     form.elements.namedItem("stand_url").addEventListener("input", updateRegisterConditionalFields);
 
@@ -1484,7 +1484,7 @@
     // remote_host — показываем её как http, но с явным предупреждением, а не
     // молча (реестр мы не переписывали, и оператор должен знать почему).
     //
-    // GAP-1048: ячейка переносится (td.cell-transport), а не режется многоточием:
+    // ячейка переносится (td.cell-transport), а не режется многоточием:
     // вид и хост — отдельные span (перенос встаёт на разделитель «·», а не
     // посреди слова), бейдж — с новой строки, полный текст — в title.
     const warn = s.transport_warning || "";
@@ -1505,7 +1505,7 @@
     return `<span class="transport-value" title="${escapeAttr(full)}">${transportParts("агент", host)}</span>`;
   }
 
-  /** «вид · хост» двумя span: строка переносится по разделителю (GAP-1048). */
+  /** «вид · хост» двумя span: строка переносится по разделителю. */
   function transportParts(kind, host) {
     const kindHtml = `<span class="transport-kind">${escapeHtml(kind)}</span>`;
     return host
@@ -3149,7 +3149,7 @@
   const COMPANION_ACTION_BUSY = {
     sync_patterns: "Обновляем…",
     check_update: "Проверяем…",
-    // GAP-1045: ход скачивания MCP виден на самой кнопке «Скачать».
+    // ход скачивания MCP виден на самой кнопке «Скачать».
     stage_update: "Скачиваем…",
     apply_update: "Устанавливаем…",
     rollback: "Откатываем…",
@@ -4159,7 +4159,7 @@
     return `${(n / 1048576).toFixed(1).replace(".", ",")} МБ`;
   }
 
-  /** GAP-1045: что показывать в строке MCP окна «Обновления».
+  /** что показывать в строке MCP окна «Обновления».
    *
    * Видимость и доступность кнопок считаются по ОДНОМУ условию: «Установить» —
    * только при `actions.apply_update` (файл версии скачан и проверен), иначе она
@@ -4229,7 +4229,7 @@
           ? "Версия установленной поставки (manifest.json)"
           : "");
     }
-    // GAP-1045: что делать со строкой (скачать / установить / откатить) — одна
+    // что делать со строкой (скачать / установить / откатить) — одна
     // чистая функция `mcpUpdateView`, её же проверяет тест в node.
     const view = mcpUpdateView(status);
     if (installerRequired) {
@@ -4267,7 +4267,7 @@
     if (!companionBusy && install.dataset.idleLabel === undefined) {
       install.textContent = "Установить →";
     }
-    // GAP-1045: «Установить» видна, только когда её можно нажать (файл версии
+    // «Установить» видна, только когда её можно нажать (файл версии
     // скачан и проверен — `actions.apply_update`). Версия известна, но не скачана —
     // вместо выключенной «Установить» кнопка «Скачать» (ход — на ней же, отказ —
     // чипом «не скачана» и причиной в строке деталей).
@@ -4281,7 +4281,7 @@
     }
 
     // «Откатить» — только когда откат реально возможен И рядом нет доступного
-    // обновления (GAP-1045: откат рядом с новой версией только путал).
+    // обновления (откат рядом с новой версией только путал).
     byId("upd-rollback-btn").hidden = !view.rollback;
 
     const note = byId("upd-restart-note");
@@ -4807,7 +4807,7 @@
         return "Эта версия ставится установщиком — тихая доставка невозможна. " +
           "Скачайте новую поставку у издателя BPMkit и запустите установку.";
       }
-      // GAP-1045: явная причина вместо общей фразы — версия известна, но не скачана.
+      // явная причина вместо общей фразы — версия известна, но не скачана.
       if (action === "apply_update" && rel.update_available && !rel.requires_installer &&
           !rel.staged_version) {
         const view = mcpUpdateView(status);

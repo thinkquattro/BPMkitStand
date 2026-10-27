@@ -404,7 +404,7 @@ def test_collect_register_payload_skips_hidden_conditional_blocks():
     (пустая строка отсекалась), для чекбокса — нет.
     """
     body = _collect_register_payload_source()
-    # GAP-1037: проверка вынесена в inHiddenRegisterBlock — она смотрит на ВСЕ
+    # проверка вынесена в inHiddenRegisterBlock — она смотрит на ВСЕ
     # скрытые блоки-предки (вложенные локальные поля удалённого стенда).
     assert "inHiddenRegisterBlock(input)" in body
     helper = re.search(r"function inHiddenRegisterBlock\(input\) \{(.*?)\n  \}", _app_js(), re.S)
@@ -604,7 +604,7 @@ def test_register_rejects_agent_ca_over_plain_http(tmp_path):
 
 
 
-# --- GAP-1037: удалённый (http) стенд в форме регистрации ---------------------
+# --- удалённый (http) стенд в форме регистрации ---------------------
 
 
 class TestGap1037HttpStandForm:
@@ -623,7 +623,7 @@ class TestGap1037HttpStandForm:
             "transport": "http",
             "stand_url": "https://crm.example.test/crm/",
             "admin_user": "Supervisor",
-            "secret_ref_admin": "bpmsoft-mcp:remote-http:admin",
+            "secret_ref_admin": "standkit:remote-http:admin",
             # локальные поля, если их всё-таки прислали, в запись не попадают
             "host_kind": "iis",
             "iis_site": "Site",
@@ -639,7 +639,7 @@ class TestGap1037HttpStandForm:
         assert stand.web_url() == "https://crm.example.test/crm"
         assert stand.stand_dir == "" and stand.host_kind.value == "kestrel" and stand.iis_site is None
         assert (stand.redis_host, stand.redis_port) == ("", 0)
-        assert (stand.admin_user, stand.secret_ref_admin) == ("Supervisor", "bpmsoft-mcp:remote-http:admin")
+        assert (stand.admin_user, stand.secret_ref_admin) == ("Supervisor", "standkit:remote-http:admin")
 
     def test_http_stand_explicit_port_in_url_is_kept(self, tmp_path):
         status, body, registry_path, _ = self._register(tmp_path, {
