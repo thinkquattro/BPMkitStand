@@ -39,6 +39,7 @@ from typing import Optional
 
 from standkit import __version__ as _standkit_version
 from standkit_hub.installed_exe import is_frozen_hub_executable
+from standkit_hub.self_version import compare_versions as _compare_versions
 from standkit.platform import (
     ProcessError,
     current_session_id,
@@ -443,19 +444,34 @@ def should_takeover(
         return True
     if running is None:
         return False
-    # pip-диспетчер (our_frozen=False) НИКОГДА не отбирает порт у exe из
-    # установщика -- иначе старый ярлык/забытый pip-пакет снова и снова подменял
-    # поставочный диспетчер своей (не обновляемой) версией. Обратное разрешено:
-    # exe вытесняет pip-экземпляр обычным версионным правилом ниже.
+    # pip-диспетчер (our_frozen=False) не отбирает порт у exe из установщика --
+    # иначе старый ярлык/забытый pip-пакет снова и снова подменял поставочный
+    # диспетчер своей (не обновляемой) версией. Исключение -- exe заведомо СТАРЕЕ
+    # (версия известна и меньше нашей): оставлять окно у него значит откатить
+    # интерфейс (29.10.2026: exe standkit 0.10 без меню «Справка» с двумя кукбуками
+    # держал порт при pip 0.12.28). Неизвестная версия exe -- прежнее «не трогаем».
+    pip_newer = bool(our_version) and bool(running.version) and \
+        _compare_versions(our_version, running.version) > 0
     if our_frozen is False:
         if is_frozen_hub_executable(running.executable):
-            return False
-    # Обратное правило: exe из установщика вытесняет pip-экземпляр ВСЕГДА, даже при
-    # равных версиях -- после покупки подписки окно должно открываться у поставочного
-    # диспетчера, а не у оставшегося с бесплатной pip-установки.
+            if not pip_newer or no_takeover:
+                return False
+            if our_sid and running.user_sid and our_sid != running.user_sid:
+                return False
+            return True
+    # Обратное правило: exe из установщика вытесняет pip-экземпляр даже при равных
+    # версиях -- после покупки подписки окно должно открываться у поставочного
+    # диспетчера, а не у оставшегося с бесплатной pip-установки. Но не pip-экземпляр
+    # НОВЕЕ себя (тот же откат интерфейса, что выше, с другой стороны): тогда exe
+    # уступает и открывает окно работающего; перехват остаётся только ради прав
+    # администратора («мы elevated, а он нет»).
     if our_frozen is True and running.executable:
         if not is_frozen_hub_executable(running.executable) and not (our_sid and running.user_sid and our_sid != running.user_sid):
-            return True
+            running_newer = bool(our_version) and bool(running.version) and \
+                _compare_versions(running.version, our_version) > 0
+            if not running_newer:
+                return True
+            return bool(we_elevated) and running.elevated is False
     if our_sid and running.user_sid and our_sid != running.user_sid:
         return False
     # работающий хаб недавно отверг заход без сессии (см. mark_unauthorized) --

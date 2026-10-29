@@ -466,7 +466,8 @@ code{background:rgba(127,127,127,.15);padding:1px 5px;border-radius:4px}
 <ul>
 <li>в профиле — <code>%APPDATA%\\BPMkit\\docs\\cookbook.html</code>;</li>
 <li>в папке установки BPMkit — <code>&lt;папка BPMkit&gt;\\docs\\cookbook.html</code>
-(папку диспетчер узнаёт от запущенного MCP-сервера).</li>
+(папку диспетчер узнаёт по записи установщика BPMkit, по своему
+расположению и от запущенного MCP-сервера).</li>
 </ul>
 <p>Если BPMkit установлен — запустите Claude Desktop (или другой клиент с MCP BPMkit)
 и обновите эту страницу. Если BPMkit не установлен — о продукте и установке:
