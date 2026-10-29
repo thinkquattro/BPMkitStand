@@ -476,6 +476,41 @@ code{background:rgba(127,127,127,.15);padding:1px 5px;border-radius:4px}
 """
 
 
+#: Потолок размера файла в снимке ``web/`` (байт): снимок нужен для интерфейса, а не для
+#: произвольных вложений; всё крупнее просто не попадает в запасной ответ.
+_WEB_SNAPSHOT_MAX_FILE = 4 * 1024 * 1024
+
+
+def _snapshot_web_dir(web_dir: Path) -> "dict[str, tuple[bytes, int]]":
+    """Снимок статики ``web/`` в памяти: ``{относительный posix-путь: (байты, mtime_ns)}``.
+
+    ЗАЧЕМ (29.10.2026, «index.html не найден в пакете хаба»). В exe-сборке (PyInstaller
+    onefile) ``web/`` лежит во временном ``_MEIxxxx``. Если каталог у работающего
+    диспетчера вынесла посторонняя уборка (прежняя сборка уборки ``_MEI*`` переименовывала
+    каталог с загруженными DLL и удаляла из него всё остальное), процесс остаётся живым,
+    порт слушает, а страница отвечает 500 -- и вылечить это снаружи нельзя, пока процесс не
+    перезапущен. Снимок берётся ОДИН раз при создании обработчика и используется ТОЛЬКО как
+    запасной ответ, когда файл на диске пропал: пока файл есть, читается он, поэтому
+    сверка версии статики с диском (``__STANDKIT_BUILD__``) и обновление пакета на ходу
+    работают как раньше.
+
+    Никогда не бросает: нечитаемый файл просто не попадает в снимок."""
+    snapshot: "dict[str, tuple[bytes, int]]" = {}
+    try:
+        files = [p for p in web_dir.rglob("*") if p.is_file()]
+    except OSError:
+        return snapshot
+    for path in files:
+        try:
+            st = path.stat()
+            if st.st_size > _WEB_SNAPSHOT_MAX_FILE:
+                continue
+            snapshot[path.relative_to(web_dir).as_posix()] = (path.read_bytes(), st.st_mtime_ns)
+        except (OSError, ValueError):
+            continue
+    return snapshot
+
+
 def _static_cache_control(target: Path) -> str:
     if target.suffix.lower() in _STATIC_LONG_CACHE_SUFFIXES:
         return _STATIC_CACHE_CONTROL_ASSET
@@ -1309,6 +1344,16 @@ def make_handler(
     что ``standkit_agent.server.make_handler``.
     """
     web_dir = web_dir or _DEFAULT_WEB_DIR
+    web_snapshot = _snapshot_web_dir(web_dir)
+    web_fallback_logged: "set[str]" = set()
+
+    def _note_web_fallback(rel: str) -> None:
+        if rel in web_fallback_logged:
+            return
+        web_fallback_logged.add(rel)
+        _log.warning(
+            "статика %s пропала с диска (%s) -- отдаю копию из памяти процесса; "
+            "перезапустите диспетчер, чтобы вернуть каталог web/", rel, web_dir)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "standkit-hub/0.1"
@@ -1426,13 +1471,22 @@ def make_handler(
             view: str = _DEFAULT_VIEW,
         ) -> None:
             index_path = web_dir / "index.html"
-            if not index_path.is_file():
-                self._send_json(500, {"error": "index.html не найден в пакете хаба"})
-                return
+            text = None
+            if index_path.is_file():
+                try:
+                    text = index_path.read_text(encoding="utf-8")
+                except OSError:
+                    text = None
+            if text is None:
+                cached = web_snapshot.get("index.html")
+                if cached is None:
+                    self._send_json(500, {"error": "index.html не найден в пакете хаба"})
+                    return
+                _note_web_fallback("index.html")
+                text = cached[0].decode("utf-8")
             # Токен инжектим в <meta> ТОЛЬКО аутентифицированному запросу (см.
             # _handle_root). Неаутентифицированному — плейсхолдер очищается в пустоту,
             # токен не утекает.
-            text = index_path.read_text(encoding="utf-8")
             text = text.replace("__STANDKIT_TOKEN__", inject_token or "")
             # Тема подставляется прямо в data-theme <html> — она применяется
             # ДО загрузки/выполнения JS, поэтому у пользователя тёмной темы нет
@@ -1480,20 +1534,33 @@ def make_handler(
             Санитайзинг пути (traversal) — прежний, в ``sanitize_static_path``.
             """
             target = _security.sanitize_static_path(web_dir, rel_path)
-            if target is None:
-                self._send_json(404, {"error": "not found"})
-                return
-            try:
-                st = target.stat()
-            except OSError:
-                self._send_json(404, {"error": "not found"})
-                return
+            cached = None
+            st = None
+            if target is not None:
+                try:
+                    st = target.stat()
+                except OSError:
+                    st = None
+            if st is None:
+                # Файла на диске нет. Запасной ответ -- только из снимка, ключи которого
+                # заведомо лежали внутри web/ (traversal через снимок невозможен).
+                cached = web_snapshot.get(Path(rel_path).as_posix()) if rel_path else None
+                if cached is None or ".." in Path(rel_path).parts or rel_path.startswith("/"):
+                    self._send_json(404, {"error": "not found"})
+                    return
+                _note_web_fallback(rel_path)
+                target = web_dir / rel_path
 
-            etag = _static_etag(st.st_size, st.st_mtime_ns)
+            if cached is not None:
+                size, mtime_ns = len(cached[0]), cached[1]
+                mtime = mtime_ns / 1e9
+            else:
+                size, mtime_ns, mtime = st.st_size, st.st_mtime_ns, st.st_mtime
+            etag = _static_etag(size, mtime_ns)
             cache_control = _static_cache_control(target)
-            last_modified = formatdate(st.st_mtime, usegmt=True)
+            last_modified = formatdate(mtime, usegmt=True)
 
-            if _is_not_modified(self.headers, etag=etag, mtime=st.st_mtime):
+            if _is_not_modified(self.headers, etag=etag, mtime=mtime):
                 self.send_response(304)
                 self.send_header("ETag", etag)
                 self.send_header("Last-Modified", last_modified)
@@ -1502,7 +1569,7 @@ def make_handler(
                 return
 
             content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-            body = target.read_bytes()
+            body = cached[0] if cached is not None else target.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
