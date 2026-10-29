@@ -21,11 +21,20 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 import standkit_hub.server as server_module
 from standkit_hub import bpmkit_cookbook
 from tests.test_hub_server import _close_hub_servers, _start_hub  # noqa: F401 - autouse-фикстура
 
 WEB_DIR = Path(server_module.__file__).parent / "web"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_install_dirs(monkeypatch):
+    """Поиск по каталогу установки (реестр/по умолчанию/свой exe) не должен видеть
+    настоящую поставку BPMkit на машине, где гоняются тесты."""
+    monkeypatch.setattr(bpmkit_cookbook, "_install_dirs", lambda: [])
 
 
 def _doc(version: str | None, marker: str = "") -> str:

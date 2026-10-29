@@ -385,7 +385,7 @@ def test_ui_whatsnew_categories_fixed_order_and_fold():
     5 пунктов, остальное — по «и ещё N»."""
     js = (_web_dir() / "app.js").read_text(encoding="utf-8")
     order = ["Главное", "Обновления от BPMSoft", "Удалённые стенды и BPMSoft 2.0",
-             "Ассистент для пользователей", "Данные и пакеты", "Страницы и схемы",
+             "BPMkit Server", "Ассистент для пользователей", "Данные и пакеты", "Страницы и схемы",
              "Документы", "Надёжность и исправления", "Другое"]
     block = js[js.index("const WHATSNEW_ORDER"):js.index("const WHATSNEW_VISIBLE")]
     positions = [block.index(f'"{name}"') for name in order]

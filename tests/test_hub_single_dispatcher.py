@@ -68,7 +68,13 @@ def _running(exe):
 
 
 def test_pip_never_takes_over_installer_exe():
+    # exe той же или более новой версии pip не трогает (даже elevated); exe СТАРЕЕ --
+    # см. tests/test_hub_help_both_cookbooks.py.
     run = _running(r"C:\Users\u\AppData\Local\Programs\BPMkit\BPMkit-hub.exe")
+    run.version = "9.9.9"
+    assert instance.should_takeover(run, we_elevated=True, our_version="9.9.9",
+                                    our_frozen=False) is False
+    run.version = "10.0.0"
     assert instance.should_takeover(run, we_elevated=True, our_version="9.9.9",
                                     our_frozen=False) is False
     # явный --takeover (кнопка «перезапустить») по-прежнему решает пользователь

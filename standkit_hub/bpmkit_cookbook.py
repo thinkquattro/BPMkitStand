@@ -15,7 +15,13 @@
 * поставка — ``{app}\\docs\\cookbook.html`` рядом с установленным MCP. Каталог
   установки хаб узнаёт из маркера работающего MCP ``mcp_runtime.json``
   (поле ``binary`` = ``{app}\\server\\BPMkit.exe``) — тот же путь, что
-  у ``standkit_companion.cookbook._shipped_path``.
+  у ``standkit_companion.cookbook._shipped_path``, — а ТАКЖЕ независимо от
+  маркера: из записи деинсталляции установщика / каталога по умолчанию
+  (``standkit_hub.installed_exe.install_dirs``) и из каталога самого
+  ``BPMkit-hub.exe`` (exe-сборка лежит в ``{app}``). Маркер один на машину и
+  пишется последним стартовавшим MCP: после релизного смоука или самопереноса
+  его ``binary`` указывает во временную песочницу или в ``run\\<версия>``, и
+  поиск только по маркеру терял копию поставки.
 
 Побеждает НОВЕЙШАЯ копия — те же правила, что у ``installed_version`` канала: числовой префикс версии из ``<meta name="bpmkit-cookbook-version">``
 посегментно целыми числами, при равенстве — время файла; копия без
@@ -33,6 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 from standkit.registry import bpmkit_config_dir
+from standkit_hub import installed_exe as _installed_exe
 
 __all__ = ["COOKBOOK_FILENAME", "candidates", "find_cookbook", "read_version"]
 
@@ -103,23 +110,49 @@ def _shipped_from_marker(marker_path: Path) -> Optional[Path]:
     return Path(binary).parent.parent / "docs" / COOKBOOK_FILENAME
 
 
+def _install_dirs() -> list:
+    """Каталоги установки BPMkit, известные без маркера MCP: каталог работающего
+    ``BPMkit-hub.exe`` (exe-сборка) и места установщика (реестр/по умолчанию).
+    Отдельная функция — тесты подменяют её одной точкой."""
+    out = []
+    if getattr(sys, "frozen", False) and _installed_exe.is_frozen_hub_executable(sys.executable):
+        out.append(str(Path(sys.executable).parent))
+    for item in _installed_exe.install_dirs():
+        if item not in out:
+            out.append(item)
+    return out
+
+
 def candidates(config_dir: Optional[Path] = None,
-               marker_path: Optional[Path] = None) -> list:
-    """Пути, где может лежать кукбук BPMkit, в порядке поиска (профиль, поставка).
-    Существование не проверяется — это делает ``find_cookbook``."""
+               marker_path: Optional[Path] = None,
+               install_dirs: Optional[list] = None) -> list:
+    """Пути, где может лежать кукбук BPMkit, в порядке поиска (профиль, поставка
+    по маркеру MCP, поставка по каталогу установки). Существование не
+    проверяется — это делает ``find_cookbook``. ``install_dirs=None`` —
+    узнать каталоги установки самому (``_install_dirs``)."""
     base = Path(config_dir) if config_dir else bpmkit_config_dir()
     out = [("профиль", base / "docs" / COOKBOOK_FILENAME)]
+    seen = {str(out[0][1]).lower()}
     shipped = _shipped_from_marker(marker_path or _runtime_marker_path())
     if shipped is not None:
         out.append(("поставка", shipped))
+        seen.add(str(shipped).lower())
+    dirs = _install_dirs() if install_dirs is None else install_dirs
+    for directory in dirs:
+        path = Path(directory) / "docs" / COOKBOOK_FILENAME
+        if str(path).lower() in seen:
+            continue
+        seen.add(str(path).lower())
+        out.append(("поставка", path))
     return out
 
 
 def find_cookbook(config_dir: Optional[Path] = None,
-                  marker_path: Optional[Path] = None) -> Optional[dict]:
+                  marker_path: Optional[Path] = None,
+                  install_dirs: Optional[list] = None) -> Optional[dict]:
     """Самая свежая существующая копия: ``{origin, path, version}`` либо ``None``."""
     found = []
-    for origin, path in candidates(config_dir, marker_path):
+    for origin, path in candidates(config_dir, marker_path, install_dirs):
         try:
             st = Path(path).stat()
         except OSError:

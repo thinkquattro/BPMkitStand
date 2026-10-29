@@ -51,6 +51,7 @@ from standkit_hub.security import InsecureBindError, generate_session_token
 from standkit_hub.server import DEFAULT_HUB_PORT, HubAlreadyRunning, bind_hub_server
 from standkit_hub.shortcut import install_desktop_shortcut, uninstall_desktop_shortcut
 from standkit_hub import installed_exe as _installed_exe
+from standkit_hub import self_version as _self_version
 
 # Лог диспетчера. Под pythonw.exe stderr не подключён никуда,
 # поэтому всё, что объясняет отказ или завершение, идёт в файл.
@@ -358,7 +359,20 @@ def _should_hand_over_to_installed_exe(args) -> bool:
                args.apply_self_update, args.hub_stop, args.session_token_file)
     if any(service):
         return False
-    return bool(_installed_exe.find_installed_hub_exe())
+    exe = _installed_exe.find_installed_hub_exe()
+    if not exe:
+        return False
+    # exe СТАРЕЕ этого pip-пакета -- не передаём: это откат интерфейса (старый exe
+    # без меню «Справка», без новых окон). Версия exe неизвестна -- прежнее правило.
+    installed = _installed_exe.installed_hub_version(exe)
+    if installed and _self_version.compare_versions(installed, _standkit_version) < 0:
+        _log.warning(
+            f"диспетчер из установщика ({exe}, standkit {installed}) старее этого "
+            f"pip-пакета (standkit {_standkit_version}) -- управление ему не передаю, "
+            f"работает pip-диспетчер. Обновите BPMkit установщиком, чтобы остался один диспетчер."
+        )
+        return False
+    return True
 
 
 def _safe_console_streams() -> None:
