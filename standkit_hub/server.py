@@ -77,6 +77,7 @@ from standkit.registry import Registry, RegistryError, default_registry_path
 from standkit.secrets import SecretError, delete_secret, has_secret, set_secret
 from standkit_hub import bpmkit_cookbook as _bpmkit_cookbook
 from standkit_hub import consent_api
+from standkit_hub import diag_api
 from standkit_hub import license_api
 from standkit_hub import logs_browser
 from standkit_hub import pick_dialog
@@ -3203,7 +3204,15 @@ def make_handler(
             return _load_config(config_path).companion
 
         def _license_snapshot(self) -> dict:
-            return license_api.license_info(self._license_settings())
+            snapshot = license_api.license_info(self._license_settings())
+            # последний результат пробы связи этого процесса хаба —
+            # баннер «не может подтвердить лицензию» показывает его и после
+            # перезагрузки вкладки. В кэш сводки не попадает (живёт своим сроком).
+            probe = license_api.last_net_probe()
+            if probe is not None and snapshot.get("edition") == license_api.EDITION_COMPANION:
+                snapshot = dict(snapshot)
+                snapshot["net_probe_last"] = probe
+            return snapshot
 
         def _send_license_error(self, exc: "license_api.LicenseCliError") -> None:
             self._send_json(exc.status, exc.to_dict())
@@ -3263,6 +3272,45 @@ def make_handler(
                 self._send_license_error(exc)
                 return
             self._send_license_ok(extra=result)
+
+        def _api_license_net_probe(self) -> None:
+            """``POST /api/license/net-probe`` — проба связи с сервером активации:
+            ``setup net-probe --json``. Ответ ``{"ok": true, "probe": {...}}``:
+            ``ok`` — что CLI отработал, итог пробы — в ``probe.ok``. Тело запроса не
+            читается (адрес сервера берёт сам MCP из своей конфигурации)."""
+            try:
+                probe = license_api.net_probe(self._license_settings())
+            except license_api.LicenseCliError as exc:
+                self._send_license_error(exc)
+                return
+            self._send_json(200, {"ok": True, "probe": probe})
+
+        def _api_license_refresh(self) -> None:
+            """``POST /api/license/refresh`` — «Повторить активацию»:
+            немедленная онлайн-сверка мимо часового интервала MCP. Ответ — свежий
+            снимок той же формы, что ``GET /api/license``."""
+            try:
+                license_api.license_refresh(self._license_settings())
+            except license_api.LicenseCliError as exc:
+                self._send_license_error(exc)
+                return
+            self._send_license_ok()
+
+        def _api_diag_bundle(self) -> None:
+            """``POST /api/diag/bundle`` — собрать архив диагностики:
+            ``setup diag-bundle --json``. По сети ничего не отправляется."""
+            try:
+                result = diag_api.diag_bundle(self._license_settings())
+            except license_api.LicenseCliError as exc:
+                self._send_license_error(exc)
+                return
+            self._send_json(200, result)
+
+        def _api_diag_open_folder(self) -> None:
+            """``POST /api/diag/open-folder`` — открыть папку ПОСЛЕДНЕГО архива,
+            собранного этим процессом. Путь из тела запроса не принимается."""
+            ok, message = diag_api.open_last_bundle_folder()
+            self._send_json(200 if ok else 400, {"ok": ok, "message": message})
 
         def _send_license_ok(self, *, extra: Optional[dict] = None) -> None:
             """Успех мутации = свежий снимок лицензии плюс поля исхода операции.
@@ -3849,6 +3897,33 @@ def make_handler(
                 if not self._authorize_mutation():
                     return
                 self._api_license_file()
+                return
+
+            # проба связи, повтор активации, архив диагностики —
+            # запускают процесс CLI и ходят в сеть/на диск, поэтому авторизуются как
+            # мутации (double-submit + локальный Origin), хотя ключ не меняют.
+            if path == "/api/license/net-probe":
+                if not self._authorize_mutation():
+                    return
+                self._api_license_net_probe()
+                return
+
+            if path == "/api/license/refresh":
+                if not self._authorize_mutation():
+                    return
+                self._api_license_refresh()
+                return
+
+            if path == "/api/diag/bundle":
+                if not self._authorize_mutation():
+                    return
+                self._api_diag_bundle()
+                return
+
+            if path == "/api/diag/open-folder":
+                if not self._authorize_mutation():
+                    return
+                self._api_diag_open_folder()
                 return
 
             if path == "/api/consent":

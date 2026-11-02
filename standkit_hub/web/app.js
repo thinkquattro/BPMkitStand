@@ -5034,6 +5034,12 @@
   const LICENSE_UNKNOWN_STATUSES = ["none", "unavailable"];
   const LICENSE_CHANNEL_STATUSES = ["valid", "expiring"];
   const LICENSE_CRIT_SEEN_KEY = "standkit_license_crit_seen";
+  // модалка «не может подтвердить лицензию» — ОДИН раз на license_id
+  // (localStorage, а не sessionStorage: это предупреждение, не отказ, и повторять
+  // его в каждой новой вкладке — травля; баннер при этом виден всегда).
+  const LICENSE_NOTICE_SEEN_KEY = "standkit_license_notice_seen";
+  // автозапуск пробы связи — один раз на неудачную попытку активации.
+  const LICENSE_PROBE_DONE_KEY = "standkit_license_probe_done";
 
   const LICENSE_STATE_LABELS = {
     valid: ["действует", "lic-ok"],
@@ -5077,10 +5083,148 @@
     if (overlay) overlay.hidden = true;
   }
 
+  /**
+   * тексты истёкшей лицензии по причине (``expired_cause`` сводки MCP —
+   * вычисляется вместе с ``verify_license``, хаб её не выводит сам).
+   *
+   * activation_window — ключ «N дней с первой активации» не активирован на этом
+   * компьютере до ``activate_by``: дата — ``expires_effective``/``activate_by``,
+   * НЕ ``expires_at`` (до активации это потолок, и «истекла 07.11» второго числа
+   * читается как ошибка BPMkit). term / expires_at — прежний текст с эффективной
+   * датой. Старый MCP без поля — прежний текст по ``expires_at``.
+   * Сырая ошибка онлайн-контура (``last_online_error``) — только в ``detail``
+   * (под «Подробности»), не в тексте.
+   */
+  function licenseExpiredView(snapshot) {
+    const snap = snapshot || {};
+    const licensee = snap.licensee || "BPMkit";
+    const cause = typeof snap.expired_cause === "string" ? snap.expired_cause : "";
+    const detail = String(snap.last_online_error || "").trim();
+    if (cause === "activation_window") {
+      const date = formatDate(snap.expires_effective || snap.activate_by || "");
+      const why = String(snap.activation_last_error_message_ru || "").trim().replace(/[.\s]+$/, "");
+      const until = date ? ` до ${date}` : "";
+      return {
+        cause,
+        date,
+        probe: true,
+        detail,
+        modalTitle: "Лицензия не активирована",
+        modalBody:
+          `Лицензию ${licensee} не удалось активировать на этом компьютере${until}` +
+          (why ? `: ${why}` : "") +
+          ". Платные инструменты BPMkit отключены. Обратитесь к издателю за новым " +
+          "ключом и проверьте доступ к серверу активации.",
+        bannerTitle: "Лицензия не активирована",
+        bannerText:
+          ` — не удалось активировать на этом компьютере${until}` +
+          (why ? `: ${why}` : "") +
+          ". Платные инструменты BPMkit отключены — обратитесь к издателю за новым " +
+          "ключом и проверьте доступ к серверу активации.",
+        stateLabel: "не активирована",
+        statusBold: date ? `не активирована до ${date}` : "не активирована",
+      };
+    }
+    const date = formatDate(snap.expires_effective || snap.expires_at);
+    return {
+      cause,
+      date,
+      probe: false,
+      detail: "",
+      modalTitle: "Срок лицензии истёк",
+      modalBody:
+        `Лицензия ${licensee} закончилась ${date}. ` +
+        "Платные инструменты BPMkit отключены, диспетчер продолжает управлять стендами " +
+        "в свободной редакции. Продлите лицензию и добавьте новый ключ.",
+      bannerTitle: "Срок лицензии истёк",
+      bannerText: ` ${date}. Платные инструменты BPMkit отключены — продлите лицензию.`,
+      stateLabel: "истекла",
+      statusBold: "истекла",
+    };
+  }
+
+  /** «осталось 2 дня» / «осталось 5 ч.» по ``activation_hours_left``. */
+  function activationLeftText(hoursLeft) {
+    const hours = Number(hoursLeft);
+    if (hoursLeft === null || hoursLeft === undefined || hoursLeft === "" ||
+        !Number.isFinite(hours) || hours < 0) return "";
+    if (hours < 24) return `${Math.max(1, Math.ceil(hours))} ч.`;
+    return pluralDays(Math.ceil(hours / 24));
+  }
+
+  /**
+   * «BPMkit не может подтвердить лицензию на этом компьютере» — баннер
+   * warn/crit по ``activation_notice_level`` (MCP ставит его при pending и хотя бы
+   * одной неудачной попытке; crit — последние 24 ч до эффективного срока
+   * ``activation_effective_deadline``). ``probe`` — последний результат пробы
+   * связи: его класс дописывается к тексту. ``null`` — баннера нет.
+   */
+  function licenseActivationNoticeView(snapshot, probe) {
+    const snap = snapshot || {};
+    const level = snap.activation_notice_level;
+    if (level !== "warn" && level !== "crit") return null;
+    const licensee = snap.licensee || "BPMkit";
+    const why = String(snap.activation_last_error_message_ru || "").trim().replace(/[.\s]+$/, "")
+      || "сервер активации не ответил";
+    const deadline = formatDate(snap.activation_effective_deadline || snap.activation_deadline || "");
+    const left = activationLeftText(snap.activation_hours_left);
+    let tail = "";
+    if (left && deadline) tail = ` Осталось ${left} (до ${deadline}).`;
+    else if (left) tail = ` Осталось ${left}.`;
+    else if (deadline) tail = ` Срок — до ${deadline}.`;
+    let probeLine = "";
+    const p = probe && typeof probe === "object" ? probe : null;
+    if (p && p.ok) {
+      probeLine = " Проверка связи сейчас проходит — нажмите «Повторить активацию».";
+    } else if (p && p.message_ru) {
+      probeLine = ` Проверка связи: ${String(p.message_ru).trim().replace(/[.\s]+$/, "")}.`;
+    }
+    return {
+      level,
+      title: "BPMkit не может подтвердить лицензию на этом компьютере",
+      text: `: ${why}.${tail}${probeLine}`,
+      itText: p && !p.ok ? String(p.it_text_ru || "") : "",
+      detail: String(snap.last_online_error || "").trim(),
+      modalTitle: "BPMkit не может подтвердить лицензию",
+      modalBody:
+        `Лицензию ${licensee} пока не удалось активировать на этом компьютере: ${why}.` +
+        (left || deadline
+          ? ` Осталось ${left || "немного"}${deadline ? ` (до ${deadline})` : ""} — после этого ` +
+            "платные инструменты BPMkit отключатся."
+          : "") +
+        " Проверьте связь с сервером активации и при необходимости передайте текст " +
+        "для ИТ-службы.",
+    };
+  }
+
+  /** Ключ памяти модалки истёкшей/отозванной лицензии: статус, хвост ID, причина. */
+  function licenseCritModalKey(snapshot) {
+    const snap = snapshot || {};
+    const cause = snap.status === "expired" && snap.expired_cause ? `:${snap.expired_cause}` : "";
+    return `${snap.status}:${snap.license_id_tail || ""}${cause}`;
+  }
+
+  function setLicenseCritDetails(detail) {
+    const box = byId("license-crit-details");
+    if (!box) return;
+    const text = String(detail || "").trim();
+    byId("license-crit-details-text").textContent = text;
+    box.hidden = !text;
+    box.open = false;
+  }
+
+  function setLicenseCritProbe(visible) {
+    const btn = byId("license-crit-probe-btn");
+    if (btn) btn.hidden = !visible;
+  }
+
   function maybeShowLicenseCritModal(snapshot) {
     const status = snapshot.status;
-    if (LICENSE_CRIT_STATUSES.indexOf(status) < 0) return;
-    const key = `${status}:${snapshot.license_id_tail || ""}`;
+    if (LICENSE_CRIT_STATUSES.indexOf(status) < 0) {
+      maybeShowActivationNoticeModal(snapshot);
+      return;
+    }
+    const key = licenseCritModalKey(snapshot);
     if (licenseCritSeen(key)) return;
     rememberLicenseCrit(key);
     const licensee = snapshot.licensee || "BPMkit";
@@ -5091,14 +5235,54 @@
         (snapshot.license_id_tail ? ` (ID …${snapshot.license_id_tail})` : "") +
         ". Платные инструменты BPMkit отключены, диспетчер продолжает управлять " +
         "стендами в свободной редакции.";
+      setLicenseCritDetails("");
+      setLicenseCritProbe(false);
     } else {
-      byId("license-crit-title").textContent = "Срок лицензии истёк";
-      byId("license-crit-body").textContent =
-        `Лицензия ${licensee} закончилась ${formatDate(snapshot.expires_at)}. ` +
-        "Платные инструменты BPMkit отключены, диспетчер продолжает управлять стендами " +
-        "в свободной редакции. Продлите лицензию и добавьте новый ключ.";
+      const view = licenseExpiredView(snapshot);
+      byId("license-crit-title").textContent = view.modalTitle;
+      byId("license-crit-body").textContent = view.modalBody;
+      setLicenseCritDetails(view.detail);
+      setLicenseCritProbe(view.probe);
     }
     byId("license-crit-overlay").hidden = false;
+  }
+
+  function licenseNoticeSeen(key) {
+    try {
+      return localStorage.getItem(LICENSE_NOTICE_SEEN_KEY) === key;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function rememberLicenseNotice(key) {
+    try {
+      localStorage.setItem(LICENSE_NOTICE_SEEN_KEY, key);
+    } catch (e) {
+      /* см. licenseCritSeen */
+    }
+  }
+
+  /** модалка один раз при первой неудаче активации для license_id. */
+  function maybeShowActivationNoticeModal(snapshot) {
+    const view = licenseActivationNoticeView(snapshot, currentNetProbe());
+    if (!view) return;
+    const key = `activation:${snapshot.license_id_tail || ""}`;
+    if (licenseNoticeSeen(key)) return;
+    rememberLicenseNotice(key);
+    byId("license-crit-title").textContent = view.modalTitle;
+    byId("license-crit-body").textContent = view.modalBody;
+    setLicenseCritDetails(view.detail);
+    setLicenseCritProbe(true);
+    byId("license-crit-overlay").hidden = false;
+  }
+
+  /** Кнопки действий активации в баннере: набор из probe / it-text / retry. */
+  function setBannerActions(banner, actions) {
+    if (!banner) return;
+    banner.querySelectorAll("[data-lic-action]").forEach((btn) => {
+      btn.hidden = actions.indexOf(btn.dataset.licAction) < 0;
+    });
   }
 
   function renderLicenseBanners(snapshot) {
@@ -5106,21 +5290,20 @@
     const crit = byId("license-banner-crit");
     warn.hidden = true;
     crit.hidden = true;
+    setBannerActions(warn, []);
+    setBannerActions(crit, []);
     const status = snapshot.status;
     const days = Number(snapshot.days_left);
     const date = formatDate(snapshot.expires_at);
 
-    if (status === "expiring" && Number.isFinite(days) && days >= 4 && days <= 7) {
-      byId("license-banner-warn-title").textContent = `Лицензия истекает через ${pluralDays(days)}`;
-      byId("license-banner-warn-text").textContent =
-        ` — ${date}. Продлите её, чтобы BPMkit не перешёл в свободную редакцию.`;
-      warn.hidden = false;
-      return;
-    }
     if (status === "expired") {
-      byId("license-banner-crit-title").textContent = "Срок лицензии истёк";
-      byId("license-banner-crit-text").textContent =
-        ` ${date}. Платные инструменты BPMkit отключены — продлите лицензию.`;
+      const view = licenseExpiredView(snapshot);
+      byId("license-banner-crit-title").textContent = view.bannerTitle;
+      byId("license-banner-crit-text").textContent = view.bannerText;
+      if (view.probe) {
+        const probe = currentNetProbe();
+        setBannerActions(crit, probe && !probe.ok && probe.it_text_ru ? ["probe", "it-text"] : ["probe"]);
+      }
       crit.hidden = false;
       return;
     }
@@ -5128,6 +5311,23 @@
       byId("license-banner-crit-title").textContent = "Лицензия отозвана издателем";
       byId("license-banner-crit-text").textContent = ". Платные инструменты BPMkit отключены.";
       crit.hidden = false;
+      return;
+    }
+    const notice = licenseActivationNoticeView(snapshot, currentNetProbe());
+    if (notice) {
+      const banner = notice.level === "crit" ? crit : warn;
+      const prefix = notice.level === "crit" ? "license-banner-crit" : "license-banner-warn";
+      byId(`${prefix}-title`).textContent = notice.title;
+      byId(`${prefix}-text`).textContent = notice.text;
+      setBannerActions(banner, ["probe", "it-text", "retry"]);
+      banner.hidden = false;
+      return;
+    }
+    if (status === "expiring" && Number.isFinite(days) && days >= 4 && days <= 7) {
+      byId("license-banner-warn-title").textContent = `Лицензия истекает через ${pluralDays(days)}`;
+      byId("license-banner-warn-text").textContent =
+        ` — ${date}. Продлите её, чтобы BPMkit не перешёл в свободную редакцию.`;
+      warn.hidden = false;
       return;
     }
     if (status === "expiring" && Number.isFinite(days) && days <= 3) {
@@ -5166,7 +5366,7 @@
       const bold = days <= 1 ? "истекает завтра" : `истекает ${date}`;
       put("лицензия ", tier ? `${tier}, ${bold}` : bold, days <= 3 ? "lic-crit" : "lic-warn");
     } else if (status === "expired") {
-      put("лицензия ", "истекла", "lic-crit");
+      put("лицензия ", licenseExpiredView(snapshot).statusBold, "lic-crit");
     } else if (status === "revoked") {
       put("лицензия ", "отозвана", "lic-crit");
     } else if (status === "invalid") {
@@ -5200,7 +5400,11 @@
    */
   function licenseActivationView(snapshot) {
     const snap = snapshot || {};
-    const err = String(snap.last_online_error || "").trim();
+    // фраза для человека из словаря причин MCP
+    // (``activation_last_error_message_ru``); сырой ``last_online_error`` при ней
+    // уходит под «Подробности» (renderLicensePane). Старый MCP без фразы — как было.
+    const friendly = String(snap.activation_last_error_message_ru || "").trim();
+    const err = friendly || String(snap.last_online_error || "").trim();
     const withErr = (text) => (err ? `${text}. Последняя ошибка: ${err}` : text);
     const deadline = snap.activation_deadline ? formatDate(snap.activation_deadline) : "";
     const here = () => [
@@ -5275,7 +5479,15 @@
         : label;
     stateEl.className = `lic-v ${cls}`;
 
-    byId("lic-until").textContent = snapshot.expires_at ? formatDate(snapshot.expires_at) : "бессрочно";
+    let until = snapshot.expires_at ? formatDate(snapshot.expires_at) : "бессрочно";
+    if (status === "expired") {
+      // эффективная дата истечения; для непройденного окна активации —
+      // activate_by (до активации expires_at — лишь потолок срока).
+      const expired = licenseExpiredView(snapshot);
+      stateEl.textContent = expired.stateLabel;
+      if (expired.date) until = expired.date;
+    }
+    byId("lic-until").textContent = until;
     const activation = licenseActivationView(snapshot);
     const activatedEl = byId("lic-activated");
     activatedEl.textContent = activation.text;
@@ -5284,6 +5496,281 @@
     if (activatedKey) activatedKey.textContent = activation.key;
     byId("lic-source").textContent =
       LICENSE_SOURCE_LABELS[snapshot.source] || snapshot.source || "—";
+
+    // Сырая ошибка — только свёрнутой, и только когда рядом уже есть фраза для
+    // человека (у старого MCP фразы нет, и сырой текст стоит в строке «Активация»).
+    const raw = String(snapshot.last_online_error || "").trim();
+    const friendly = String(snapshot.activation_last_error_message_ru || "").trim();
+    const details = byId("lic-details");
+    if (details) {
+      const showRaw = !!raw && !!friendly && snapshot.activation_state !== "active";
+      byId("lic-details-text").textContent = showRaw ? raw : "";
+      details.hidden = !showRaw;
+    }
+  }
+
+  // --- связь с сервером активации и повтор активации ---
+  //
+  // Проба — ``POST /api/license/net-probe`` → ``setup net-probe --json`` у CLI MCP:
+  // тот же выбор прокси, что у онлайн-контура лицензирования, ключ не уходит.
+  // Последний результат хранит и процесс хаба (``net_probe_last`` в снимке
+  // лицензии) — баннер видит его и после перезагрузки вкладки.
+
+  let lastNetProbe = null;
+  let netProbeInFlight = null;
+
+  /** Самый свежий из результатов пробы: этой вкладки или процесса хаба. */
+  function currentNetProbe() {
+    const fromHub = lastLicense && lastLicense.net_probe_last;
+    if (!lastNetProbe) return fromHub || null;
+    if (!fromHub) return lastNetProbe;
+    return String(fromHub.checked_at || "") > String(lastNetProbe.checked_at || "")
+      ? fromHub : lastNetProbe;
+  }
+
+  /**
+   * Текст результата пробы для окна «Лицензия»: ``{text, cls, itText, detail}``.
+   * Класс причины — ``message_ru`` от MCP; сырая ошибка — только в ``detail``.
+   */
+  function netProbeView(probe) {
+    const p = probe || {};
+    const where = p.host ? `${p.host}${p.port && Number(p.port) !== 443 ? `:${p.port}` : ""}` : "";
+    const proxy = p.proxy && p.proxy !== "direct" ? `через прокси ${p.proxy}` : "напрямую";
+    if (p.ok) {
+      return {
+        text: `Связь есть: сервер активации${where ? ` ${where}` : ""} отвечает (${proxy}` +
+          `${Number.isFinite(Number(p.elapsed_ms)) ? `, ${Number(p.elapsed_ms)} мс` : ""}).`,
+        cls: "pane-note pane-note-ok",
+        itText: "",
+        detail: "",
+      };
+    }
+    const why = String(p.message_ru || "").trim().replace(/[.\s]+$/, "")
+      || "проверка не прошла";
+    const meta = [p.stage ? `этап: ${p.stage}` : "", p.cause ? `причина: ${p.cause}` : "",
+      `подключение ${proxy}`].filter(Boolean).join("; ");
+    const raw = String(p.detail || "").trim();
+    return {
+      text: `Нет связи с сервером активации${where ? ` ${where}` : ""}: ${why}.`,
+      cls: "pane-note pane-note-warn",
+      itText: String(p.it_text_ru || ""),
+      detail: [meta, raw].filter(Boolean).join("\n"),
+    };
+  }
+
+  function renderNetProbe() {
+    const probe = currentNetProbe();
+    const result = byId("license-probe-result");
+    const copyBtn = byId("license-it-copy-btn");
+    const details = byId("license-probe-details");
+    if (!result) return;
+    if (!probe) {
+      result.hidden = true;
+      if (copyBtn) copyBtn.hidden = true;
+      if (details) details.hidden = true;
+      return;
+    }
+    const view = netProbeView(probe);
+    result.className = view.cls;
+    result.textContent = view.text;
+    result.hidden = false;
+    if (copyBtn) copyBtn.hidden = !view.itText;
+    if (details) {
+      byId("license-probe-details-text").textContent = view.detail;
+      details.hidden = !view.detail;
+    }
+  }
+
+  function showNetProbeError(message) {
+    const result = byId("license-probe-result");
+    if (!result) return;
+    result.className = "pane-note pane-note-warn";
+    result.textContent = `Проверить связь не удалось: ${message}`;
+    result.hidden = false;
+  }
+
+  /** Проба связи. ``quiet`` — автозапуск: ошибку не показываем тостом. */
+  async function runNetProbe(btn, { quiet = false } = {}) {
+    if (netProbeInFlight) return netProbeInFlight;
+    if (btn) setButtonBusy(btn, "Проверяем связь…");
+    netProbeInFlight = (async () => {
+      try {
+        const data = await apiSend("POST", "/api/license/net-probe");
+        lastNetProbe = data && data.probe ? data.probe : null;
+        return lastNetProbe;
+      } catch (e) {
+        if (!quiet) {
+          const message = licenseErrorText(e);
+          showNetProbeError(message);
+          toast(`Проверить связь не удалось: ${message}`);
+        }
+        return null;
+      } finally {
+        if (btn) clearButtonBusy(btn);
+      }
+    })();
+    let probe = null;
+    try {
+      probe = await netProbeInFlight;
+    } finally {
+      netProbeInFlight = null;
+    }
+    renderNetProbe();
+    if (lastLicense) renderLicenseBanners(lastLicense);
+    if (probe && !quiet) toast(netProbeView(probe).text);
+    return probe;
+  }
+
+  /** «Текст для ИТ»: из последней пробы, а нет её — сначала проба. */
+  async function copyItText(btn) {
+    let probe = currentNetProbe();
+    if (!probe || probe.ok) probe = await runNetProbe(btn, { quiet: true });
+    if (!probe) {
+      toast("Проверить связь не удалось — текст для ИТ не готов.");
+      return;
+    }
+    if (probe.ok) {
+      toast("Связь с сервером активации есть — ИТ-службе писать не нужно.");
+      return;
+    }
+    const text = String(probe.it_text_ru || "").trim();
+    if (!text) {
+      toast("Для этой причины готового текста для ИТ нет — пришлите издателю диагностику.");
+      return;
+    }
+    await copyText(text);
+  }
+
+  /** «Повторить активацию»: немедленная попытка мимо часового интервала MCP. */
+  async function retryActivation(btn) {
+    if (btn) setButtonBusy(btn, "Активируем…");
+    let data = null;
+    try {
+      data = await apiSend("POST", "/api/license/refresh");
+    } catch (e) {
+      toast(`Повторить активацию не удалось: ${licenseErrorText(e)}`);
+      return;
+    } finally {
+      if (btn) clearButtonBusy(btn);
+    }
+    applyLicenseMutation(data);
+    if (data && (data.activation_state === "active" || (data.activated && !data.activation_state))) {
+      toast("Активация подтверждена сервером.");
+      return;
+    }
+    const why = String((data && data.activation_last_error_message_ru) || "").trim();
+    toast(why ? `Активация не прошла: ${why}` : "Активация пока не подтверждена сервером.");
+    // после неудачной активации — проба, её класс уйдёт в баннер.
+    runNetProbe(null, { quiet: true });
+  }
+
+  function licenseProbeDone(key) {
+    try {
+      return sessionStorage.getItem(LICENSE_PROBE_DONE_KEY) === key;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function rememberLicenseProbe(key) {
+    try {
+      sessionStorage.setItem(LICENSE_PROBE_DONE_KEY, key);
+    } catch (e) {
+      /* см. licenseCritSeen */
+    }
+  }
+
+  /**
+   * автозапуск пробы после неудачной активации — один раз на
+   * попытку (``activation_last_attempt_at``) и только если у хаба нет пробы
+   * свежее этой попытки (другая вкладка уже проверила).
+   */
+  function maybeAutoNetProbe(snapshot) {
+    const snap = snapshot || {};
+    if (snap.edition !== "companion") return;
+    const failed = Number(snap.activation_attempts_failed) > 0;
+    const relevant = !!snap.activation_notice_level ||
+      (snap.status === "expired" && snap.expired_cause === "activation_window");
+    if (!failed || !relevant) return;
+    const attempt = String(snap.activation_last_attempt_at || "");
+    const hubProbe = snap.net_probe_last;
+    if (hubProbe && attempt && String(hubProbe.checked_at || "") >= attempt) return;
+    const key = `${snap.license_id_tail || ""}:${attempt}`;
+    if (licenseProbeDone(key)) return;
+    rememberLicenseProbe(key);
+    runNetProbe(null, { quiet: true });
+  }
+
+  function renderLicenseNet(snapshot) {
+    const box = byId("license-net");
+    if (!box) return;
+    box.hidden = snapshot.edition !== "companion";
+    const retry = byId("license-retry-btn");
+    if (retry) {
+      const st = snapshot.activation_state;
+      retry.hidden = !(LICENSE_CHANNEL_STATUSES.indexOf(snapshot.status) >= 0 &&
+        (st === "pending" || st === "overdue" || !!snapshot.activation_notice_level));
+    }
+    renderNetProbe();
+  }
+
+  // --- архив диагностики ---
+  //
+  // ``POST /api/diag/bundle`` → ``setup diag-bundle --json``: архив на рабочий
+  // стол, по сети ничего не уходит. «Открыть папку» — ``POST /api/diag/open-folder``
+  // без пути в теле: хаб открывает папку архива, который собрал сам.
+
+  async function runDiagBundle(btn) {
+    const status = byId("about-diag-status");
+    const openBtn = byId("about-diag-open-btn");
+    if (btn) setButtonBusy(btn, "Собираем архив…");
+    if (status) {
+      status.className = "pane-note";
+      status.textContent = "Собираем логи и состояние BPMkit — это может занять до пары минут…";
+      status.hidden = false;
+    }
+    try {
+      const data = await apiSend("POST", "/api/diag/bundle");
+      if (status) {
+        status.className = "pane-note pane-note-ok";
+        status.textContent =
+          `Архив диагностики сохранён: ${data.path}. Пришлите этот файл издателю ` +
+          "(info@bpmkit.pro) — секреты и имя пользователя в нём замаскированы." +
+          (data.fallback_reason ? ` Рабочий стол недоступен (${data.fallback_reason}).` : "");
+      }
+      if (openBtn) openBtn.hidden = false;
+      toast("Архив диагностики сохранён");
+    } catch (e) {
+      if (status) {
+        status.className = "pane-note pane-note-warn";
+        status.textContent = `Архив диагностики не собран: ${licenseErrorText(e)}`;
+      }
+      if (openBtn) openBtn.hidden = true;
+    } finally {
+      if (btn) clearButtonBusy(btn);
+    }
+  }
+
+  async function openDiagFolder() {
+    try {
+      await apiSend("POST", "/api/diag/open-folder");
+    } catch (e) {
+      toast(`Не удалось открыть папку: ${licenseErrorText(e)}`);
+    }
+  }
+
+  function setupDiagBundle() {
+    const btn = byId("about-diag-btn");
+    if (btn) btn.addEventListener("click", () => runDiagBundle(btn));
+    const openBtn = byId("about-diag-open-btn");
+    if (openBtn) openBtn.addEventListener("click", openDiagFolder);
+    const menuItem = byId("help-menu-diag");
+    if (menuItem) {
+      menuItem.addEventListener("click", () => {
+        openSettings("about");
+        runDiagBundle(byId("about-diag-btn"));
+      });
+    }
   }
 
   // «Сейчас используется: <команда>» / «Сейчас: CLI не найден» под полем «CLI
@@ -5387,12 +5874,14 @@
       selectSettingsPane("general");
     }
     renderLicensePane(snapshot);
+    renderLicenseNet(snapshot);
     renderLicenseBanners(snapshot);
     renderLicenseStatusline(snapshot);
     renderCliHint(snapshot);
     renderMcpVersion();
     renderAboutUpdates();
     maybeShowLicenseCritModal(snapshot);
+    maybeAutoNetProbe(snapshot);
   }
 
   async function refreshLicense() {
@@ -5521,6 +6010,25 @@
 
     byId("license-crit-close-btn").addEventListener("click", closeLicenseCritModal);
     bindOverlayDismiss(byId("license-crit-overlay"), closeLicenseCritModal);
+
+    // проба связи, текст для ИТ, повтор активации — из окна
+    // «Лицензия», из баннеров (data-lic-action) и из модалки.
+    const probeBtn = byId("license-probe-btn");
+    probeBtn.addEventListener("click", () => runNetProbe(probeBtn));
+    const itBtn = byId("license-it-copy-btn");
+    itBtn.addEventListener("click", () => copyItText(itBtn));
+    const retryBtn = byId("license-retry-btn");
+    retryBtn.addEventListener("click", () => retryActivation(retryBtn));
+    document.querySelectorAll("[data-lic-action]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const action = btn.dataset.licAction;
+        if (action === "probe") runNetProbe(btn);
+        else if (action === "it-text") copyItText(btn);
+        else if (action === "retry") retryActivation(btn);
+      });
+    });
+    const critProbe = byId("license-crit-probe-btn");
+    critProbe.addEventListener("click", () => runNetProbe(critProbe));
   }
 
   // --- «Данные и телеметрия» ---
@@ -6310,6 +6818,7 @@
     setupRemoteModeTab();
     setupUpdatesDialog();
     setupLicensePane();
+    setupDiagBundle();
     setupConsentPane();
     setupPickButtons();
     setupSettingsForm();
