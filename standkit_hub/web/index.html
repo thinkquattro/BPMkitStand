@@ -104,6 +104,11 @@
           <span class="help-menu-title">Кукбук BPMkitStand</span>
           <span class="help-menu-sub">Диспетчер стендов: установка, работа, агенты</span>
         </a>
+        <!-- тот же сбор, что кнопкой в «О программе» (туда же и ведёт). -->
+        <button type="button" class="help-menu-item" id="help-menu-diag" role="menuitem">
+          <span class="help-menu-title">Собрать диагностику</span>
+          <span class="help-menu-sub">Архив логов для издателя — на рабочий стол</span>
+        </button>
       </div>
     </div>
     <!-- Индикатор прав администратора. На Windows виден ВСЕГДА
@@ -177,13 +182,27 @@
     именно потому, что «через неделю» и «завтра всё выключится» требуют разной
     реакции, а один нейтральный баннер обе ситуации обесценивает.
   -->
+  <!-- кнопки действий активации (data-lic-action) видны только
+       для баннеров «не может подтвердить лицензию» / «не активирована»:
+       probe — проба связи (setup net-probe), it-text — скопировать текст для
+       ИТ-службы, retry — повторить активацию сейчас (мимо часового интервала). -->
   <div id="license-banner-warn" class="license-banner license-banner-warn" role="status" hidden>
     <span><strong id="license-banner-warn-title">Лицензия истекает через 7 дней</strong><span id="license-banner-warn-text"></span></span>
-    <button type="button" class="license-banner-open" data-open-license>Открыть лицензию</button>
+    <span class="license-banner-actions">
+      <button type="button" class="license-banner-open" data-lic-action="probe" hidden>Проверить связь</button>
+      <button type="button" class="license-banner-open" data-lic-action="it-text" hidden>Текст для ИТ</button>
+      <button type="button" class="license-banner-open" data-lic-action="retry" hidden>Повторить активацию</button>
+      <button type="button" class="license-banner-open" data-open-license>Открыть лицензию</button>
+    </span>
   </div>
   <div id="license-banner-crit" class="license-banner license-banner-crit" role="alert" hidden>
     <span><strong id="license-banner-crit-title">Срок лицензии истёк</strong><span id="license-banner-crit-text"></span></span>
-    <button type="button" class="license-banner-open" data-open-license>Открыть лицензию</button>
+    <span class="license-banner-actions">
+      <button type="button" class="license-banner-open" data-lic-action="probe" hidden>Проверить связь</button>
+      <button type="button" class="license-banner-open" data-lic-action="it-text" hidden>Текст для ИТ</button>
+      <button type="button" class="license-banner-open" data-lic-action="retry" hidden>Повторить активацию</button>
+      <button type="button" class="license-banner-open" data-open-license>Открыть лицензию</button>
+    </span>
   </div>
 
   <!-- Оверлей ожидания перезапуска с правами администратора: пока Windows
@@ -868,6 +887,12 @@
                 <div><div class="lic-k" id="lic-activated-k">Активирована на</div><div class="lic-v" id="lic-activated">—</div></div>
                 <div><div class="lic-k">Хранится</div><div class="lic-v" id="lic-source">—</div></div>
               </div>
+              <!-- сырая ошибка онлайн-контура (URLError …) — только
+                   здесь, свёрнутой; в строке «Активация» — фраза для человека. -->
+              <details id="lic-details" class="lic-details" hidden>
+                <summary>Подробности</summary>
+                <pre id="lic-details-text"></pre>
+              </details>
               <div class="panel-toolbar pane-actions">
                 <button type="button" id="lic-delete-btn" class="danger tip"
                         data-tip="Снять активацию с этого компьютера и удалить ключ. Ключ можно будет использовать на другой машине."
@@ -900,6 +925,26 @@
                 <button type="button" id="license-activate-btn">Активировать</button>
                 <span id="license-free-status" class="status-text"></span>
               </div>
+            </div>
+
+            <!-- связь с сервером активации. Проба идёт тем же
+                 выбором прокси, что онлайн-контур MCP (setup net-probe --json);
+                 ключ лицензии в неё не уходит. Виден, когда CLI BPMkit найден. -->
+            <div id="license-net" class="lic-net" hidden>
+              <h3>Связь с сервером активации</h3>
+              <p class="pane-lead">Проверка проходит путь до сервера активации так же, как сам
+                BPMkit: DNS, соединение, прокси, защищённое соединение. Ключ лицензии
+                в проверку не отправляется.</p>
+              <div class="panel-toolbar">
+                <button type="button" id="license-probe-btn" class="secondary">Проверить связь с сервером активации</button>
+                <button type="button" id="license-it-copy-btn" class="secondary" hidden>Скопировать текст для ИТ</button>
+                <button type="button" id="license-retry-btn" class="secondary" hidden>Повторить активацию</button>
+              </div>
+              <p id="license-probe-result" class="pane-note" hidden></p>
+              <details id="license-probe-details" class="lic-details" hidden>
+                <summary>Подробности</summary>
+                <pre id="license-probe-details-text"></pre>
+              </details>
             </div>
 
             <p id="license-unavailable" class="pane-note" hidden></p>
@@ -1289,6 +1334,19 @@
                 <button id="about-elevated-once-run-btn" type="button" class="secondary">Выполнить</button>
               </div>
             </details>
+            <!-- архив диагностики (setup diag-bundle --json) — логи,
+                 self_check, проба сети, сводка лицензии без ключа; секреты и имя
+                 пользователя замаскированы самим MCP. По сети НЕ отправляется. -->
+            <div class="about-diag" id="about-diag">
+              <div class="about-diag-actions">
+                <button id="about-diag-btn" type="button" class="secondary">Собрать диагностику</button>
+                <button id="about-diag-open-btn" type="button" class="secondary" hidden>Открыть папку</button>
+              </div>
+              <p id="about-diag-status" class="pane-note" hidden></p>
+              <p class="pane-lead about-diag-lead">Архив логов и состояния BPMkit без ключей и паролей —
+                чтобы издатель разобрал проблему. Ничего не отправляется по сети: архив
+                сохраняется на рабочий стол, пришлите файл издателю.</p>
+            </div>
             <p class="pane-lead">BPMkitStand — свободный диспетчер стендов BPMSoft (часть экосистемы BPMkit).</p>
             <p class="pane-lead">
               Справка — <a href="/static/cookbook.html" target="_blank" rel="noopener">кукбук BPMkitStand</a>:
@@ -1557,10 +1615,13 @@
     </div>
   </div>
 
-  <!-- ═══ Модальное окно: лицензия истекла / отозвана ═══
+  <!-- ═══ Модальное окно: лицензия истекла / отозвана / не подтверждена ═══
        Показывается ОДИН раз за сессию вкладки (sessionStorage): платные
        инструменты уже отключены, и человек обязан узнать об этом сразу, но
-       повторять то же окно на каждом опросе — травля, а не информирование. -->
+       повторять то же окно на каждом опросе — травля, а не информирование.
+       Ключ памяти — статус, хвост ID и причина истечения: смена
+       причины показывает окно заново. То же окно — предупреждение «BPMkit не
+       может подтвердить лицензию» один раз на license_id (localStorage). -->
   <div id="license-crit-overlay" class="modal-overlay" hidden>
     <div class="modal-box modal-box-confirm modal-box-crit" role="alertdialog" aria-modal="true" aria-labelledby="license-crit-title">
       <div class="modal-header">
@@ -1568,10 +1629,15 @@
       </div>
       <div class="modal-body">
         <p id="license-crit-body"></p>
+        <details id="license-crit-details" class="lic-details" hidden>
+          <summary>Подробности</summary>
+          <pre id="license-crit-details-text"></pre>
+        </details>
         <p class="modal-note-plain">Если вы считаете это ошибкой, свяжитесь с издателем: info@bpmkit.pro.</p>
       </div>
       <div class="modal-footer">
         <button type="button" id="license-crit-close-btn" class="secondary">Понятно</button>
+        <button type="button" id="license-crit-probe-btn" class="secondary" hidden>Проверить связь</button>
         <button type="button" id="license-crit-open-btn" data-open-license>Открыть лицензию</button>
       </div>
     </div>
