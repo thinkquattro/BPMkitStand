@@ -1031,15 +1031,18 @@ def test_settings_post_legacy_releases_toggle_becomes_mode(tmp_path, monkeypatch
 
 
 def test_updates_window_has_mode_switch_ring_and_pause_warning():
-    """Окно «Обновления»: переключатель режима (три значения), кольцо только для
-    чтения, предупреждение ручной установки на паузе раскатки."""
+    """Окно «Обновления»: переключатель режима (три значения), предупреждение ручной
+    установки на паузе раскатки; подписи кольца раскатки в интерфейсе нет."""
     html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
     js = (WEB_DIR / "app.js").read_text(encoding="utf-8")
 
     block = html[html.index('id="upd-mode-select"'):]
     block = block[:block.index("</select>")]
     assert re.findall(r'<option value="([a-z]+)"', block) == ["auto", "notify", "off"]
-    assert 'id="upd-ring"' in html
+    # Кольцо задаёт установщик/CLI: подписи в окне нет ни в разметке, ни в скрипте.
+    assert 'id="upd-ring"' not in html
+    assert "upd-ring" not in js and "UPDATE_RING_TITLES" not in js
+    assert "кольцо:" not in html and "кольцо:" not in js
     assert 'id="upd-paused-note"' in html
     assert "update_mode" in js and '"/api/settings"' in js
     assert "function rolloutPausedFor(" in js

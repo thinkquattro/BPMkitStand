@@ -3277,7 +3277,6 @@
     notify: "Обновления будут только скачиваться — установка по вашей кнопке",
     off: "Проверка новых версий MCP выключена",
   };
-  const UPDATE_RING_TITLES = { early: "раннее", stable: "стабильное" };
   let updateModeSaving = false;
 
   function companionUpdateMode(status) {
@@ -3362,11 +3361,6 @@
     const mode = companionUpdateMode(status);
     const select = byId("upd-mode-select");
     if (select && !updateModeSaving && document.activeElement !== select) select.value = mode;
-    const settings = (status && status.settings) || {};
-    const ring = byId("upd-ring");
-    if (ring) {
-      ring.textContent = `кольцо: ${UPDATE_RING_TITLES[settings.update_ring] || UPDATE_RING_TITLES.stable}`;
-    }
     const rel = releasesBlock(status);
     const paused = byId("upd-paused-note");
     if (paused) {
@@ -5034,10 +5028,10 @@
   const LICENSE_UNKNOWN_STATUSES = ["none", "unavailable"];
   const LICENSE_CHANNEL_STATUSES = ["valid", "expiring"];
   const LICENSE_CRIT_SEEN_KEY = "standkit_license_crit_seen";
-  // модалка «не может подтвердить лицензию» — ОДИН раз на license_id
-  // (localStorage, а не sessionStorage: это предупреждение, не отказ, и повторять
-  // его в каждой новой вкладке — травля; баннер при этом виден всегда).
-  const LICENSE_NOTICE_SEEN_KEY = "standkit_license_notice_seen";
+  // модалка «не может подтвердить лицензию» показывается при КАЖДОЙ загрузке
+  // страницы, пока ``activation_notice_level`` непустой (ничего не запоминаем в
+  // хранилище браузера); внутри одной загрузки — один раз, не на каждом опросе.
+  let activationNoticeShownThisLoad = false;
   // автозапуск пробы связи — один раз на неудачную попытку активации.
   const LICENSE_PROBE_DONE_KEY = "standkit_license_probe_done";
 
@@ -5197,6 +5191,24 @@
     };
   }
 
+  /**
+   * Хвост строки состояния, пока активация не подтверждена сервером: warn/crit по
+   * ``activation_notice_level`` либо ``activation_state`` pending с неудачной
+   * попыткой. При crit — с остатком часов. Пусто — подтверждена/не применимо.
+   */
+  function licenseUnconfirmedSuffix(snapshot) {
+    const snap = snapshot || {};
+    const level = snap.activation_notice_level;
+    const pendingFailed = snap.activation_state === "pending" &&
+      Number(snap.activation_attempts_failed) > 0;
+    if (level !== "warn" && level !== "crit" && !pendingFailed) return "";
+    if (level === "crit") {
+      const left = activationLeftText(snap.activation_hours_left);
+      if (left) return ` · лицензия не подтверждена, осталось ${left}`;
+    }
+    return " · лицензия не подтверждена";
+  }
+
   /** Ключ памяти модалки истёкшей/отозванной лицензии: статус, хвост ID, причина. */
   function licenseCritModalKey(snapshot) {
     const snap = snapshot || {};
@@ -5247,29 +5259,15 @@
     byId("license-crit-overlay").hidden = false;
   }
 
-  function licenseNoticeSeen(key) {
-    try {
-      return localStorage.getItem(LICENSE_NOTICE_SEEN_KEY) === key;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  function rememberLicenseNotice(key) {
-    try {
-      localStorage.setItem(LICENSE_NOTICE_SEEN_KEY, key);
-    } catch (e) {
-      /* см. licenseCritSeen */
-    }
-  }
-
-  /** модалка один раз при первой неудаче активации для license_id. */
+  /**
+   * модалка неподтверждённой активации: при каждой загрузке страницы, пока
+   * ``activation_notice_level`` непустой; закрытие действует до следующей загрузки.
+   */
   function maybeShowActivationNoticeModal(snapshot) {
     const view = licenseActivationNoticeView(snapshot, currentNetProbe());
     if (!view) return;
-    const key = `activation:${snapshot.license_id_tail || ""}`;
-    if (licenseNoticeSeen(key)) return;
-    rememberLicenseNotice(key);
+    if (activationNoticeShownThisLoad) return;
+    activationNoticeShownThisLoad = true;
     byId("license-crit-title").textContent = view.modalTitle;
     byId("license-crit-body").textContent = view.modalBody;
     setLicenseCritDetails(view.detail);
@@ -5360,6 +5358,9 @@
       target.appendChild(b);
     }
 
+    const unconfirmed = (status === "valid" || status === "expiring")
+      ? licenseUnconfirmedSuffix(snapshot) : "";
+
     if (status === "valid") {
       put("лицензия ", tier ? `${tier} до ${date}` : `до ${date}`);
     } else if (status === "expiring") {
@@ -5383,6 +5384,7 @@
       link.addEventListener("click", () => openSettings("license"));
       target.appendChild(link);
     }
+    if (unconfirmed) target.appendChild(document.createTextNode(unconfirmed));
   }
 
   /**
