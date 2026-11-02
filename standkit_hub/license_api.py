@@ -11,6 +11,15 @@
     <mcp_cli> setup license-store <файл-с-ключом> --json
     <mcp_cli> setup license-deactivate --json
 
+Плюс две операции диагностики активации, тоже по одному вызову CLI::
+
+    <mcp_cli> setup net-probe --json              # проба связи с сервером активации
+    <mcp_cli> setup license-info --json --refresh # «Повторить активацию» сейчас
+
+Проба сети — не мутация лицензии, но запускает процесс и ходит в сеть, поэтому
+маршрут хаба авторизуется как мутация. Её rc=2 («связи нет») — штатный исход, а
+не отказ CLI: результат отдаётся UI как есть (класс причины, текст для ИТ).
+
 Почему модуль лежит в MIT-ядре хаба, а не в платном пакете канала. Экран лицензии
 обязан работать И в свободной редакции — именно там он нужнее всего («ключ ввёл, а
 что дальше?»). Поэтому `find_cli` здесь свой (тонкая обёртка), а не импортированный
@@ -70,6 +79,11 @@ __all__ = [
     "license_store_token",
     "license_store_file",
     "license_deactivate",
+    "license_refresh",
+    "net_probe",
+    "last_net_probe",
+    "NET_PROBE_TAIL",
+    "LICENSE_REFRESH_TAIL",
     "invalidate_cache",
 ]
 
@@ -82,6 +96,12 @@ EDITION_FREE = "free"
 LICENSE_INFO_TAIL = ("setup", "license-info", "--json")
 LICENSE_STORE_TAIL = ("setup", "license-store")
 LICENSE_DEACTIVATE_TAIL = ("setup", "license-deactivate", "--json")
+#: проба связи с сервером активации (rc=0 — связь есть, rc=2 — нет).
+NET_PROBE_TAIL = ("setup", "net-probe", "--json")
+#: «Повторить активацию» — синхронная онлайн-сверка (license_online.sync_now:
+#: сверка отзыва + heartbeat, который для неактивированной установки и есть
+#: активация) и свежая сводка тем же JSON, что у license-info.
+LICENSE_REFRESH_TAIL = ("setup", "license-info", "--json", "--refresh")
 
 #: Сколько живёт сводка. Минута — компромисс между «не запускать процесс на каждый
 #: тик UI» и «истёкшая лицензия замечается в пределах минуты».
@@ -92,8 +112,15 @@ CACHE_TTL_SEC = 60.0
 #: (best-effort активация).
 _CLI_TIMEOUT_S = 30.0
 _CLI_WRITE_TIMEOUT_S = 60.0
+#: Проба сети: до пяти этапов по 8 с у самого CLI плюс холодный старт `.exe`.
+_CLI_PROBE_TIMEOUT_S = 90.0
 
 _DETAIL_LIMIT = 300
+#: Сырая ошибка пробы показывается под «Подробности» — ей можно быть длиннее.
+_PROBE_DETAIL_LIMIT = 1000
+
+#: Признак «этот CLI не знает подкоманды/флага» в stderr argparse: старый MCP.
+_ARGPARSE_UNKNOWN_MARKERS = ("invalid choice", "unrecognized arguments")
 
 # Резолв CLI (имена бинаря, подпути, фолбэк на запуск из исходников, переменная
 # окружения) — общий хелпер `standkit.cli_resolve`, тот же, что у
@@ -319,12 +346,115 @@ def license_info(settings, *, run: Optional[Callable] = None,
         # ответил) — поля cli/cli_source отдаём как есть, а не null.
         return _free_snapshot(exc.detail or exc.error, cli=cli, cli_source=source)
 
+    snapshot = _companion_snapshot(payload, cli, source)
+    _cache_put(key, snapshot, cache_ttl)
+    return snapshot
+
+
+def _companion_snapshot(payload: dict, cli: list, source: Optional[str]) -> dict:
     snapshot = dict(payload)
     snapshot["edition"] = EDITION_COMPANION
     snapshot["cli"] = _cli_display(cli)
     snapshot["cli_source"] = source
-    _cache_put(key, snapshot, cache_ttl)
     return snapshot
+
+
+def is_unknown_command(rc: int, stderr: str) -> bool:
+    """CLI отверг подкоманду/флаг (argparse, rc=2) — значит, MCP старше хаба."""
+    if rc != 2:
+        return False
+    text = (stderr or "").lower()
+    return any(marker in text for marker in _ARGPARSE_UNKNOWN_MARKERS)
+
+
+# ------------------------------------------------------------------------------------
+# «Повторить активацию» (POST /api/license/refresh)
+# ------------------------------------------------------------------------------------
+def license_refresh(settings, *, run: Optional[Callable] = None,
+                    cache_ttl: float = CACHE_TTL_SEC) -> dict:
+    """Немедленная онлайн-сверка мимо часового интервала фонового контура MCP.
+
+    CLI делает синхронный `license_online.sync_now()` (сверка отзыва + heartbeat;
+    успешный heartbeat — факт активации, неудачный — учтённая попытка с классом
+    причины) и печатает свежую сводку той же формы, что `license-info --json`.
+    Ответ кладётся в кэш вместо прежнего снимка: следующий `GET /api/license`
+    обязан показать ровно то, что только что увидел человек.
+
+    Старый MCP без флага `--refresh` — понятный отказ «обновите BPMkit», а не
+    сырой текст argparse.
+    """
+    cli, source = _resolve_cli(settings)
+    if not cli:
+        _cli_or_raise(settings)  # бросает 503 с подсказкой, где задать путь
+    try:
+        payload = _run_json(settings, LICENSE_REFRESH_TAIL, run=run,
+                            timeout=_CLI_WRITE_TIMEOUT_S,
+                            failure="CLI BPMkit не выполнил повторную активацию")
+    except LicenseCliError as exc:
+        if any(m in (exc.detail or "").lower() for m in _ARGPARSE_UNKNOWN_MARKERS):
+            raise LicenseCliError(
+                "Эта версия BPMkit не умеет повторять активацию по запросу — обновите "
+                "BPMkit. Фоновые попытки активации продолжаются раз в час.",
+                detail=exc.detail) from None
+        raise
+    invalidate_cache()
+    snapshot = _companion_snapshot(payload, cli, source)
+    snapshot.pop("ok", None)
+    snapshot["ok"] = True
+    _cache_put(tuple(cli) + LICENSE_INFO_TAIL, snapshot, cache_ttl)
+    return snapshot
+
+
+# ------------------------------------------------------------------------------------
+# Проба связи с сервером активации (POST /api/license/net-probe)
+# ------------------------------------------------------------------------------------
+_probe_lock = threading.Lock()
+_last_probe: dict = {}
+
+
+def _now_iso_utc() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def net_probe(settings, *, run: Optional[Callable] = None) -> dict:
+    """Проба связи с сервером активации: `setup net-probe --json`.
+
+    Возвращает dict пробы как его отдал CLI (`ok`, `stage`, `cause`, `message_ru`,
+    `it_text_ru`, `detail`, `proxy`, `host`, `port`, `elapsed_ms`, …) плюс
+    `checked_at` (ISO UTC). `ok` — итог пробы: rc=2 при валидном JSON — это «связи
+    нет», штатный исход, а НЕ `LicenseCliError`. Ключ лицензии в пробу не уходит
+    (CLI его не читает). Последний результат запоминается процессом хаба
+    (`last_net_probe`) — баннер «не может подтвердить лицензию» показывает его и
+    после перезагрузки вкладки.
+    """
+    argv = _cli_or_raise(settings) + list(NET_PROBE_TAIL)
+    if run is not None:
+        rc, stdout, stderr = run(argv)
+    else:
+        rc, stdout, stderr = _default_run(argv, timeout=_CLI_PROBE_TIMEOUT_S)
+    payload = _parse_json(stdout)
+    if payload is None:
+        if is_unknown_command(rc, stderr):
+            raise LicenseCliError(
+                "Эта версия BPMkit не умеет проверять связь с сервером активации — "
+                "обновите BPMkit", detail=_clip(stderr))
+        raise LicenseCliError(
+            "CLI BPMkit не выполнил проверку связи с сервером активации",
+            detail=_clip(stderr) or f"код возврата {rc}, вывод не разобран как JSON")
+    result = dict(payload)
+    result["ok"] = bool(payload.get("ok")) and rc == 0
+    result["detail"] = _clip(str(payload.get("detail") or ""), _PROBE_DETAIL_LIMIT)
+    result["checked_at"] = _now_iso_utc()
+    with _probe_lock:
+        _last_probe.clear()
+        _last_probe.update(result)
+    return result
+
+
+def last_net_probe() -> Optional[dict]:
+    """Последний результат пробы в этом процессе хаба (копия) или `None`."""
+    with _probe_lock:
+        return dict(_last_probe) if _last_probe else None
 
 
 # ------------------------------------------------------------------------------------
@@ -424,6 +554,12 @@ def invalidate_cache() -> None:
     """Сбросить кэш сводки. Зовётся после КАЖДОЙ мутации лицензии."""
     with _cache_lock:
         _cache.clear()
+
+
+def reset_net_probe() -> None:
+    """Забыть последний результат пробы (тесты; смена ключа)."""
+    with _probe_lock:
+        _last_probe.clear()
 
 
 def _cache_get(key) -> Optional[dict]:

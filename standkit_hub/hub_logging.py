@@ -32,6 +32,7 @@ import logging
 import logging.handlers
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -52,7 +53,28 @@ LOG_FILE_PID_TEMPLATE = "hub.{pid}.log"
 MAX_BYTES = 2 * 1024 * 1024
 BACKUP_COUNT = 5
 
+#: Строка лога: время ISO 8601 в UTC с зоной (``2026-11-02T10:15:42.123Z``), уровень,
+#: компонент (имя логгера), текст. Единый формат логов BPMkit — архив
+#: диагностики сводит hub.log с журналами MCP (ISO UTC), и локальное время без зоны
+#: (прежний ``asctime`` по умолчанию) не сопоставить с ними без угадывания пояса.
 _LOG_FORMAT = "%(asctime)s %(levelname)-7s [%(name)s] %(message)s"
+
+
+class UtcIsoFormatter(logging.Formatter):
+    """``asctime`` — ISO 8601 UTC с миллисекундами и суффиксом ``Z``."""
+
+    converter = time.gmtime
+
+    def formatTime(self, record, datefmt=None):  # noqa: N802 - имя из stdlib
+        if datefmt:
+            return super().formatTime(record, datefmt)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", self.converter(record.created))
+        return f"{stamp}.{int(record.msecs):03d}Z"
+
+
+def make_formatter() -> logging.Formatter:
+    """Форматтер строк hub.log (и консоли при отладке) — см. ``_LOG_FORMAT``."""
+    return UtcIsoFormatter(_LOG_FORMAT)
 
 #: Переменная окружения, которой уровень лога поднимают ДО DEBUG.
 #:
@@ -254,7 +276,7 @@ def setup_logging(*, log_dir: "Optional[Path | str]" = None,
         # заводился, было бы прямым противоречием.
         return None
 
-    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    handler.setFormatter(make_formatter())
     log.addHandler(handler)
 
     # Консоль — ТОЛЬКО если она есть (обычный python.exe при отладке). Под
@@ -262,7 +284,7 @@ def setup_logging(*, log_dir: "Optional[Path | str]" = None,
     # стал бы источником отказов в каждой записи.
     if sys.stderr is not None:
         stream = logging.StreamHandler(sys.stderr)
-        stream.setFormatter(logging.Formatter(_LOG_FORMAT))
+        stream.setFormatter(make_formatter())
         log.addHandler(stream)
 
     setattr(log, "_standkit_log_path", path)
