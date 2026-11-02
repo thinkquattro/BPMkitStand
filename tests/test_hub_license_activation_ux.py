@@ -366,6 +366,14 @@ def test_app_js_talks_to_new_routes():
         assert "licenseExpiredView(" in _extract_function(js, fn), fn
     assert "licenseCritModalKey(snapshot)" in _extract_function(js, "maybeShowLicenseCritModal")
     assert "maybeAutoNetProbe(snapshot)" in _extract_function(js, "applyLicense")
+    # Модалка неподтверждённой активации — при каждой загрузке: в хранилище
+    # браузера ничего не помним (ключ прежней памяти удалён).
+    assert "standkit_license_notice_seen" not in js
+    assert "licenseNoticeSeen" not in js and "rememberLicenseNotice" not in js
+    notice_modal = _extract_function(js, "maybeShowActivationNoticeModal")
+    assert "localStorage" not in notice_modal and "sessionStorage" not in notice_modal
+    assert "activationNoticeShownThisLoad" in notice_modal
+    assert "licenseUnconfirmedSuffix(" in _extract_function(js, "renderLicenseStatusline")
     # Старый безусловный текст «закончилась <expires_at>» ушёл из модалки.
     assert "закончилась ${formatDate(snapshot.expires_at)}" not in js
 
@@ -411,6 +419,20 @@ NOTICES = {
 }
 
 
+SUFFIX_CASES = {
+    "warn": NOTICES["warn"],
+    "crit": NOTICES["crit"],
+    "crit_no_hours": {"status": "valid", "activation_notice_level": "crit"},
+    "pending_failed": {"status": "valid", "activation_state": "pending",
+                       "activation_attempts_failed": 2},
+    "pending_fresh": {"status": "valid", "activation_state": "pending",
+                      "activation_attempts_failed": 0},
+    "active": {"status": "valid", "activation_state": "active"},
+    "none": NOTICES["none"],
+    "old": NOTICES["old"],
+}
+
+
 @pytest.fixture(scope="module")
 def views(tmp_path_factory):
     if NODE is None:
@@ -423,9 +445,11 @@ def views(tmp_path_factory):
         _extract_function(js, "activationLeftText"),
         _extract_function(js, "licenseActivationNoticeView"),
         _extract_function(js, "licenseCritModalKey"),
+        _extract_function(js, "licenseUnconfirmedSuffix"),
         _extract_function(js, "netProbeView"),
         f"const CASES = {json.dumps(CASES, ensure_ascii=False)};",
         f"const NOTICES = {json.dumps(NOTICES, ensure_ascii=False)};",
+        f"const SUFFIX_CASES = {json.dumps(SUFFIX_CASES, ensure_ascii=False)};",
         f"const PROBE_FAIL = {json.dumps(PROBE_FAIL, ensure_ascii=False)};",
         f"const PROBE_OK = {json.dumps(PROBE_OK, ensure_ascii=False)};",
         "const out = {expired: {}, keys: {}, notice: {}, probe: {}};",
@@ -434,6 +458,8 @@ def views(tmp_path_factory):
         "for (const [k, s] of Object.entries(NOTICES)) out.notice[k] = licenseActivationNoticeView(s, null);",
         "out.notice.warn_probe_fail = licenseActivationNoticeView(NOTICES.warn, PROBE_FAIL);",
         "out.notice.warn_probe_ok = licenseActivationNoticeView(NOTICES.warn, PROBE_OK);",
+        "out.suffix = {};",
+        "for (const [k, s] of Object.entries(SUFFIX_CASES)) out.suffix[k] = licenseUnconfirmedSuffix(s);",
         "out.probe.fail = netProbeView(PROBE_FAIL); out.probe.ok = netProbeView(PROBE_OK);",
         "console.log(JSON.stringify(out));",
     ])
@@ -509,6 +535,17 @@ def test_notice_crit_last_hours(views):
     assert v["level"] == "crit"
     assert "Осталось 5 ч. (до 03.11.2026)." in v["text"]
     assert "сервер активации не ответил" in v["text"]
+
+
+def test_statusline_unconfirmed_suffix(views):
+    sfx = views["suffix"]
+    assert sfx["warn"] == " · лицензия не подтверждена"
+    assert sfx["crit"] == " · лицензия не подтверждена, осталось 5 ч."
+    assert sfx["crit_no_hours"] == " · лицензия не подтверждена"
+    assert sfx["pending_failed"] == " · лицензия не подтверждена"
+    # Подтверждена, свежий pending без неудач или старый MCP — без хвоста.
+    for key in ("pending_fresh", "active", "none", "old"):
+        assert sfx[key] == "", key
 
 
 def test_no_notice_without_level(views):

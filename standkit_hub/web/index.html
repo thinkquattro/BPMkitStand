@@ -1550,8 +1550,7 @@
           </div>
 
           <!-- режим обновлений MCP: переключатель (три значения, тот же
-               companion.update_mode, что в «Настройки → Обновления») и кольцо раскатки
-               только для чтения (его задают установка и CLI BPMkit). Строка паузы —
+               companion.update_mode, что в «Настройки → Обновления»). Строка паузы —
                когда издатель приостановил раскатку известной новой версии. -->
           <div class="upd-mode" id="upd-mode-row">
             <label class="upd-mode-label" for="upd-mode-select">Установка обновлений</label>
@@ -1560,7 +1559,6 @@
               <option value="notify">Только уведомлять</option>
               <option value="off">Выключить</option>
             </select>
-            <span class="upd-meta" id="upd-ring" title="Кольцо раскатки задаётся при установке BPMkit">кольцо: стабильное</span>
             <p class="upd-detail" id="upd-paused-note" hidden></p>
             <p class="upd-meta upd-mode-note" id="upd-auto-event" hidden></p>
             <!-- почему автоматика сейчас не ставит (последний исход), установка, ждущая
