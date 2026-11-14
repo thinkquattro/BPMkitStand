@@ -1303,17 +1303,17 @@ body.hub-offline .stands-table-wrap {
      поэтому смена текста статуса («работает» → «Запускается…») больше не
      «дёргает» соседние колонки. Ширины заданы через <colgroup>. */
   table-layout: fixed;
-  min-width: 900px;
+  min-width: 960px;
   border-collapse: collapse;
   background: var(--bpmkit-panel-bg);
 }
 
 /* Ширины колонок (сумма = 100%); действия держат минимум под 4 кнопки. */
-.col-stand { width: 20%; }
-.col-transport { width: 11%; }
-.col-process { width: 14%; }
-.col-http { width: 16%; }
-.col-db { width: 11%; }
+.col-stand { width: 18%; }
+.col-transport { width: 17%; }
+.col-process { width: 12%; }
+.col-http { width: 15%; }
+.col-db { width: 10%; }
 .col-redis { width: 9%; }
 /* Пять иконок (старт, стоп, рестарт, очистка Redis, «Изменить») — колонка шире прежней. */
 .col-actions { width: 19%; }
@@ -1331,15 +1331,26 @@ body.hub-offline .stands-table-wrap {
   white-space: nowrap;
 }
 
-/* «Транспорт» (вид · хост, бейдж предупреждения) не помещается в
-   11% и резался многоточием — эта ячейка переносится по словам, длинный хост без
-   пробелов ломается где угодно. Ширины колонок (colgroup) не меняются, остальные
-   ячейки сохраняют обрезку. */
+/* «Транспорт»: вид — первой строкой, хост — второй. Хост не переносится посреди
+   слова: не поместился — многоточие, полный адрес в подсказке (title). Ячейка
+   занимает не больше двух строк плюс бейдж предупреждения. */
 .stands-table td.cell-transport {
   white-space: normal;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
   text-overflow: clip;
   line-height: 1.35;
+}
+
+.stands-table td.cell-transport .transport-kind,
+.stands-table td.cell-transport .transport-host {
+  display: block;
+  max-width: 100%;
+}
+
+.stands-table td.cell-transport .transport-host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stands-table td.cell-transport .transport-badge {

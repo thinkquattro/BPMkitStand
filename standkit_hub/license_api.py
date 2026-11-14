@@ -110,7 +110,7 @@ CACHE_TTL_SEC = 60.0
 #: Ожидание ответа CLI. Как в context.py: с запасом на холодный старт `.exe` под
 #: антивирусом. У записи ключа запас больше — она ещё и ходит в сеть к издателю
 #: (best-effort активация).
-_CLI_TIMEOUT_S = 30.0
+_CLI_TIMEOUT_S = 60.0
 _CLI_WRITE_TIMEOUT_S = 60.0
 #: Проба сети: до пяти этапов по 8 с у самого CLI плюс холодный старт `.exe`.
 _CLI_PROBE_TIMEOUT_S = 90.0
@@ -145,11 +145,16 @@ class LicenseCliError(Exception):
     отказом — ключ не тот, файл не читается, бэкенд отказал).
     """
 
-    def __init__(self, error: str, *, detail: str = "", status: int = 400) -> None:
+    def __init__(self, error: str, *, detail: str = "", status: int = 400,
+                 transient: bool = False) -> None:
         super().__init__(error)
         self.error = error
         self.detail = _clip(detail)
         self.status = int(status)
+        #: CLI не удалось ДОЖДАТЬСЯ (таймаут/сбой запуска, rc=-1), а не он ответил
+        #: отказом: состояние лицензии неизвестно, и повторять запрос на каждый тик
+        #: UI значит каждый раз ждать впустую.
+        self.transient = bool(transient)
 
     def to_dict(self) -> dict:
         return {"ok": False, "error": self.error, "detail": self.detail}
@@ -277,6 +282,7 @@ def _run_json(settings, tail: Sequence[str], *, run: Optional[Callable] = None,
         raise LicenseCliError(
             failure,
             detail=_clip(stderr) or f"код возврата {rc}, вывод не разобран как JSON",
+            transient=(rc == -1),
         )
     if not payload.get("ok", True):
         raise LicenseCliError(
@@ -317,6 +323,85 @@ def _cli_display(cli: Optional[list]) -> Optional[str]:
     return subprocess.list2cmdline(list(cli))
 
 
+#: Сколько помнится отказ «CLI не дождались»: столько же не ждём заново (экран
+#: лицензии опрашивается из нескольких мест). Мутации сбрасывают его вместе со сводкой.
+_FAIL_TTL_SEC = 30.0
+
+#: Одна сводка за раз: два одновременных запроса не запускают два процесса CLI
+#: (второй дожидается первого и берёт результат из кэша).
+_info_lock = threading.Lock()
+
+#: Последняя УДАЧНАЯ сводка (в памяти и на диске): при отказе CLI экран продолжает
+#: показывать её с пометкой «не удалось проверить», а не «лицензия не активирована».
+_LAST_GOOD_FILE = "license_last_ok.json"
+_last_good: dict = {}
+
+
+def _last_good_path() -> Path:
+    return bpmkit_config_dir() / _LAST_GOOD_FILE
+
+
+def _remember_good(snapshot: dict) -> None:
+    keep = {k: v for k, v in snapshot.items() if k not in ("cli", "cli_source")}
+    keep["checked_at"] = _now_iso_utc()
+    with _cache_lock:
+        _last_good.clear()
+        _last_good.update(keep)
+    try:
+        path = _last_good_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(keep, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass  # кэш — удобство, а не обязательство
+
+
+def _load_good() -> Optional[dict]:
+    with _cache_lock:
+        if _last_good:
+            return dict(_last_good)
+    try:
+        data = json.loads(_last_good_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and data.get("status") in ("valid", "expiring", "expired",
+                                                         "revoked", "invalid"):
+        return data
+    return None
+
+
+def _forget_good() -> None:
+    with _cache_lock:
+        _last_good.clear()
+    try:
+        _last_good_path().unlink()
+    except OSError:
+        pass
+
+
+def _failed_snapshot(exc: "LicenseCliError", cli: list, source: Optional[str]) -> dict:
+    """Ответ при отказе CLI. Состояние лицензии НЕИЗВЕСТНО — это не «не активирована».
+
+    Была удачная сводка — отдаём её же с `check_failed`/`stale` и причиной (экран
+    рисует прежнее состояние плюс жёлтую плашку). Не было — прежний «свободный» ответ
+    со статусом `unavailable`, но тоже с `check_failed`, чтобы UI не писал
+    «лицензия не активирована».
+    """
+    reason = exc.detail or exc.error
+    good = _load_good()
+    if good is not None:
+        snap = dict(good)
+        snap.update({"ok": True, "edition": EDITION_COMPANION, "stale": True,
+                     "check_failed": True, "check_error": _clip(reason),
+                     "cli": _cli_display(cli), "cli_source": source})
+        return snap
+    snap = _free_snapshot(reason, cli=cli, cli_source=source)
+    snap["check_failed"] = True
+    snap["check_error"] = _clip(reason)
+    return snap
+
+
 def license_info(settings, *, run: Optional[Callable] = None,
                  cache_ttl: float = CACHE_TTL_SEC) -> dict:
     """Сводка лицензии для `GET /api/license` (с кэшем на `cache_ttl` секунд).
@@ -326,29 +411,45 @@ def license_info(settings, *, run: Optional[Callable] = None,
     `cli`/`cli_source` вычисляются резолвом (без запуска CLI) — экрану настроек
     нужно показать «сейчас используется» и источник, не тратя на это лишний
     процесс сверх того, что уже понадобился бы для самой сводки.
+
+    Отказ CLI не равен «лицензии нет»: при таймауте/сбое запуска отдаётся последняя
+    удачная сводка с пометкой `check_failed` (см. `_failed_snapshot`); такой отказ
+    помнится `_FAIL_TTL_SEC`, чтобы опросы не ждали CLI впустую заново.
     """
     cli, source = _resolve_cli(settings)
     if not cli:
         return _free_snapshot(describe_search_targets(_candidate_roots()))
 
     key = tuple(cli) + LICENSE_INFO_TAIL
+    fail_key = ("fail",) + key
     cached = _cache_get(key)
     if cached is not None:
         return cached
 
-    try:
-        payload = _run_json(settings, LICENSE_INFO_TAIL, run=run,
-                            failure="CLI BPMkit не ответил на запрос сведений о лицензии")
-    except LicenseCliError as exc:
-        # Сводка обязана отвечать всегда: отказавший CLI — это «сведений нет», а не
-        # 500 на экране лицензии. Такой ответ НЕ кэшируется — починка (правка пути,
-        # установка MCP) должна быть видна сразу. CLI всё же НАЙДЕН (просто не
-        # ответил) — поля cli/cli_source отдаём как есть, а не null.
-        return _free_snapshot(exc.detail or exc.error, cli=cli, cli_source=source)
+    with _info_lock:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        failed = _cache_get(fail_key)
+        if failed is not None:
+            return failed
+        try:
+            payload = _run_json(settings, LICENSE_INFO_TAIL, run=run,
+                                failure="CLI BPMkit не ответил на запрос сведений о лицензии")
+        except LicenseCliError as exc:
+            # Сводка обязана отвечать всегда: отказавший CLI — это «не удалось
+            # проверить», а не 500 на экране лицензии. Отказ ответа CLI (rc!=-1) не
+            # кэшируется — починка (правка пути, установка MCP) должна быть видна сразу;
+            # «не дождались» помнится на `_FAIL_TTL_SEC`.
+            snapshot = _failed_snapshot(exc, cli, source)
+            if exc.transient:
+                _cache_put(fail_key, snapshot, _FAIL_TTL_SEC)
+            return snapshot
 
-    snapshot = _companion_snapshot(payload, cli, source)
-    _cache_put(key, snapshot, cache_ttl)
-    return snapshot
+        snapshot = _companion_snapshot(payload, cli, source)
+        _cache_put(key, snapshot, cache_ttl)
+        _remember_good(snapshot)
+        return snapshot
 
 
 def _companion_snapshot(payload: dict, cli: list, source: Optional[str]) -> dict:
@@ -402,6 +503,7 @@ def license_refresh(settings, *, run: Optional[Callable] = None,
     snapshot.pop("ok", None)
     snapshot["ok"] = True
     _cache_put(tuple(cli) + LICENSE_INFO_TAIL, snapshot, cache_ttl)
+    _remember_good(snapshot)
     return snapshot
 
 
@@ -535,6 +637,7 @@ def license_deactivate(settings, *, run: Optional[Callable] = None) -> dict:
                         timeout=_CLI_WRITE_TIMEOUT_S,
                         failure="CLI BPMkit не выполнил снятие активации")
     invalidate_cache()
+    _forget_good()
     return payload
 
 
