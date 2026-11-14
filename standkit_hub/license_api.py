@@ -353,8 +353,8 @@ def _remember_good(snapshot: dict) -> None:
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(keep, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
-    except OSError:
-        pass  # кэш — удобство, а не обязательство
+    except Exception:  # noqa: BLE001 - кэш — удобство, а не обязательство (в т.ч. нестандартный путь)
+        pass
 
 
 def _load_good() -> Optional[dict]:
@@ -363,7 +363,7 @@ def _load_good() -> Optional[dict]:
             return dict(_last_good)
     try:
         data = json.loads(_last_good_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except Exception:  # noqa: BLE001 - нет файла/битый JSON/нестандартный путь
         return None
     if isinstance(data, dict) and data.get("status") in ("valid", "expiring", "expired",
                                                          "revoked", "invalid"):
@@ -376,7 +376,7 @@ def _forget_good() -> None:
         _last_good.clear()
     try:
         _last_good_path().unlink()
-    except OSError:
+    except Exception:  # noqa: BLE001 - файла нет или путь недоступен
         pass
 
 

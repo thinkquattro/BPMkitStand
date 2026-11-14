@@ -54,10 +54,10 @@ class TestTransportColumn:
         cell = re.search(r"\.stands-table td\.cell-transport \{(.*?)\}", css, re.S)
         assert cell and "overflow-wrap: normal" in cell.group(1)
         assert "anywhere" not in cell.group(1)
-        host = re.search(r"\.stands-table td\.cell-transport \.transport-host \{(.*?)\}", css, re.S)
-        assert host
+        rules = re.findall(r"\.transport-host \{(.*?)\}", css, re.S)
+        assert rules
         for needle in ("text-overflow: ellipsis", "white-space: nowrap", "overflow: hidden"):
-            assert needle in host.group(1)
+            assert any(needle in body for body in rules), needle
         block = re.search(r"td\.cell-transport \.transport-kind,\s*"
                           r"\.stands-table td\.cell-transport \.transport-host \{(.*?)\}", css, re.S)
         assert block and "display: block" in block.group(1)

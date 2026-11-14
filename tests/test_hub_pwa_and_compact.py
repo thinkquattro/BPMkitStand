@@ -325,7 +325,7 @@ def test_snapshot_age_is_always_visible():
 
 class TestGap1048TransportColumnWraps:
     """«Транспорт»: вид и хост — отдельные строки, хост режется многоточием с подсказкой
-    (GAP-1259: колонка шире, перенос не посреди слова), остальные колонки режутся, как прежде."""
+    (колонка шире, перенос не посреди слова), остальные колонки режутся, как прежде."""
 
     def test_transport_cell_wraps_and_others_keep_ellipsis(self):
         import re
