@@ -769,7 +769,7 @@ def test_gap1037_parse_stand_url_in_browser_js(tmp_path):
 
 
 class TestGap1463PublicUrl:
-    """GAP-1463: публичный адрес маршрута этажа пользователя (public_url) в форме стенда,
+    """Публичный адрес маршрута этажа пользователя (public_url) в форме стенда,
     проба ``GET <адрес>/healthz`` при сохранении -- предупреждение, а не отказ."""
 
     _HTTP = {"name": "pub", "transport": "http", "stand_url": "https://crm.example.test",
