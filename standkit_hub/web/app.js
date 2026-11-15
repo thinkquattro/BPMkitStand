@@ -1505,11 +1505,12 @@
     return `<span class="transport-value" title="${escapeAttr(full)}">${transportParts("агент", host)}</span>`;
   }
 
-  /** «вид · хост» двумя span: строка переносится по разделителю. */
+  /** «вид» и «хост» двумя блочными span: вид — первая строка, хост — вторая с
+   * многоточием (полный адрес — в title ячейки). */
   function transportParts(kind, host) {
     const kindHtml = `<span class="transport-kind">${escapeHtml(kind)}</span>`;
     return host
-      ? `${kindHtml} <span class="transport-host">·&nbsp;${escapeHtml(host)}</span>`
+      ? `${kindHtml}<span class="transport-host">${escapeHtml(host)}</span>`
       : kindHtml;
   }
 
@@ -4881,6 +4882,15 @@
     }
   }
 
+  /** Итог «Проверить обновления» одной фразой: версия найдена / актуально. */
+  function checkUpdateOutcomeText(data) {
+    const res = data && typeof data === "object" ? (data.result || data) : {};
+    const latest = String(res.latest || "").trim();
+    if (res.available && latest) return `Доступна версия ${latest}`;
+    if (res.available === false) return "Установлена актуальная версия";
+    return "Проверка выполнена";
+  }
+
   async function runCompanionAction(action, btn) {
     const path = COMPANION_ACTION_PATHS[action];
     if (!path) return;
@@ -4899,7 +4909,16 @@
       // подготовленную версию и последний бэкап соответственно — ровно то, чего
       // ждёт человек, нажавший кнопку.
       const data = await apiSend("POST", path, {});
-      toast(COMPANION_ACTION_DONE[action] || "Готово");
+      if (action === "stage_installer" && data && ((data.result || data).reason === "up_to_date")) {
+        toast("Установлена актуальная версия — скачивать нечего");
+      } else {
+        toast(COMPANION_ACTION_DONE[action] || "Готово");
+      }
+      if (action === "check_update") {
+        // Строка «Проверяем…» заменяется итогом проверки, а не молчит до перерисовки.
+        const statusLine = byId("updates-check-status");
+        if (statusLine) statusLine.textContent = checkUpdateOutcomeText(data);
+      }
       if (action === "check_update") {
         // «проверено …» — в строке updates-checked-at (обновит renderCompanionStatus).
         // Сверка индекса паттернов запущена каналом в фоне — перечитываем её статус.
@@ -5171,7 +5190,17 @@
     if (p && p.ok) {
       probeLine = " Проверка связи сейчас проходит — нажмите «Повторить активацию».";
     } else if (p && p.message_ru) {
-      probeLine = ` Проверка связи: ${String(p.message_ru).trim().replace(/[.\s]+$/, "")}.`;
+      // Причина уже названа в основной фразе — второй раз её не повторяем (проба и
+      // последняя попытка активации нередко приходят с одним и тем же текстом).
+      const sameText = (a, b) => {
+        const norm = (t) => String(t || "").toLowerCase().replace(/[.\s]+$/, "").replace(/\s+/g, " ").trim();
+        const x = norm(a);
+        const y = norm(b);
+        return !!x && !!y && (x === y || x.indexOf(y) >= 0 || y.indexOf(x) >= 0);
+      };
+      if (!sameText(why, p.message_ru)) {
+        probeLine = ` Проверка связи: ${String(p.message_ru).trim().replace(/[.\s]+$/, "")}.`;
+      }
     }
     return {
       level,
@@ -5458,8 +5487,27 @@
     byId("license-active").hidden = unknown;
     byId("license-free").hidden = !unknown;
 
+    const freeTitle = byId("license-free-title");
+    if (freeTitle) {
+      freeTitle.textContent = snapshot.check_failed
+        ? "Не удалось проверить лицензию — её состояние сейчас неизвестно."
+        : "Лицензия не активирована — работает свободная редакция.";
+    }
+
     const unavailable = byId("license-unavailable");
-    if (status === "unavailable") {
+    if (snapshot.check_failed) {
+      // Отказ/таймаут CLI — это «не удалось проверить», а не «лицензии нет».
+      const why = String(snapshot.check_error || snapshot.detail || "CLI BPMkit не ответил").trim()
+        .replace(/[.\s]+$/, "");
+      const when = snapshot.stale && snapshot.checked_at ? formatDate(snapshot.checked_at) : "";
+      unavailable.hidden = false;
+      unavailable.textContent = snapshot.stale
+        ? `Не удалось обновить сведения о лицензии (${why}). Показаны данные последней ` +
+          `успешной проверки${when ? ` от ${when}` : ""}; проверка повторится автоматически.`
+        : `Не удалось проверить лицензию: ${why}. Это не значит, что лицензии нет: ` +
+          "проверка повторится автоматически. Если сообщение не пропадает — укажите путь " +
+          "к CLI в «Настройки → Основные».";
+    } else if (status === "unavailable") {
       unavailable.hidden = false;
       unavailable.textContent =
         `Проверить лицензию не удалось: ${snapshot.detail || "CLI BPMkit недоступен"}. ` +
@@ -5860,6 +5908,18 @@
   }
 
   function applyLicense(snapshot) {
+    // Проверку не удалось выполнить, а прежний снимок показывал действующую
+    // лицензию: окно «Обновления» и кнопки канала остаются в рабочем виде (лицензия
+    // «не проверена» ≠ «лицензии нет»); плашка с причиной — из check_failed.
+    if (snapshot && snapshot.check_failed && snapshot.status === "unavailable" &&
+        lastLicense && lastLicense.edition === "companion" &&
+        LICENSE_CHANNEL_STATUSES.indexOf(lastLicense.status) >= 0) {
+      snapshot = Object.assign({}, lastLicense, {
+        check_failed: true,
+        stale: true,
+        check_error: snapshot.check_error || snapshot.detail || "",
+      });
+    }
     lastLicense = snapshot;
     // «Есть лицензия» = действующая (в т.ч. истекающая). Истёкшая/отозванная —
     // тоже «нет лицензии» для канала издателя: бэкенд её не примет.
@@ -5886,12 +5946,25 @@
     maybeAutoNetProbe(snapshot);
   }
 
+  // Повтор проверки лицензии, пока CLI не отвечает: возврат в рабочий вид — сам,
+  // без перезапуска диспетчера и без нажатий. Один отложенный вызов за раз.
+  const LICENSE_RECHECK_MS = 30000;
+  let licenseRecheckTimer = null;
+
   async function refreshLicense() {
+    if (licenseRecheckTimer) {
+      clearTimeout(licenseRecheckTimer);
+      licenseRecheckTimer = null;
+    }
     try {
       const data = await apiGet("/api/license");
       applyLicense(data);
+      if (data && data.check_failed) {
+        licenseRecheckTimer = setTimeout(refreshLicense, LICENSE_RECHECK_MS);
+      }
     } catch (e) {
       byId("license-error").textContent = describeApiError(e);
+      licenseRecheckTimer = setTimeout(refreshLicense, LICENSE_RECHECK_MS);
     }
   }
 

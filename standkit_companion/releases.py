@@ -1744,6 +1744,16 @@ def stage_installer(client, state, ctx, version: str = LATEST) -> dict:
             kind="signature_not_available",
         )
 
+    # Канал «latest» может отстать от установленной поставки (опубликованная версия
+    # старше): тогда готовить нечего — тем же сравнением, что у `check()`, иначе
+    # кнопка «Установить» откатила бы установку. Явно названная версия не
+    # перехватывается: её просит вызывающий осознанно.
+    if target == LATEST and is_numeric_version(meta_version):
+        installed = _current_version(state, ctx)
+        if installed and compare_versions(meta_version, installed) <= 0:
+            return {"reason": "up_to_date", "staged": False, "version": meta_version,
+                    "current": installed, "filename": filename}
+
     pubkey_raw = signature.decode_pubkey(getattr(ctx, "artifact_pubkey", ""))
 
     staging = _staging_dir(ctx) / "installer"

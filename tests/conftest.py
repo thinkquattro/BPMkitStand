@@ -181,3 +181,16 @@ def _never_run_real_bpmkit_cli(monkeypatch):
 
     monkeypatch.setattr(_rm, "default_cli_runner", lambda argv, env=None, timeout=None: (1, "", ""))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _license_last_good_is_per_test():
+    """Последняя удачная сводка лицензии (память + файл песочницы) не переезжает
+    из теста в тест: иначе отказ CLI в одном тесте вернул бы «прежнюю» сводку другого."""
+    import standkit_hub.license_api as _la
+
+    _la._forget_good()
+    _la.invalidate_cache()
+    yield
+    _la._forget_good()
+    _la.invalidate_cache()
