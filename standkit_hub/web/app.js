@@ -472,7 +472,17 @@
     return false;
   }
 
+  // подсказка о последствии пустого публичного адреса маршрута этажа пользователя
+  function updatePublicUrlHint() {
+    const form = document.getElementById("register-form");
+    const input = form && form.elements.namedItem("public_url");
+    const hint = document.getElementById("register-public-url-empty-hint");
+    if (!input || !hint) return;
+    hint.hidden = !!input.value.trim();
+  }
+
   function updateRegisterConditionalFields() {
+    updatePublicUrlHint();
     const form = document.getElementById("register-form");
     const transport = form.elements.namedItem("transport").value;
     const hostKind = form.elements.namedItem("host_kind").value;
@@ -673,6 +683,8 @@
     "stand_url",
     "admin_user",
     "secret_ref_admin",
+    // публичный адрес маршрута этажа пользователя BPMkit Server (ссылки на файлы чата)
+    "public_url",
     // Доверие к сертификату АГЕНТА. Живут в условном блоке
     // транспорта agent (data-when-transport), поэтому при transport=local не
     // уезжают на сервер вовсе — включая чекбокс (см. ветку block.hidden ниже).
@@ -1167,6 +1179,7 @@
     // переключатель БД и адрес удалённого стенда (схема → verify_tls).
     form.elements.namedItem("has_db").addEventListener("change", updateRegisterConditionalFields);
     form.elements.namedItem("stand_url").addEventListener("input", updateRegisterConditionalFields);
+    form.elements.namedItem("public_url").addEventListener("input", updatePublicUrlHint);
 
     form.addEventListener("submit", async (evt) => {
       evt.preventDefault();
@@ -1183,9 +1196,12 @@
       try {
         const data = await apiSend("POST", editing ? "/api/stand/update" : "/api/stand/register", payload);
         closeRegisterModal();
+        // недоступный публичный адрес -- предупреждение: запись сохранена
+        const warnings = Array.isArray(data.warnings) ? data.warnings : [];
         showActionStatus(
-          `Стенд ${data.name || payload.name} ${editing ? "обновлён" : "зарегистрирован"}`,
-          false
+          `Стенд ${data.name || payload.name} ${editing ? "обновлён" : "зарегистрирован"}` +
+            (warnings.length ? `. ${warnings.join(" ")}` : ""),
+          warnings.length > 0
         );
         await refreshStands();
       } catch (e) {

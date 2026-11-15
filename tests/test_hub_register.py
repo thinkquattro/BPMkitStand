@@ -766,3 +766,102 @@ def test_gap1037_parse_stand_url_in_browser_js(tmp_path):
     assert (r[1]["url"], r[1]["scheme"], r[1]["port"]) == ("https://crm.example.test:8443/crm", "https", 8443)
     assert (r[2]["scheme"], r[2]["port"]) == ("http", 8080)
     assert r[3]["ok"] is False and r[4]["ok"] is False
+
+
+class TestGap1463PublicUrl:
+    """GAP-1463: публичный адрес маршрута этажа пользователя (public_url) в форме стенда,
+    проба ``GET <адрес>/healthz`` при сохранении -- предупреждение, а не отказ."""
+
+    _HTTP = {"name": "pub", "transport": "http", "stand_url": "https://crm.example.test",
+             "admin_user": "Supervisor"}
+
+    def _post(self, hub, path, payload):
+        base_url, token = hub
+        return _request(base_url, path, token=token, method="POST", origin=base_url,
+                        body=payload)[:2]
+
+    def _hub(self, tmp_path):
+        base_url, token, _config_path, registry_path, _ = _start_hub(tmp_path, stand_name="existing")
+        return (base_url, token), registry_path
+
+    def test_reachable_address_saved_and_checked(self, tmp_path, monkeypatch):
+        seen = []
+        monkeypatch.setattr(server_module, "_probe_public_url",
+                            lambda url, timeout=3.0: (seen.append(url) or True, "HTTP 200"))
+        hub, registry_path = self._hub(tmp_path)
+        status, body = self._post(hub, "/api/stand/register",
+                                  dict(self._HTTP, public_url="https://bpmkit.example.test/u/pub/"))
+        assert status == 200, body
+        assert body["public_url_check"]["ok"] is True
+        assert "warnings" not in body
+        assert seen == ["https://bpmkit.example.test/u/pub"]
+        stand = Registry.load(registry_path).get("pub")
+        assert stand.extra["public_url"] == "https://bpmkit.example.test/u/pub"
+
+    def test_unreachable_address_is_warning_not_refusal(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(server_module, "_probe_public_url",
+                            lambda url, timeout=3.0: (False, "HTTP 503"))
+        hub, registry_path = self._hub(tmp_path)
+        status, body = self._post(hub, "/api/stand/register",
+                                  dict(self._HTTP, public_url="https://bpmkit.example.test/u/pub"))
+        assert status == 200, body
+        assert body["public_url_check"]["ok"] is False
+        assert body["warnings"] and "HTTP 503" in body["warnings"][0]
+        assert Registry.load(registry_path).get("pub").extra["public_url"]
+
+    def test_invalid_address_is_400(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(server_module, "_probe_public_url",
+                            lambda url, timeout=3.0: (True, "HTTP 200"))
+        hub, _registry_path = self._hub(tmp_path)
+        status, body = self._post(hub, "/api/stand/register",
+                                  dict(self._HTTP, public_url="ftp://bpmkit.example.test"))
+        assert status == 400
+        assert "public_url" in body["fields"]
+
+    def test_config_returns_and_empty_update_clears(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(server_module, "_probe_public_url",
+                            lambda url, timeout=3.0: (True, "HTTP 200"))
+        hub, registry_path = self._hub(tmp_path)
+        status, body = self._post(hub, "/api/stand/register",
+                                  dict(self._HTTP, public_url="https://bpmkit.example.test/u/pub"))
+        assert status == 200, body
+        base_url, token = hub
+        status, cfg, _ = _request(base_url, "/api/stand/pub/config", token=token)
+        assert status == 200, cfg
+        assert cfg["config"]["public_url"] == "https://bpmkit.example.test/u/pub"
+        status, body = self._post(hub, "/api/stand/update", dict(self._HTTP, public_url=""))
+        assert status == 200, body
+        assert "public_url_check" not in body
+        assert "public_url" not in Registry.load(registry_path).get("pub").extra
+
+    def test_probe_hits_healthz(self):
+        import http.server
+        import threading
+
+        class _H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(200 if self.path.endswith("/healthz") and
+                                   self.path.startswith("/u/ok") else 404)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            base = "http://127.0.0.1:{}".format(httpd.server_address[1])
+            assert server_module._probe_public_url(base + "/u/ok/") == (True, "HTTP 200")
+            ok, detail = server_module._probe_public_url(base + "/u/missing")
+            assert (ok, detail) == (False, "HTTP 404")
+        finally:
+            httpd.shutdown()
+        ok, _detail = server_module._probe_public_url("http://127.0.0.1:1", timeout=0.5)
+        assert ok is False
+
+    def test_form_has_field_and_empty_hint(self):
+        html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+        assert 'name="public_url"' in html
+        assert 'id="register-public-url-empty-hint"' in html
+        assert "public_url" in _client_register_field_names()
+        assert "public_url" in _REGISTER_ALLOWED_FIELDS

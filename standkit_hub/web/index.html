@@ -293,6 +293,22 @@
             которых в форме нет (администратор, дистрибутив), остаются как были.
           </div>
 
+          <!-- публичный адрес маршрута этажа пользователя BPMkit Server: при
+               сохранении диспетчер проверяет GET <адрес>/healthz и предупреждает,
+               если адрес недоступен (запись всё равно сохраняется). -->
+          <label>Публичный адрес маршрута этажа пользователя (public_url)
+            <input type="text" name="public_url" placeholder="https://bpmkit.example.ru/u/имя-стенда" autocomplete="off" />
+            <small class="field-hint">
+              Адрес, по которому пользователи чата открывают маршрут этого стенда на BPMkit
+              Server. Из него строятся ссылки на файлы в ответах ассистента. При сохранении
+              проверяется доступность (<code>/healthz</code>).
+            </small>
+            <small class="field-hint" id="register-public-url-empty-hint">
+              Пусто: если стенд открыт пользователям через BPMkit Server, ссылки на файлы
+              будут относительными и из окна чата не откроются.
+            </small>
+          </label>
+
           <div class="form-row">
             <label>Транспорт
               <select name="transport">
