@@ -291,6 +291,10 @@ _REGISTER_ALLOWED_FIELDS = {
     "stand_url",
     "admin_user",
     "secret_ref_admin",
+    # Публичный адрес маршрута этажа пользователя BPMkit Server (тот, что видят
+    # пользователи чата): из него строятся абсолютные ссылки на файлы в ответах
+    # ассистента. Живёт в ``extra`` записи (его читает BPMkit, stand_update).
+    "public_url",
     # Доверие к сертификату АГЕНТА (канал «хаб → агент»), не путать с
     # stand_scheme/verify_tls выше — те про пробу самого стенда. Без этой пары
     # агент с самоподписанным сертификатом подключался только через
@@ -374,6 +378,39 @@ def _parse_stand_url(raw: str) -> tuple[Optional[dict], Optional[str]]:
         "host": parts.hostname,
         "port": port,
     }, None
+
+
+def _parse_public_url(raw: str) -> tuple[Optional[str], Optional[str]]:
+    """``public_url`` → (нормализованный адрес без хвостового «/», None) или (None, ошибка)."""
+    parsed, error = _parse_stand_url(raw)
+    if error:
+        return None, "public_url" + error[len("stand_url"):]
+    return parsed["url"], None
+
+
+def _probe_public_url(url: str, timeout: float = 3.0) -> tuple[bool, str]:
+    """Проба доступности публичного адреса: ``GET <адрес>/healthz``.
+
+    -> (доступен, пояснение). Любой ответ 2xx — доступен; иной код, сетевой сбой или
+    таймаут — недоступен с причиной. Сохранение записи от пробы не зависит: это
+    предупреждение, а не отказ (адрес может открываться только снаружи сети хаба).
+    """
+    import urllib.error
+    import urllib.request
+
+    target = str(url or "").rstrip("/") + "/healthz"
+    req = urllib.request.Request(target, method="GET", headers={"User-Agent": "standkit-hub"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 -- адрес из формы
+            code = int(getattr(resp, "status", 0) or resp.getcode() or 0)
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}"
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        return False, str(reason) or type(exc).__name__
+    if 200 <= code < 300:
+        return True, f"HTTP {code}"
+    return False, f"HTTP {code}"
 
 
 def _normalize_http_record(record: dict, body: dict, *, creating: bool) -> None:
@@ -2229,6 +2266,13 @@ def make_handler(
                 if url_error:
                     errors.append(url_error)
                     bad_fields.append("stand_url")
+            if data.get("public_url"):
+                public_url, public_error = _parse_public_url(str(data["public_url"]))
+                if public_error:
+                    errors.append(public_error)
+                    bad_fields.append("public_url")
+                else:
+                    data["public_url"] = public_url
 
             if errors:
                 self._send_json(400, {"error": "; ".join(errors), "fields": bad_fields})
@@ -2241,6 +2285,8 @@ def make_handler(
                     merged.pop("engine", None)
             else:
                 merged = dict(data)
+            if not merged.get("public_url"):
+                merged.pop("public_url", None)   # пустое поле «Изменить» снимает адрес
             if str(merged.get("transport") or Transport.LOCAL.value) == Transport.HTTP.value:
                 _normalize_http_record(merged, body, creating=existing is None)
             stand = Stand.from_dict(name, merged)
@@ -2306,6 +2352,18 @@ def make_handler(
                 result["updated"] = True
             if secret_saved:
                 result["secret_saved"] = True
+            public_url = str(stand.extra.get("public_url") or "")
+            if public_url:
+                # проба после записи: недоступный адрес -- предупреждение, не отказ
+                reachable, detail = _probe_public_url(public_url)
+                result["public_url_check"] = {
+                    "ok": reachable, "url": public_url + "/healthz", "detail": detail,
+                }
+                if not reachable:
+                    result["warnings"] = [
+                        f"Публичный адрес {public_url} сейчас недоступен ({detail}): запись "
+                        "сохранена; проверьте адрес и публикацию маршрута этажа пользователя."
+                    ]
             self._send_json(200, result)
 
         def _api_stand_update(self) -> None:
