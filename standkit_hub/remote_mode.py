@@ -38,6 +38,7 @@ import io
 import json
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -85,7 +86,15 @@ TOKEN_ENV_VAR = "BPMKIT_REMOTE_TOKEN_VALUE"
 #: Ответ CLI на статус токена кэшируется: статус удалённого режима опрашивается часто, а запуск
 #: ``BPMkit.exe`` -- это процесс (холодный старт под антивирусом до секунд).
 _TOKEN_CACHE_TTL_S = 20.0
-_TOKEN_CLI_TIMEOUT_S = 15.0
+#: Таймаут запуска CLI для ЧТЕНИЯ статуса токена. Статус опрашивается часто, поэтому ждать его
+#: дольше нескольких секунд нельзя; но холодный старт ``BPMkit.exe`` на медленной машине --
+#: до 17-18 с (замер приёмки на госте), так что порог с запасом выше этого.
+_TOKEN_CLI_TIMEOUT_S = 30.0
+#: Таймаут запуска CLI для ЗАПИСИ в хранилище секретов (создать/задать токен). Это разовое
+#: действие человека по кнопке: убитый по таймауту процесс мог уже записать токен, а ответ
+#: «не удалось» вводит в заблуждение, поэтому ждём заведомо дольше холодного старта (17,5 с на
+#: медленном госте). Страница на это время показывает, что идёт работа.
+_TOKEN_WRITE_CLI_TIMEOUT_S = 90.0
 _TOKEN_CACHE: dict = {}
 _TOKEN_CACHE_LOCK = threading.Lock()
 
@@ -99,6 +108,9 @@ def invalidate_token_cache() -> None:
 def default_cli_runner(argv: list, env: Optional[dict] = None, timeout: float = _TOKEN_CLI_TIMEOUT_S) -> tuple:
     """Запуск CLI BPMkit: ``(rc, stdout, stderr)``; любой сбой запуска -- ``rc=-1``.
 
+    Таймаут выбирает вызывающий: чтение статуса -- ``_TOKEN_CLI_TIMEOUT_S``, запись в хранилище
+    секретов -- ``_TOKEN_WRITE_CLI_TIMEOUT_S``. Отказ по таймауту -- ``rc=-1`` с понятным текстом.
+
     ``run_console_tree``: без мигающего окна, по таймауту умирает всё дерево, stdin -- DEVNULL."""
     import os
     kwargs: dict = dict(capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -110,6 +122,9 @@ def default_cli_runner(argv: list, env: Optional[dict] = None, timeout: float = 
     try:
         proc = run_console_tree(list(argv), **kwargs)
     except Exception as exc:  # noqa: BLE001 - один вид отказа наружу
+        if isinstance(exc, subprocess.TimeoutExpired):
+            return -1, "", (f"BPMkit.exe не ответил за {int(timeout)} с (медленная машина или "
+                            "антивирус проверяет запуск). Повторите: токен мог быть уже создан.")
         return -1, "", f"{type(exc).__name__}: {exc}"
     rc = proc.returncode if proc.returncode is not None else -1
     return int(rc), proc.stdout or "", proc.stderr or ""
@@ -356,7 +371,8 @@ class RemoteModeController:
             if hit is not None and now - hit[0] < _TOKEN_CACHE_TTL_S:
                 return hit[1]
         rc, _out, _err = self._cli_runner(
-            list(cli) + ["setup", "remote-token", "--status", "--ref", ref])
+            list(cli) + ["setup", "remote-token", "--status", "--ref", ref],
+            None, _TOKEN_CLI_TIMEOUT_S)
         if rc == 0:
             present = True
         elif rc == 1:
@@ -382,7 +398,7 @@ class RemoteModeController:
                            "или установите BPMkit.")
         rc, out, err = self._cli_runner(
             list(cli) + ["setup", "remote-token", "--from-env", TOKEN_ENV_VAR, "--ref", ref, "--force"],
-            {TOKEN_ENV_VAR: str(value)})
+            {TOKEN_ENV_VAR: str(value)}, _TOKEN_WRITE_CLI_TIMEOUT_S)
         invalidate_token_cache()
         if rc == 0:
             return True, "Токен сохранён в хранилище секретов BPMkit."
@@ -403,7 +419,7 @@ class RemoteModeController:
         argv = list(cli) + ["setup", "remote-token", "--generate", "--ref", ref]
         if force:
             argv.append("--force")
-        rc, out, err = self._cli_runner(argv)
+        rc, out, err = self._cli_runner(argv, None, _TOKEN_WRITE_CLI_TIMEOUT_S)
         invalidate_token_cache()
         if rc == 0:
             return True, "Токен создан и сохранён в хранилище секретов BPMkit."

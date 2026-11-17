@@ -686,3 +686,67 @@ class TestGap612TokenApi:
         web = Path(server_module.__file__).parent / "web"
         assert 'id="mcpremote-generate-token-btn"' in (web / "index.html").read_text(encoding="utf-8")
         assert "/api/remote/token/generate" in (web / "app.js").read_text(encoding="utf-8")
+
+
+
+class TestGap1486TokenCliTimeouts:
+    """Кнопка «Сгенерировать токен»: холодный старт CLI на медленном госте 17,5 с не должен
+    давать отказ по таймауту (был потолок 15 с на любой вызов CLI)."""
+
+    class _SlowCli(_FakeBpmkitCli):
+        """CLI, который «занимает» 17,5 с: при меньшем таймауте вызывающего -- отказ как у
+        настоящего ``subprocess`` по таймауту (rc=-1), при достаточном -- обычный ответ."""
+        COLD_START_S = 17.5
+
+        def __init__(self):
+            super().__init__()
+            self.timeouts: list = []
+
+        def __call__(self, argv, env=None, timeout=None):
+            self.timeouts.append(timeout)
+            if timeout is not None and timeout < self.COLD_START_S:
+                return -1, "", "TimeoutExpired: timed out after %s seconds" % timeout
+            return super().__call__(argv, env, timeout)
+
+    def test_generate_survives_slow_cold_start(self, tmp_path, fresh_token_cache):
+        cli = self._SlowCli()
+        _w, c = _ctl(tmp_path, cli)
+        ok, message = c.generate_token()
+        assert ok, message
+        assert cli.store[DEFAULT_REMOTE_TOKEN_REF]
+        assert cli.timeouts[-1] >= 60
+
+    def test_set_token_survives_slow_cold_start(self, tmp_path, fresh_token_cache):
+        cli = self._SlowCli()
+        _w, c = _ctl(tmp_path, cli)
+        ok, message = c.set_token("x" * 32)
+        assert ok, message
+        assert cli.timeouts[-1] >= 60
+
+    def test_status_poll_stays_bounded_but_above_cold_start(self, tmp_path, fresh_token_cache):
+        cli = self._SlowCli()
+        _w, c = _ctl(tmp_path, cli)
+        c.token_present(fresh=True)
+        t = cli.timeouts[-1]
+        assert cli.COLD_START_S < t <= 45, "статус опрашивается часто: ждать минуту нельзя"
+
+    def test_constants_are_ordered(self):
+        assert rm._TOKEN_CLI_TIMEOUT_S > 17.5
+        assert rm._TOKEN_WRITE_CLI_TIMEOUT_S >= 60
+        assert rm._TOKEN_WRITE_CLI_TIMEOUT_S > rm._TOKEN_CLI_TIMEOUT_S
+
+    def test_default_runner_timeout_gives_human_text_not_exception_name(self, monkeypatch):
+        import subprocess as sp
+        monkeypatch.undo()  # вернуть настоящий default_cli_runner (автофикстура его подменяет)
+
+        def boom(argv, **kw):
+            raise sp.TimeoutExpired(argv, kw["timeout"])
+        monkeypatch.setattr(rm, "run_console_tree", boom)
+        rc, out, err = rm.default_cli_runner(["BPMkit.exe"], None, 90.0)
+        assert rc == -1
+        assert "90" in err and "TimeoutExpired" not in err
+
+    def test_ui_tells_the_user_the_slow_generation_is_in_progress(self):
+        web = Path(server_module.__file__).parent / "web"
+        js = (web / "app.js").read_text(encoding="utf-8")
+        assert "Создаю токен" in js

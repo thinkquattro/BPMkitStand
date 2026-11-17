@@ -3116,6 +3116,9 @@
         errorEl.textContent = "";
         if (tokenMsg) tokenMsg.textContent = "";
         genBtn.disabled = true;
+        // Первый запуск BPMkit.exe на медленной машине занимает до десятков секунд: пока идёт
+        // работа, показываем это, а не молчим (кнопка заблокирована).
+        if (tokenMsg) tokenMsg.textContent = "Создаю токен… на медленной машине это может занять до полутора минут.";
         try {
           await saveRemoteFields(); // ссылка на токен берётся из формы
           const data = await apiSend("POST", "/api/remote/token/generate", {});
@@ -3124,6 +3127,7 @@
           await refreshSecretStatuses();
         } catch (e) {
           // «уже задан» -- не поломка: ротация обрывает клиентов, поэтому только осознанно.
+          if (tokenMsg) tokenMsg.textContent = "";
           errorEl.textContent = describeApiError(e);
         } finally {
           genBtn.disabled = false;
