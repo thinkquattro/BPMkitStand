@@ -200,3 +200,32 @@ def test_poller_snapshot_error_is_logged(caplog):
     # Молчаливый снапшот-отказ — ровно та слепота, из-за которой хаб вышел при
     # живых стендах: ошибка обязана оставить след.
     assert any("реестр недоступен" in r.getMessage() for r in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# Единый формат строки: ISO-время UTC, уровень, компонент (общий минимум с журналами MCP)
+# --------------------------------------------------------------------------
+
+
+def test_hub_log_line_has_iso_utc_level_and_component(tmp_path):
+    """Архив диагностики сводит hub.log с JSONL-журналами MCP по трём полям: ts (ISO UTC, ``Z``),
+    level, component. Формат hub.log -- текст ``<ts> <LEVEL> [<component>] <текст>``; сторож не
+    даёт вернуть локальное время без зоны или потерять уровень/компонент."""
+    import re
+    path = hub_logging.setup_logging(log_dir=tmp_path, force=True)
+    try:
+        hub_logging.logger().info("первая строка")
+        hub_logging.logger().warning("вторая строка")
+        hub_logging.logger().error("третья строка")
+        for handler in hub_logging.logger().handlers:
+            handler.flush()
+        lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    finally:
+        hub_logging.reset_logging()
+    pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z "
+                         r"(DEBUG|INFO|WARNING|ERROR|CRITICAL) +\[[\w.]+\] .+")
+    texts = [ln for ln in lines if "строка" in ln]
+    assert len(texts) == 3
+    for ln in texts:
+        assert pattern.match(ln), ln
+    assert [ln.split()[1] for ln in texts] == ["INFO", "WARNING", "ERROR"]
