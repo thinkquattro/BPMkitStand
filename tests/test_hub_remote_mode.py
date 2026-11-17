@@ -667,6 +667,22 @@ class TestGap612TokenApi:
                                    token=token, method="POST", origin=base_url, body={"value": "tiny"})
         assert status == 400 and "короче 16" in body["error"]
 
+    def test_delete_of_remote_ref_is_honest_refusal_not_false_ok(self, hub):
+        """DELETE токена удалённого режима не уходит в хранилище standkit и не отвечает ok:true."""
+        base_url, token, cli = hub
+        ref = DEFAULT_REMOTE_TOKEN_REF
+        cli.store[ref] = "z" * 32
+        rm.invalidate_token_cache()
+        status, body, _ = _request(base_url, "/api/secret/" + ref.replace(":", "%3A"),
+                                   token=token, method="DELETE", origin=base_url)
+        assert status == 400 and "ok" not in body
+        assert "setup secrets delete" in body["error"]
+        assert "z" * 32 not in json.dumps(body)
+        assert cli.store[ref] == "z" * 32                   # токен BPMkit не тронут
+        rm.invalidate_token_cache()
+        status, body, _ = _request(base_url, "/api/secret/" + ref.replace(":", "%3A"), token=token)
+        assert body["has_secret"] is True                   # статус не врёт
+
     def test_generate_endpoint_requires_mutation_auth_and_hides_value(self, hub):
         base_url, token, cli = hub
         status, _b, _ = _request(base_url, "/api/remote/token/generate", token=token, method="POST", body={})
