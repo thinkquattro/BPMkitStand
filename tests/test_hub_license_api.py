@@ -733,3 +733,68 @@ def test_topbar_has_no_text_glyph_icons():
     for glyph in ("ⓘ", "▭", "▣", "🌓", ">?<"):
         assert glyph not in header, f"в шапке остался текстовый глиф {glyph!r}"
     assert header.count("<svg") >= 5, "иконки шапки перестали быть SVG"
+
+
+# ======================================================================================
+# Файл статуса лицензии, который пишет MCP (хаб читает без запуска exe)
+# ======================================================================================
+def _write_status(summary, valid_until, schema=1):
+    path = license_api.status_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": schema, "written_at": 0,
+                                "valid_until": valid_until, "ttl_sec": 300,
+                                "mcp_version": "1.0.0", "summary": summary},
+                               ensure_ascii=False), encoding="utf-8")
+
+
+def test_status_file_path_env_and_default(tmp_path, monkeypatch):
+    target = tmp_path / "s.json"
+    monkeypatch.setenv(license_api.STATUS_FILE_ENV, str(target))
+    assert license_api.status_file_path() == target
+    monkeypatch.delenv(license_api.STATUS_FILE_ENV)
+    assert license_api.status_file_path().name == "license_status.json"
+
+
+def test_license_info_reads_fresh_status_file_without_cli_run(cli_path):
+    _write_status(INFO_OK, time.time() + 300)
+    runs = _Runs((1, "", "не должен запускаться"))
+
+    payload = license_api.license_info(_settings(cli_path), run=runs)
+
+    assert runs.calls == []
+    assert payload["edition"] == "companion"
+    assert payload["status"] == "valid"
+    assert payload["from_status_file"] is True
+    assert payload["cli"] == str(cli_path)
+
+
+def test_license_info_expired_status_file_falls_back_to_cli(cli_path):
+    _write_status({"status": "expired"}, time.time() - 1)
+    runs = _Runs((0, json.dumps(INFO_OK), ""))
+
+    payload = license_api.license_info(_settings(cli_path), run=runs)
+
+    assert len(runs.calls) == 1
+    assert payload["status"] == "valid"
+    assert "from_status_file" not in payload
+
+
+def test_license_info_broken_or_foreign_status_file_falls_back(cli_path):
+    path = license_api.status_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{oops", encoding="utf-8")
+    assert license_api.read_status_file() is None
+    _write_status(INFO_OK, time.time() + 300, schema=99)
+    assert license_api.read_status_file() is None
+    runs = _Runs((0, json.dumps(INFO_OK), ""))
+    license_api.license_info(_settings(cli_path), run=runs)
+    assert len(runs.calls) == 1
+
+
+def test_invalidate_cache_removes_status_file(cli_path):
+    _write_status(INFO_OK, time.time() + 300)
+    assert license_api.status_file_path().exists()
+    license_api.invalidate_cache()
+    assert not license_api.status_file_path().exists()
+    license_api.invalidate_cache()  # повтор без файла не падает
+

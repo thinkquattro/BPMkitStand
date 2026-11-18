@@ -194,3 +194,12 @@ def _license_last_good_is_per_test():
     yield
     _la._forget_good()
     _la.invalidate_cache()
+
+
+@pytest.fixture(autouse=True)
+def _license_status_file_is_per_test(tmp_path, monkeypatch):
+    """Файл статуса лицензии (его пишет MCP) -- во временном каталоге теста: хаб не должен
+    читать и удалять настоящий файл пользователя."""
+    monkeypatch.setenv("BPMKIT_LICENSE_STATUS_FILE",
+                       str(tmp_path / "_status" / "license_status.json"))
+    yield
