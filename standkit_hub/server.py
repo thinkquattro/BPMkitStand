@@ -148,6 +148,12 @@ _STAND_ACTION_RE = re.compile(
 # /logs/list и /logs/file удалены вместе с фронтом, который их использовал.
 _STAND_LOGS_SUB_RE = re.compile(r"^/api/stand/(?P<name>[^/]+)/logs/(?P<sub>open-folder)$")
 _SECRET_RE = re.compile(r"^/api/secret/(?P<ref>[^/]+)$")
+#: Отказ на DELETE токена удалённого режима: токен хранит BPMkit, диспетчер его не удаляет.
+REMOTE_TOKEN_DELETE_REFUSAL = (
+    "Токен удалённого режима хранит BPMkit (его читает serve-http), диспетчер удалить его не "
+    "может. Замените токен кнопкой «Сгенерировать» или «Задать…», либо удалите его в своём "
+    "терминале: BPMkit.exe setup secrets delete <ссылка токена> (если носитель -- файл, "
+    "удалите файл, указанный в BPMKIT_REMOTE_TOKEN_FILE).")
 
 
 def _secret_ref_from_path(match: "re.Match[str]") -> str:
@@ -2643,6 +2649,11 @@ def make_handler(
         def _api_secret_delete(self, ref: str) -> None:
             if not _security.validate_secret_ref(ref):
                 self._send_json(400, {"error": "invalid secret ref"})
+                return
+            if self._remote_token_controller(ref) is not None:
+                # токен удалённого режима хранит BPMkit (его читает serve-http), а не standkit:
+                # delete_secret(ref) убрал бы не тот токен и вернул бы ложное ok:true.
+                self._send_json(400, {"error": REMOTE_TOKEN_DELETE_REFUSAL})
                 return
             try:
                 delete_secret(ref)
