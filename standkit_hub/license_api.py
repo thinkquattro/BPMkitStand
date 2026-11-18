@@ -70,6 +70,10 @@ __all__ = [
     "EDITION_COMPANION",
     "EDITION_FREE",
     "CACHE_TTL_SEC",
+    "STATUS_FILE_ENV",
+    "STATUS_FILE_NAME",
+    "status_file_path",
+    "read_status_file",
     "LICENSE_INFO_TAIL",
     "LICENSE_STORE_TAIL",
     "LICENSE_DEACTIVATE_TAIL",
@@ -106,6 +110,13 @@ LICENSE_REFRESH_TAIL = ("setup", "license-info", "--json", "--refresh")
 #: Сколько живёт сводка. Минута — компромисс между «не запускать процесс на каждый
 #: тик UI» и «истёкшая лицензия замечается в пределах минуты».
 CACHE_TTL_SEC = 60.0
+
+# Файл статуса лицензии, который пишет сам MCP (`setup license-info`): хаб читает его
+# БЕЗ запуска exe, пока не истёк `valid_until`; нет файла/битый/просрочен -- обычный
+# путь через CLI. Имя переменной и файла -- контракт ядра (licensing.license_status_path).
+STATUS_FILE_ENV = "BPMKIT_LICENSE_STATUS_FILE"
+STATUS_FILE_NAME = "license_status.json"
+STATUS_FILE_SCHEMA = 1
 
 #: Ожидание ответа CLI. Как в context.py: с запасом на холодный старт `.exe` под
 #: антивирусом. У записи ключа запас больше — она ещё и ходит в сеть к издателю
@@ -402,6 +413,34 @@ def _failed_snapshot(exc: "LicenseCliError", cli: list, source: Optional[str]) -
     return snap
 
 
+def status_file_path() -> Path:
+    """Путь файла статуса лицензии: env `BPMKIT_LICENSE_STATUS_FILE`, иначе
+    `license_status.json` в каталоге конфигурации BPMkit (тот же, что у ядра)."""
+    override = (os.environ.get(STATUS_FILE_ENV) or "").strip()
+    if override:
+        return Path(override)
+    return Path(bpmkit_config_dir()) / STATUS_FILE_NAME
+
+
+def read_status_file(now: Optional[float] = None) -> Optional[dict]:
+    """Сводка из файла статуса MCP или None (нет файла, битый JSON, чужая схема,
+    срок `valid_until` истёк). Ничего не бросает: любой сбой = идти через CLI."""
+    try:
+        with open(status_file_path(), "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        if not isinstance(doc, dict) or doc.get("schema") != STATUS_FILE_SCHEMA:
+            return None
+        summary = doc.get("summary")
+        if not isinstance(summary, dict) or not summary:
+            return None
+        ts = time.time() if now is None else float(now)
+        if float(doc.get("valid_until") or 0) < ts:
+            return None
+        return dict(summary)
+    except Exception:
+        return None
+
+
 def license_info(settings, *, run: Optional[Callable] = None,
                  cache_ttl: float = CACHE_TTL_SEC) -> dict:
     """Сводка лицензии для `GET /api/license` (с кэшем на `cache_ttl` секунд).
@@ -425,6 +464,16 @@ def license_info(settings, *, run: Optional[Callable] = None,
     cached = _cache_get(key)
     if cached is not None:
         return cached
+
+    # Файл статуса от MCP: без запуска процесса (экран лицензии из кэша быстро).
+    from_file = read_status_file()
+    if from_file is not None:
+        snapshot = _companion_snapshot(from_file, cli, source)
+        snapshot["ok"] = True
+        snapshot["from_status_file"] = True
+        _cache_put(key, snapshot, cache_ttl)
+        _remember_good(snapshot)
+        return snapshot
 
     with _info_lock:
         cached = _cache_get(key)
@@ -654,9 +703,11 @@ def _unlink_quietly(path: Path) -> None:
 # Кэш
 # ------------------------------------------------------------------------------------
 def invalidate_cache() -> None:
-    """Сбросить кэш сводки. Зовётся после КАЖДОЙ мутации лицензии."""
+    """Сбросить кэш сводки. Зовётся после КАЖДОЙ мутации лицензии. Файл статуса MCP тоже
+    удаляется: иначе до конца его срока годности показался бы статус прежнего ключа."""
     with _cache_lock:
         _cache.clear()
+    _unlink_quietly(status_file_path())
 
 
 def reset_net_probe() -> None:
